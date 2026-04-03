@@ -27,9 +27,9 @@ Updated: 2026-03-30 by Constructor Tech
   - [3.8 Capacity, Cost, and Deployment Exclusions](#38-capacity-cost-and-deployment-exclusions)
 - [4. Additional Context](#4-additional-context)
   - [Relationship to the Serverless Runtime Design](#relationship-to-the-serverless-runtime-design)
+  - [Comparison with Similar Solutions](#comparison-with-similar-solutions)
   - [Known Technical Debt](#known-technical-debt)
   - [Crate Naming Convention](#crate-naming-convention)
-  - [Comparison with Similar Solutions](#comparison-with-similar-solutions)
 - [5. Non-Applicable Domains](#5-non-applicable-domains)
 - [6. Traceability](#6-traceability)
 
@@ -66,11 +66,10 @@ STANDARDS ALIGNMENT:
 DESIGN LANGUAGE:
   - Be specific and clear; no fluff, bloat, or emoji
   - Reference PRD requirements using `cpt-cf-serverless-sdk-core-fr-{slug}` IDs
-  - Reference ADR documents using `cpt-cf-serverless-sdk-core-adr-{slug}` IDs
 =============================================================================
 -->
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-design-root`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-design-root`
 ## 1. Architecture Overview
 
 ### 1.1 Architectural Vision
@@ -82,15 +81,13 @@ traits and value types that adapter crates implement and drive.
 
 The design organises the public surface into five concern-separated modules (`context`,
 `environment`, `error`, `handler`, `workflow`) with a sixth adapter-only module (`trace`)
-that isolates all observability wiring. The module boundaries enforce a strict separation:
-adapter developers implement against the five core modules and additionally use `trace`.
-Function authors interact with the platform only through the adapter's authoring model —
-never directly with this crate. No module references an engine-specific type.
+that isolates all observability wiring. Adapter developers are the primary consumers of
+this crate: they implement the handler and workflow traits, populate `Context` and
+`Environment`, and wire the `trace` module. No module references an engine-specific type.
 
 The `async-trait` crate is used for the handler and workflow traits, making them ergonomic
 to implement and ensuring the `Future` returned from `call` and `compensate` is `+ Send`
-without requiring callers to annotate anything
-(`cpt-cf-serverless-sdk-core-adr-async-trait`).
+without requiring callers to annotate anything.
 
 ### 1.2 Architecture Drivers
 
@@ -104,7 +101,7 @@ without requiring callers to annotate anything
 | `cpt-cf-serverless-sdk-core-fr-compensation-input` | `CompensationInput` struct in `workflow.rs`, `#[non_exhaustive]` |
 | `cpt-cf-serverless-sdk-core-fr-context` | `Context` struct in `context.rs` with 9 fields from `InvocationRecord` |
 | `cpt-cf-serverless-sdk-core-fr-deadline-helpers` | `is_deadline_exceeded()` and `remaining_time()` on `Context` |
-| `cpt-cf-serverless-sdk-core-fr-environment-trait` | Sync `Environment` trait in `environment.rs` (`cpt-cf-serverless-sdk-core-adr-sync-environment`) |
+| `cpt-cf-serverless-sdk-core-fr-environment-trait` | Sync `Environment` trait in `environment.rs` |
 | `cpt-cf-serverless-sdk-core-fr-error-model` | `#[non_exhaustive]` `ServerlessSdkError` with `thiserror` in `error.rs` |
 | `cpt-cf-serverless-sdk-core-fr-trace-module` | `trace.rs` with `call_instrumented` and `compensate_instrumented` |
 | `cpt-cf-serverless-sdk-core-fr-no-consumer-tracing` | `tracing` calls contained entirely within `trace.rs` |
@@ -114,31 +111,32 @@ without requiring callers to annotate anything
 | NFR ID | NFR Summary | Allocated To | Design Response | Verification Approach |
 |--------|-------------|--------------|-----------------|----------------------|
 | `cpt-cf-serverless-sdk-core-nfr-no-engine-deps` | No engine-specific deps | All modules | Dep list restricted to `serde`, `serde_json`, `thiserror`, `async-trait`, `tracing` | `cargo deny` in CI |
-| `cpt-cf-serverless-sdk-core-nfr-stable-rust` | Stable Rust 1.92.0 | `handler.rs`, `workflow.rs` | `async-trait` used instead of unstable RPITIT with `Send` bound | `cargo check` on stable in CI |
 | `cpt-cf-serverless-sdk-core-nfr-no-unsafe` | Zero `unsafe` blocks | All modules | Workspace `unsafe_code = "forbid"` lint; no pointer manipulation | Lint enforced at compile time |
 | `cpt-cf-serverless-sdk-core-nfr-low-overhead` | No blocking I/O or extra heap allocs on hot path | `trace.rs`, `handler.rs` | `call_instrumented` introduces one `Box<dyn Future>` (async-trait) and one `tracing` span; no additional heap allocations on the hot path | Criterion benchmark in CI |
 | `cpt-cf-serverless-sdk-core-nfr-api-docs` | Zero missing-doc warnings; `#![deny(missing_docs)]` | All public items | All public types, traits, and functions documented with purpose, usage, and invariants | `cargo doc --no-deps` in CI |
-| `cpt-cf-serverless-sdk-core-nfr-authoring-ergonomics` | Plain `async fn` syntax; no lifetime annotations on handler impls | `handler.rs`, `workflow.rs` | `async-trait` expands `async fn` to `Pin<Box<dyn Future + Send>>` internally, keeping the `impl` surface annotation-free (`cpt-cf-serverless-sdk-core-adr-async-trait`) | SDK examples and integration tests compile with `async fn` syntax; CI fails on any explicit `impl Future` or lifetime annotation on method signatures |
+| `cpt-cf-serverless-sdk-core-nfr-authoring-ergonomics` | Plain `async fn` syntax; no lifetime annotations on handler impls | `handler.rs`, `workflow.rs` | `async-trait` expands `async fn` to `Pin<Box<dyn Future + Send>>` internally, keeping the `impl` surface annotation-free | SDK examples and integration tests compile with `async fn` syntax; CI fails on any explicit `impl Future` or lifetime annotation on method signatures |
 
-#### Key ADRs
+#### Key Design Decisions
 
-| ADR ID | Decision Summary |
-|--------|-----------------|
-| `cpt-cf-serverless-sdk-core-adr-async-trait` | Use `async-trait` over RPITIT for `FunctionHandler` and `WorkflowHandler` |
-| `cpt-cf-serverless-sdk-core-adr-sync-environment` | `Environment` interface is synchronous (adapter pre-fetch model) |
-| `cpt-cf-serverless-sdk-core-adr-compensation-input` | `CompensationInput` is a structured type, not a generic handler input |
-| `cpt-cf-serverless-sdk-core-adr-context-struct` | `Context` is a concrete struct, not a trait or generic parameter |
-| `cpt-cf-serverless-sdk-core-adr-error-enum` | `ServerlessSdkError` is a `#[non_exhaustive]` enum, not a trait object or opaque error |
-| `cpt-cf-serverless-sdk-core-adr-workflow-supertrait` | `WorkflowHandler<I,O>: Handler<I,O>` supertrait, not an independent trait |
+| Decision | Summary |
+|----------|---------|
+| `async-trait` over RPITIT | Use `async-trait` for `FunctionHandler` and `WorkflowHandler` until RPITIT with `Send` bound is fully stable |
+| Synchronous `Environment` | Adapter pre-fetches config/secrets before invocation; no async resolution inside handlers |
+| Structured `CompensationInput` | Dedicated struct with named fields, not a generic handler input parameter |
+| Concrete `Context` struct | Not a trait or generic parameter — keeps construction simple and adapter-side mapping explicit |
+| `#[non_exhaustive]` error enum | `ServerlessSdkError` is an enum (not a trait object) for exhaustive `RuntimeErrorCategory` mapping |
+| `WorkflowHandler` supertrait | `WorkflowHandler<I,O>: FunctionHandler<I,O>` — every workflow is a function |
 
 ### 1.3 Architecture Layers
 
 ```
 ╔══════════════════════════════════════════════════════╗
-║  Function / Workflow Author                          ║
-║  implements FunctionHandler<I, O> or WorkflowHandler<I, O>   ║
+║  Adapter crate (cf-serverless-sdk-adapter-*)         ║
+║  implements FunctionHandler<I, O> / WorkflowHandler  ║
+║  populates Context, Environment; wires trace module  ║
+║  (Temporal, Starlark, cloud FaaS — out of scope)      ║
 ╚═══════════════════════╤══════════════════════════════╝
-                        │ uses
+                        │ depends on
 ╔═══════════════════════▼══════════════════════════════╗
 ║  cf-serverless-sdk-core  (this crate)                ║
 ║  ┌──────────┐ ┌───────────┐ ┌───────┐ ┌──────────┐  ║
@@ -147,19 +145,13 @@ without requiring callers to annotate anything
 ║  ┌─────────────────┐ ┌───────────────────────────┐   ║
 ║  │  environment    │ │  trace  (adapter-only)     │   ║
 ║  └─────────────────┘ └───────────────────────────┘   ║
-╚═══════════════════════╤══════════════════════════════╝
-                        │ drives via traits
-╔═══════════════════════▼══════════════════════════════╗
-║  Adapter crate (cf-serverless-sdk-adapter-*)         ║
-║  (Temporal, Starlark, cloud FaaS — out of scope)      ║
 ╚══════════════════════════════════════════════════════╝
 ```
 
 | Layer | Responsibility | Technology |
 |-------|---------------|------------|
-| Handler Author | Implements `FunctionHandler<I, O>` / `WorkflowHandler<I, O>` | Rust + `async-trait` |
+| Adapter Developer | Implements `FunctionHandler<I, O>` / `WorkflowHandler<I, O>`; populates `Context` and `Environment`; wires `trace` | Rust + `async-trait` |
 | SDK Core (this crate) | Defines traits, types, error model, instrumentation | Rust stable, `serde`, `tracing` |
-| Adapter | Drives handlers, populates `Context` and `Environment`, emits spans | Out of scope (future adapter crates) |
 
 ---
 
@@ -169,7 +161,7 @@ without requiring callers to annotate anything
 
 #### Implementation-Agnostic Authoring Contract
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-principle-impl-agnostic`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-principle-impl-agnostic`
 
 No engine-specific type appears in the public API of this crate. `Context`, `Environment`,
 `CompensationInput`, and `ServerlessSdkError` are entirely defined in terms of stable
@@ -177,13 +169,12 @@ platform concepts (GTS IDs as `String`, `serde_json::Value` for opaque payloads)
 depending on any adapter. This directly enforces
 `cpt-cf-serverless-runtime-principle-impl-agnostic` at the SDK layer.
 
-**ADRs**: `cpt-cf-serverless-sdk-core-adr-sync-environment` — `Environment` is synchronous
-precisely because an async interface would require the trait to hold a live credstore client,
-violating this principle.
+`Environment` is synchronous precisely because an async interface would require the trait
+to hold a live credstore client, violating this principle.
 
 #### GTS Identity by Reference
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-principle-gts-by-reference`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-principle-gts-by-reference`
 
 GTS type IDs (`function_id`, `error_type_id`, GTS chain strings) are carried as opaque
 `String` values throughout the crate. The SDK never interprets, parses, or validates GTS
@@ -191,7 +182,7 @@ chains. This prevents coupling to GTS library versions and keeps the crate porta
 
 #### Minimal Trusted Surface
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-principle-minimal-surface`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-principle-minimal-surface`
 
 The crate exposes exactly the types and traits required for handler authoring and adapter
 driving. No utility types, convenience wrappers, or domain-specific helpers are added
@@ -202,17 +193,15 @@ by a PRD requirement ID.
 
 #### No Engine Dependencies — Ever
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-constraint-no-engine-deps`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-constraint-no-engine-deps`
 
 The `[dependencies]` section of `Cargo.toml` must never include engine-specific crates.
 This constraint is permanent: adding an engine dependency invalidates the adapter
 portability guarantee and breaks the implementation-agnostic principle.
 
-**ADRs**: `cpt-cf-serverless-sdk-core-adr-async-trait`
-
 #### SDK Trust Boundary — All Inputs Are Trusted
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-constraint-trust-boundary`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-constraint-trust-boundary`
 
 The SDK accepts all inputs it receives as trusted. Specifically:
 
@@ -225,19 +214,17 @@ The SDK accepts all inputs it receives as trusted. Specifically:
 
 Input validation (schema conformance, injection prevention, privilege constraints) is the
 responsibility of the Serverless Runtime API layer and adapter before the handler is called.
-Function authors are responsible for validating *business* invariants on `input: I`
+Handler implementations are responsible for validating *business* invariants on `input: I`
 within their `call` implementation and returning `ServerlessSdkError::InvalidInput` if
 those invariants are violated.
 
 #### Stable Rust — No Nightly Features
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-constraint-stable-rust`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-constraint-stable-rust`
 
 The crate must compile on the workspace minimum Rust version without any nightly features,
 attributes, or unstable library APIs. Design decisions that require nightly (e.g., RPITIT
 with `Send` bounds before stabilisation) must be replaced with stable alternatives.
-
-**ADRs**: `cpt-cf-serverless-sdk-core-adr-async-trait`
 
 ---
 
@@ -375,7 +362,7 @@ graph TD
 
 #### context.rs — Context
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-component-context`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-component-context`
 
 ##### Why this component exists
 
@@ -399,7 +386,7 @@ Does not own: any mutable invocation state, status transitions, retry tracking, 
 
 #### environment.rs — Environment
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-component-environment`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-component-environment`
 
 ##### Why this component exists
 
@@ -416,13 +403,13 @@ Owns: `Environment` trait with `get_config` and `get_secret`.
 Does not own: secret resolution, credstore client, async fetching logic, secret caching.
 Those are adapter concerns. `Environment` is a read-only snapshot, not a live proxy.
 
-**ADRs**: `cpt-cf-serverless-sdk-core-adr-sync-environment`
+**Design decision**: synchronous interface (adapter pre-fetch model).
 
 ---
 
 #### error.rs — ServerlessSdkError
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-component-error`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-component-error`
 
 ##### Why this component exists
 
@@ -446,7 +433,7 @@ assignment (adapter concern), retry logic (runtime concern).
 
 #### handler.rs — Handler
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-component-handler`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-component-handler`
 
 ##### Why this component exists
 
@@ -468,13 +455,13 @@ is valid for single-owner dispatch but insufficient for shared registry storage.
 Does not own: input deserialisation from raw JSON (adapter concern), output serialisation
 to `InvocationRecord.result` (adapter concern), span emission (trace module concern).
 
-**ADRs**: `cpt-cf-serverless-sdk-core-adr-async-trait`
+**Design decision**: `async-trait` for stable `Send`-bound futures.
 
 ---
 
 #### workflow.rs — WorkflowHandler + CompensationInput
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-component-workflow`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-component-workflow`
 
 ##### Why this component exists
 
@@ -498,13 +485,13 @@ of `CompensationInput` from the runtime's `CompensationContext` JSON (adapter co
 
 **Related**: `cpt-cf-serverless-sdk-core-component-handler`
 
-**ADRs**: `cpt-cf-serverless-sdk-core-adr-compensation-input`
+**Design decision**: structured type with named fields, not a generic handler input.
 
 ---
 
 #### trace.rs — Instrumentation Utilities
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-component-trace`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-component-trace`
 
 ##### Why this component exists
 
@@ -557,7 +544,7 @@ known limitation and should be evaluated if SDK misuse is observed in practice.
 
 #### FunctionHandler<I, O> Trait Contract
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-interface-handler-trait`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-interface-handler-trait`
 
 - **Type**: Rust async trait (`#[async_trait]`)
 - **Technology**: `async-trait` 0.1
@@ -587,7 +574,7 @@ FunctionHandler<I, O>
 
 #### WorkflowHandler<I, O> Trait Contract
 
-- [x] `p1` - **ID**: `cpt-cf-serverless-sdk-core-interface-workflow-trait`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-sdk-core-interface-workflow-trait`
 
 - **Type**: Rust async trait (`#[async_trait]`), supertrait of `FunctionHandler<I, O>`
 - **Stability**: unstable (0.x)
@@ -740,7 +727,7 @@ explicitly excluded:
 ### Relationship to the Serverless Runtime Design
 
 This crate is a downstream consumer of the Serverless Runtime's domain model
-([DESIGN.md](../../serverless-runtime/docs/DESIGN.md)). Specifically:
+([DESIGN.md](../../docs/DESIGN.md)). Specifically:
 
 - `Context` is a projection of `InvocationRecord` (§3.1 Core Types).
 - `CompensationInput` is a projection of `CompensationContext`
@@ -771,7 +758,7 @@ The mapping is documented in this design and enforced by adapters at runtime.
   `WorkflowHandler::compensate` is a first-class, compiler-enforced obligation on every
   durable workflow.
 - **No proc-macros, no code generation**: Unlike Temporal's `#[workflow]` / `#[activity]`
-  macros, this crate uses plain traits and `#[async_trait]`. Function authors implement
+  macros, this crate uses plain traits and `#[async_trait]`. Adapter developers implement
   traits directly; no hidden code generation.
 - **Adapter-agnostic by construction**: Unlike Lambda's SDK (AWS-specific) or Workers
   (Cloudflare-specific), this crate has no runtime-specific dependency; the same
@@ -781,7 +768,7 @@ The mapping is documented in this design and enforced by adapters at runtime.
 
 | Item | Nature | Migration Path |
 |------|--------|----------------|
-| `async-trait` dependency | One heap allocation (`Box<dyn Future>`) per `call`/`compensate` invocation; extra `#[async_trait]` annotation required on every `impl` block | Remove when RPITIT with `Send` bound is fully ergonomic on stable Rust. Migration is backward-compatible at the trait level. Tracked in `cpt-cf-serverless-sdk-core-adr-async-trait` Consequences §3. |
+| `async-trait` dependency | One heap allocation (`Box<dyn Future>`) per `call`/`compensate` invocation; extra `#[async_trait]` annotation required on every `impl` block | Remove when RPITIT with `Send` bound is fully ergonomic on stable Rust. Migration is backward-compatible at the trait level. |
 
 ### Crate Naming Convention
 
@@ -789,7 +776,7 @@ Following the workspace `cf-<name>` convention:
 
 | Artifact | Value |
 |----------|-------|
-| Directory | `modules/serverless-sdk/cyberfabric-serverless-sdk-core/` |
+| Directory | `modules/serverless-runtime/serverless-sdk/cyberfabric-serverless-sdk-core/` |
 | Package name | `cf-serverless-sdk-core` |
 | Lib name | `serverless_sdk_core` |
 | Import | `use serverless_sdk_core::...` |
@@ -830,7 +817,6 @@ in these areas is deliberate, not an omission.
 ## 6. Traceability
 
 - **PRD**: [PRD.md](./PRD.md)
-- **ADRs**: [ADR/](./ADR/)
 - **Source**: [cyberfabric-serverless-sdk-core/src/](../cyberfabric-serverless-sdk-core/src/)
-- **Serverless Runtime DESIGN**: [modules/serverless-runtime/docs/DESIGN.md](../../serverless-runtime/docs/DESIGN.md)
-- **Serverless Runtime Rust Types**: [modules/serverless-runtime/docs/DESIGN_RUST_TYPES.md](../../serverless-runtime/docs/DESIGN_RUST_TYPES.md)
+- **Serverless Runtime DESIGN**: [modules/serverless-runtime/docs/DESIGN.md](../../docs/DESIGN.md)
+- **Serverless Runtime Rust Types**: [modules/serverless-runtime/docs/DESIGN_RUST_TYPES.md](../../docs/DESIGN_RUST_TYPES.md)
