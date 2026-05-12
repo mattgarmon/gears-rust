@@ -169,12 +169,21 @@ async fn upstream_crud_lifecycle() {
     let fetched = svc.get_upstream(&ctx, u.id).await.unwrap();
     assert_eq!(fetched.id, u.id);
 
-    // Update alias (allowed for IP-based endpoints)
+    // Update with same alias (no-op, alias is immutable)
     let mut update_req = make_update_from_upstream(&u);
-    update_req.alias = Some("openai-v2".into());
+    update_req.alias = Some("openai".into());
     let updated = svc.update_upstream(&ctx, u.id, update_req).await.unwrap();
-    assert_eq!(updated.alias, "openai-v2");
+    assert_eq!(updated.alias, "openai");
     assert_eq!(updated.id, u.id);
+
+    // Update with different alias — must be rejected.
+    let mut update_req2 = make_update_from_upstream(&updated);
+    update_req2.alias = Some("openai-v2".into());
+    let err = svc
+        .update_upstream(&ctx, u.id, update_req2)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::Validation { .. }));
 
     // List
     let list = svc
@@ -1924,7 +1933,7 @@ async fn update_rejects_auth_override_on_enforce() {
 }
 
 #[tokio::test]
-async fn update_alias_to_ancestor_requires_bind() {
+async fn create_alias_matching_ancestor_requires_bind() {
     let root = Uuid::new_v4();
     let child = Uuid::new_v4();
     let resolver = MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
@@ -1940,25 +1949,18 @@ async fn update_alias_to_ancestor_requires_bind() {
     });
     svc.create_upstream(&root_ctx, root_req).await.unwrap();
 
-    // Child creates upstream with different alias (IP-based).
+    // Child creates upstream with same alias — with allow-all enforcer this passes
+    // (ancestor bind validation is triggered at creation time).
     let child_ctx = test_ctx(child);
     let child_upstream = svc
-        .create_upstream(&child_ctx, make_create_upstream_ip("other"))
+        .create_upstream(&child_ctx, make_create_upstream_ip("openai"))
         .await
         .unwrap();
-
-    // Child updates alias to match ancestor — with allow-all enforcer this passes.
-    let mut update_req = make_update_from_upstream(&child_upstream);
-    update_req.alias = Some("openai".into());
-    let updated = svc
-        .update_upstream(&child_ctx, child_upstream.id, update_req)
-        .await
-        .unwrap();
-    assert_eq!(updated.alias, "openai");
+    assert_eq!(child_upstream.alias, "openai");
 }
 
 #[tokio::test]
-async fn update_alias_only_validates_existing_overrides_against_ancestor_enforce() {
+async fn create_alias_matching_ancestor_enforce_rejects_incompatible_auth() {
     let root = Uuid::new_v4();
     let child = Uuid::new_v4();
     let resolver = MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
@@ -1974,22 +1976,17 @@ async fn update_alias_only_validates_existing_overrides_against_ancestor_enforce
     });
     svc.create_upstream(&root_ctx, root_req).await.unwrap();
 
-    // Child creates upstream with a different alias but with auth already set (IP-based).
+    // Child creates upstream with same alias but incompatible auth — must fail
+    // because the ancestor's enforce mode forbids a different auth plugin type.
     let child_ctx = test_ctx(child);
-    let mut child_req = make_create_upstream_ip("other");
+    let mut child_req = make_create_upstream_ip("openai");
     child_req.auth = Some(AuthConfig {
         plugin_type: "oauth2".into(),
         sharing: SharingMode::Inherit,
         config: None,
     });
-    let child_upstream = svc.create_upstream(&child_ctx, child_req).await.unwrap();
-
-    // Alias-only update to match ancestor — must fail because the child's
-    // existing auth override conflicts with the ancestor's enforce mode.
-    let mut update_req = make_update_from_upstream(&child_upstream);
-    update_req.alias = Some("openai".into());
     let err = svc
-        .update_upstream(&child_ctx, child_upstream.id, update_req)
+        .create_upstream(&child_ctx, child_req)
         .await
         .unwrap_err();
     match err {
@@ -2755,7 +2752,7 @@ fn enforce_alias_create_ip_accepts_explicit() {
 }
 
 #[test]
-fn enforce_alias_update_hostname_to_hostname_recomputes() {
+fn enforce_alias_update_hostname_to_hostname_different_alias_rejected() {
     let old_eps = vec![Endpoint {
         scheme: Scheme::Https,
         host: "old.vendor.com".into(),
@@ -2766,8 +2763,64 @@ fn enforce_alias_update_hostname_to_hostname_recomputes() {
         host: "new.vendor.com".into(),
         port: 443,
     }];
-    let alias = enforce_alias_update(None, &new_eps, "old.vendor.com", &old_eps).unwrap();
-    assert_eq!(alias, "new.vendor.com");
+    let err = enforce_alias_update(None, &new_eps, "old.vendor.com", &old_eps).unwrap_err();
+    assert!(matches!(err, DomainError::Validation { .. }));
+}
+
+#[test]
+fn enforce_alias_update_hostname_to_hostname_same_alias_allowed() {
+    // Swapping hosts within the same domain suffix keeps the derived alias.
+    let old_eps = vec![
+        Endpoint {
+            scheme: Scheme::Https,
+            host: "us.vendor.com".into(),
+            port: 443,
+        },
+        Endpoint {
+            scheme: Scheme::Https,
+            host: "eu.vendor.com".into(),
+            port: 443,
+        },
+    ];
+    let new_eps = vec![
+        Endpoint {
+            scheme: Scheme::Https,
+            host: "ap.vendor.com".into(),
+            port: 443,
+        },
+        Endpoint {
+            scheme: Scheme::Https,
+            host: "eu.vendor.com".into(),
+            port: 443,
+        },
+    ];
+    let alias = enforce_alias_update(None, &new_eps, "vendor.com", &old_eps).unwrap();
+    assert_eq!(alias, "vendor.com");
+}
+
+#[test]
+fn enforce_alias_update_hostname_multi_endpoint_changes_alias_rejected() {
+    // Reviewer scenario: ["my.company.com"] → ["my.company.com", "your.company.com"]
+    // would change alias from "my.company.com" to "company.com" — must be rejected.
+    let old_eps = vec![Endpoint {
+        scheme: Scheme::Https,
+        host: "my.company.com".into(),
+        port: 443,
+    }];
+    let new_eps = vec![
+        Endpoint {
+            scheme: Scheme::Https,
+            host: "my.company.com".into(),
+            port: 443,
+        },
+        Endpoint {
+            scheme: Scheme::Https,
+            host: "your.company.com".into(),
+            port: 443,
+        },
+    ];
+    let err = enforce_alias_update(None, &new_eps, "my.company.com", &old_eps).unwrap_err();
+    assert!(matches!(err, DomainError::Validation { .. }));
 }
 
 #[test]
@@ -2787,7 +2840,8 @@ fn enforce_alias_update_hostname_to_ip_requires_alias() {
 }
 
 #[test]
-fn enforce_alias_update_hostname_to_ip_with_alias_succeeds() {
+fn enforce_alias_update_hostname_to_ip_with_alias_also_rejected() {
+    // hostname→IP is always rejected, even with an explicit alias.
     let old_eps = vec![Endpoint {
         scheme: Scheme::Https,
         host: "api.openai.com".into(),
@@ -2798,9 +2852,9 @@ fn enforce_alias_update_hostname_to_ip_with_alias_succeeds() {
         host: "10.0.1.1".into(),
         port: 443,
     }];
-    let alias =
-        enforce_alias_update(Some("my-backend"), &new_eps, "api.openai.com", &old_eps).unwrap();
-    assert_eq!(alias, "my-backend");
+    let err =
+        enforce_alias_update(Some("my-backend"), &new_eps, "api.openai.com", &old_eps).unwrap_err();
+    assert!(matches!(err, DomainError::Validation { .. }));
 }
 
 #[test]
@@ -2820,7 +2874,42 @@ fn enforce_alias_update_ip_to_ip_retains_existing() {
 }
 
 #[test]
-fn enforce_alias_update_ip_to_hostname_recomputes() {
+fn enforce_alias_update_ip_to_ip_rejects_alias_change() {
+    // IP→IP with user-provided alias that differs from existing — rejected.
+    let old_eps = vec![Endpoint {
+        scheme: Scheme::Https,
+        host: "10.0.1.1".into(),
+        port: 443,
+    }];
+    let new_eps = vec![Endpoint {
+        scheme: Scheme::Https,
+        host: "10.0.1.2".into(),
+        port: 443,
+    }];
+    let err = enforce_alias_update(Some("new-name"), &new_eps, "my-backend", &old_eps).unwrap_err();
+    assert!(matches!(err, DomainError::Validation { .. }));
+}
+
+#[test]
+fn enforce_alias_update_ip_to_ip_tolerates_same_alias() {
+    // IP→IP with user-provided alias that matches existing — allowed (no-op).
+    let old_eps = vec![Endpoint {
+        scheme: Scheme::Https,
+        host: "10.0.1.1".into(),
+        port: 443,
+    }];
+    let new_eps = vec![Endpoint {
+        scheme: Scheme::Https,
+        host: "10.0.1.2".into(),
+        port: 443,
+    }];
+    let alias = enforce_alias_update(Some("my-backend"), &new_eps, "my-backend", &old_eps).unwrap();
+    assert_eq!(alias, "my-backend");
+}
+
+#[test]
+fn enforce_alias_update_ip_to_hostname_rejected_when_alias_changes() {
+    // IP→hostname changes the alias from "my-backend" to "api.openai.com" — rejected.
     let old_eps = vec![Endpoint {
         scheme: Scheme::Https,
         host: "10.0.1.1".into(),
@@ -2831,7 +2920,24 @@ fn enforce_alias_update_ip_to_hostname_recomputes() {
         host: "api.openai.com".into(),
         port: 443,
     }];
-    let alias = enforce_alias_update(None, &new_eps, "my-backend", &old_eps).unwrap();
+    let err = enforce_alias_update(None, &new_eps, "my-backend", &old_eps).unwrap_err();
+    assert!(matches!(err, DomainError::Validation { .. }));
+}
+
+#[test]
+fn enforce_alias_update_ip_to_hostname_allowed_when_alias_matches() {
+    // IP→hostname where the derived alias happens to match the existing one — allowed.
+    let old_eps = vec![Endpoint {
+        scheme: Scheme::Https,
+        host: "10.0.1.1".into(),
+        port: 443,
+    }];
+    let new_eps = vec![Endpoint {
+        scheme: Scheme::Https,
+        host: "api.openai.com".into(),
+        port: 443,
+    }];
+    let alias = enforce_alias_update(None, &new_eps, "api.openai.com", &old_eps).unwrap();
     assert_eq!(alias, "api.openai.com");
 }
 
@@ -2899,7 +3005,7 @@ async fn update_hostname_rejects_alias_override() {
 }
 
 #[tokio::test]
-async fn update_endpoints_recomputes_alias() {
+async fn update_endpoints_different_alias_rejected() {
     let svc = make_service();
     let tenant = Uuid::new_v4();
     let ctx = test_ctx(tenant);
@@ -2910,7 +3016,7 @@ async fn update_endpoints_recomputes_alias() {
         .unwrap();
     assert_eq!(u.alias, "api.openai.com");
 
-    // Update endpoints to a different host — alias should recompute.
+    // Update endpoints to a different host — would change alias, must be rejected.
     let mut update_req = make_update_from_upstream(&u);
     update_req.server = Server {
         endpoints: vec![Endpoint {
@@ -2919,9 +3025,12 @@ async fn update_endpoints_recomputes_alias() {
             port: 443,
         }],
     };
-    update_req.alias = None; // let alias be re-derived
-    let updated = svc.update_upstream(&ctx, u.id, update_req).await.unwrap();
-    assert_eq!(updated.alias, "api.anthropic.com");
+    update_req.alias = None;
+    let err = svc
+        .update_upstream(&ctx, u.id, update_req)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::Validation { .. }));
 }
 
 #[tokio::test]
@@ -2953,7 +3062,7 @@ async fn update_hostname_to_ip_without_alias_fails() {
 }
 
 #[tokio::test]
-async fn update_hostname_to_ip_with_alias_succeeds() {
+async fn update_hostname_to_ip_with_alias_also_rejected() {
     let svc = make_service();
     let tenant = Uuid::new_v4();
     let ctx = test_ctx(tenant);
@@ -2963,7 +3072,7 @@ async fn update_hostname_to_ip_with_alias_succeeds() {
         .await
         .unwrap();
 
-    // Switch to IP endpoints with explicit alias.
+    // Switch to IP endpoints with explicit alias — still rejected.
     let mut update_req = make_update_from_upstream(&u);
     update_req.server = Server {
         endpoints: vec![Endpoint {
@@ -2973,8 +3082,11 @@ async fn update_hostname_to_ip_with_alias_succeeds() {
         }],
     };
     update_req.alias = Some("my-backend".into());
-    let updated = svc.update_upstream(&ctx, u.id, update_req).await.unwrap();
-    assert_eq!(updated.alias, "my-backend");
+    let err = svc
+        .update_upstream(&ctx, u.id, update_req)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DomainError::Validation { .. }));
 }
 
 #[tokio::test]
