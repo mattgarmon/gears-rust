@@ -162,34 +162,21 @@ impl DataPlaneServiceImpl {
         self
     }
 
-    /// Execute the post-response plugin pipeline (guard + transform) and build
-    /// the final proxy response.
-    async fn finalize_response(
+    /// Apply response transforms, CORS, header rules, and rate-limit headers.
+    ///
+    /// Shared by both the normal HTTP path (`finalize_response`) and the 101
+    /// upgrade path (`handle_websocket_upgrade`).
+    async fn apply_response_pipeline(
         &self,
         pipeline: &ResponsePipelineCtx<'_>,
         status: http::StatusCode,
-        resp_headers: HeaderMap,
-        resp_body_stream: BodyStream,
-        instance_uri: String,
-    ) -> Result<http::Response<Body>, DomainError> {
-        execute_guard_responses(
-            &self.guard_registry,
-            &pipeline.guard_bindings,
-            status,
-            &resp_headers,
-            pipeline.method,
-            pipeline.path_suffix,
-            &instance_uri,
-            pipeline.ctx,
-        )
-        .await?;
-
-        let mut resp_headers = resp_headers;
+        resp_headers: &mut HeaderMap,
+    ) {
         execute_transform_responses(
             &self.transform_registry,
             &pipeline.transform_bindings,
             status,
-            &mut resp_headers,
+            resp_headers,
             pipeline.ctx,
         )
         .await;
@@ -215,7 +202,7 @@ impl DataPlaneServiceImpl {
 
         // Apply response header rules (set/add/remove) from upstream config.
         if let Some(rules) = pipeline.response_header_rules {
-            headers::apply_response_header_rules(&mut resp_headers, rules);
+            headers::apply_response_header_rules(resp_headers, rules);
         }
 
         // Inject rate-limit response headers if configured.
@@ -227,6 +214,33 @@ impl DataPlaneServiceImpl {
             );
             resp_headers.insert("x-ratelimit-reset", HeaderValue::from(outcome.reset_epoch));
         }
+    }
+
+    /// Execute the post-response plugin pipeline (guard + transform) and build
+    /// the final proxy response.
+    async fn finalize_response(
+        &self,
+        pipeline: &ResponsePipelineCtx<'_>,
+        status: http::StatusCode,
+        resp_headers: HeaderMap,
+        resp_body_stream: BodyStream,
+        instance_uri: String,
+    ) -> Result<http::Response<Body>, DomainError> {
+        execute_guard_responses(
+            &self.guard_registry,
+            &pipeline.guard_bindings,
+            status,
+            &resp_headers,
+            pipeline.method,
+            pipeline.path_suffix,
+            &instance_uri,
+            pipeline.ctx,
+        )
+        .await?;
+
+        let mut resp_headers = resp_headers;
+        self.apply_response_pipeline(pipeline, status, &mut resp_headers)
+            .await;
 
         // Apply streaming lifecycle management for SSE responses:
         // idle timeout and graceful shutdown awareness.
@@ -328,6 +342,99 @@ impl DataPlaneServiceImpl {
     }
 }
 
+/// Parsed and validated proxy request, ready for resolution and forwarding.
+struct ParsedRequest {
+    instance_uri: String,
+    alias: String,
+    path_suffix: String,
+    query_params: Vec<(String, String)>,
+    method: http::Method,
+    req_headers: HeaderMap,
+    is_upgrade: bool,
+    body_bytes: Bytes,
+    body_stream: Option<BodyStream>,
+}
+
+/// Decompose and validate an inbound proxy request.
+///
+/// Extracts the alias, normalizes the path suffix, parses query parameters,
+/// validates headers (Content-Type, Transfer-Encoding), and conditionally
+/// buffers or preserves the body stream.
+fn parse_proxy_request(
+    req: http::Request<Body>,
+    max_body_size: usize,
+) -> Result<ParsedRequest, DomainError> {
+    let instance_uri = req.uri().to_string();
+
+    // Extract alias from the raw path first, then normalize only the
+    // suffix. This prevents path traversal (e.g. `/../../admin/...`)
+    // from influencing alias extraction.
+    let (alias, path_suffix) = {
+        let path = req.uri().path();
+        let trimmed = path.strip_prefix('/').unwrap_or(path);
+        let (alias, raw_suffix) = match trimmed.find('/') {
+            Some(pos) => (&trimmed[..pos], &trimmed[pos..]),
+            None => (trimmed, ""),
+        };
+        (alias.to_string(), normalize_path(raw_suffix))
+    };
+
+    // Parse query parameters with proper URL decoding.
+    let query_params: Vec<(String, String)> = req
+        .uri()
+        .query()
+        .map(|q| {
+            form_urlencoded::parse(q.as_bytes())
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Decompose request into parts. Keep body as-is for conditional handling.
+    let (parts, body) = req.into_parts();
+    let method = parts.method;
+    let req_headers = parts.headers;
+
+    let is_upgrade = headers::is_websocket_upgrade(&req_headers);
+
+    // Validate Content-Type format if present.
+    headers::validate_content_type(&req_headers)?;
+
+    // HTTP smuggling prevention (RFC 7230 §3.3.3): validate CL, TE, and
+    // reject CL/TE co-existence.
+    headers::validate_smuggling_headers(&req_headers)?;
+
+    // Conditional body conversion — keep streams for streaming request bodies.
+    let (body_bytes, body_stream): (Bytes, Option<BodyStream>) = match body {
+        Body::Empty => (Bytes::new(), None),
+        Body::Bytes(b) => {
+            if b.len() > max_body_size {
+                return Err(DomainError::PayloadTooLarge {
+                    detail: format!(
+                        "request body of {} bytes exceeds maximum of {max_body_size} bytes",
+                        b.len()
+                    ),
+                    instance: instance_uri,
+                });
+            }
+            (b, None)
+        }
+        Body::Stream(s) => (Bytes::new(), Some(s)),
+    };
+
+    Ok(ParsedRequest {
+        instance_uri,
+        alias,
+        path_suffix,
+        query_params,
+        method,
+        req_headers,
+        is_upgrade,
+        body_bytes,
+        body_stream,
+    })
+}
+
 #[async_trait]
 impl DataPlaneService for DataPlaneServiceImpl {
     async fn proxy_request(
@@ -335,7 +442,17 @@ impl DataPlaneService for DataPlaneServiceImpl {
         ctx: SecurityContext,
         req: http::Request<Body>,
     ) -> Result<http::Response<Body>, DomainError> {
-        let instance_uri = req.uri().to_string();
+        let ParsedRequest {
+            instance_uri,
+            alias,
+            path_suffix,
+            mut query_params,
+            method,
+            req_headers,
+            is_upgrade,
+            body_bytes,
+            body_stream,
+        } = parse_proxy_request(req, self.max_body_size)?;
 
         self.policy_enforcer
             .access_scope_with(
@@ -349,99 +466,30 @@ impl DataPlaneService for DataPlaneServiceImpl {
             )
             .await?;
 
-        // Extract alias from the raw path first, then normalize only the
-        // suffix. This prevents path traversal (e.g. `/../../admin/...`)
-        // from influencing alias extraction.
-        let (alias, path_suffix) = {
-            let path = req.uri().path();
-            let trimmed = path.strip_prefix('/').unwrap_or(path);
-            let (alias, raw_suffix) = match trimmed.find('/') {
-                Some(pos) => (&trimmed[..pos], &trimmed[pos..]),
-                None => (trimmed, ""),
-            };
-            (alias.to_string(), normalize_path(raw_suffix))
-        };
-
-        // Parse query parameters with proper URL decoding.
-        let mut query_params: Vec<(String, String)> = req
-            .uri()
-            .query()
-            .map(|q| {
-                form_urlencoded::parse(q.as_bytes())
-                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Decompose request into parts. Keep body as-is for conditional handling.
-        let (parts, body) = req.into_parts();
-        let method = parts.method;
-        let req_headers = parts.headers;
-
-        let is_upgrade = headers::is_websocket_upgrade(&req_headers);
-
-        // Validate Content-Type format if present.
-        headers::validate_content_type(&req_headers)?;
-
-        // HTTP smuggling prevention (RFC 7230 §3.3.3): validate CL, TE, and
-        // reject CL/TE co-existence.
-        headers::validate_smuggling_headers(&req_headers)?;
-
-        // Conditional body conversion — keep streams for streaming request bodies.
         let max_body = self.max_body_size;
-        let (body_bytes, body_stream): (Bytes, Option<BodyStream>) = match body {
-            Body::Empty => (Bytes::new(), None),
-            Body::Bytes(b) => {
-                if b.len() > max_body {
-                    return Err(DomainError::PayloadTooLarge {
-                        detail: format!(
-                            "request body of {} bytes exceeds maximum of {max_body} bytes",
-                            b.len()
-                        ),
-                        instance: instance_uri,
-                    });
-                }
-                (b, None)
-            }
-            Body::Stream(s) => (Bytes::new(), Some(s)),
-        };
 
-        // 1+2. Resolve upstream + route in one pass (single hierarchy walk).
+        // 1. Resolve upstream + route in one pass (single hierarchy walk).
         let (upstream, route) = self
             .cp
             .resolve_proxy_target(&ctx, &alias, method.as_ref(), &path_suffix)
             .await?;
 
-        // 1c. CORS origin enforcement for actual cross-origin requests.
+        // 2. CORS origin enforcement for actual cross-origin requests.
         // Preflight is handled permissively at the handler level (no upstream resolution).
-        // Here we validate the Origin against the upstream's CORS config and reject
-        // disallowed origins before the request reaches the upstream.
         let effective_cors = upstream.cors.clone();
         let request_origin = req_headers
             .get(http::header::ORIGIN)
             .and_then(|v| v.to_str().ok())
             .map(String::from);
 
-        if let Some(ref cors_config) = effective_cors
-            && cors_config.enabled
-            && let Some(ref origin) = request_origin
-        {
-            if !crate::domain::cors::is_origin_allowed(cors_config, origin) {
-                return Err(DomainError::CorsOriginNotAllowed {
-                    origin: origin.clone(),
-                    instance: instance_uri,
-                });
-            }
+        enforce_cors_origin(
+            effective_cors.as_ref(),
+            request_origin.as_deref(),
+            method.as_ref(),
+            &instance_uri,
+        )?;
 
-            if !crate::domain::cors::is_method_allowed(cors_config, method.as_ref()) {
-                return Err(DomainError::CorsMethodNotAllowed {
-                    method: method.to_string(),
-                    instance: instance_uri,
-                });
-            }
-        }
-
-        // 2b. Validate query parameters against route's allowlist.
+        // 3. Validate query parameters against route's allowlist.
         if let Some(ref http_match) = route.match_rules.http
             && !query_params.is_empty()
         {
@@ -460,7 +508,7 @@ impl DataPlaneService for DataPlaneServiceImpl {
             }
         }
 
-        // 2c. Enforce path_suffix_mode.
+        // 3b. Enforce path_suffix_mode.
         if let Some(ref http_match) = route.match_rules.http
             && http_match.path_suffix_mode == PathSuffixMode::Disabled
         {
@@ -479,7 +527,7 @@ impl DataPlaneService for DataPlaneServiceImpl {
             }
         }
 
-        // 3. Prepare outbound headers (passthrough + strip).
+        // 4. Prepare outbound headers (passthrough + strip).
         let mode = upstream
             .headers
             .as_ref()
@@ -518,182 +566,73 @@ impl DataPlaneService for DataPlaneServiceImpl {
             }
         }
 
-        // 4. Execute auth plugin.
+        // 5. Execute auth plugin.
         if let Some(ref auth) = upstream.auth {
-            tracing::debug!(plugin = %auth.plugin_type, "executing auth plugin");
-            let plugin = self.auth_registry.resolve(&auth.plugin_type).map_err(|e| {
-                DomainError::AuthenticationFailed {
-                    reason: "AUTH_PLUGIN_NOT_FOUND",
-                    detail: e.to_string(),
-                    instance: instance_uri.clone(),
-                }
-            })?;
-            let mut auth_ctx = AuthContext {
-                headers: headers::header_map_to_hash_map(&outbound_headers),
-                config: auth.config.clone().unwrap_or_default(),
-                security_context: ctx.clone(),
-            };
-            plugin
-                .authenticate(&mut auth_ctx)
-                .await
-                .map_err(|e| match e {
-                    crate::domain::plugin::PluginError::SecretNotFound(ref s) => {
-                        DomainError::SecretNotFound {
-                            detail: s.clone(),
-                            instance: instance_uri.clone(),
-                        }
-                    }
-                    crate::domain::plugin::PluginError::Rejected(ref msg)
-                    | crate::domain::plugin::PluginError::InvalidConfig(ref msg) => {
-                        DomainError::Validation {
-                            field: "plugin",
-                            reason: "INVALID_PLUGIN_CONFIG",
-                            detail: msg.clone(),
-                            instance: instance_uri.clone(),
-                        }
-                    }
-                    crate::domain::plugin::PluginError::AuthFailed(_) => {
-                        DomainError::AuthenticationFailed {
-                            reason: "AUTH_PLUGIN_FAILED",
-                            detail: e.to_string(),
-                            instance: instance_uri.clone(),
-                        }
-                    }
-                    crate::domain::plugin::PluginError::Internal(_) => {
-                        DomainError::AuthenticationFailed {
-                            reason: "AUTH_PLUGIN_INTERNAL",
-                            detail: e.to_string(),
-                            instance: instance_uri.clone(),
-                        }
-                    }
-                })?;
-            outbound_headers = headers::hash_map_to_header_map(&auth_ctx.headers);
-            tracing::debug!(plugin = %auth.plugin_type, "auth plugin succeeded");
+            outbound_headers = execute_auth_plugin(
+                &self.auth_registry,
+                auth,
+                &outbound_headers,
+                &ctx,
+                &instance_uri,
+            )
+            .await?;
         }
 
-        // 4b. Execute guard plugins (upstream then route).
+        // 5b. Execute guard plugins (upstream then route).
         //
         // Guards are blocking gates: a rejection short-circuits the pipeline
-        // immediately. This is intentional — guards enforce hard policies
-        // (allowlists, rate limits, schema validation). Compare with transforms
-        // (step 5-transform) which use log-and-continue semantics.
+        // immediately. Guards enforce hard policies (allowlists, rate limits,
+        // schema validation). Compare with transforms (step 5d) which use
+        // log-and-continue semantics.
         let guard_bindings =
             collect_plugin_bindings(&upstream, GuardPluginRegistry::is_guard_plugin);
 
-        let guard_headers = headers::header_map_to_vec(&outbound_headers);
-        for binding in &guard_bindings {
-            let guard = self
-                .guard_registry
-                .resolve(&binding.plugin_ref)
-                .map_err(|e| DomainError::Internal {
-                    message: format!(
-                        "guard plugin '{}' resolution failed: {e}",
-                        binding.plugin_ref
-                    ),
-                })?;
+        execute_guard_requests(
+            &self.guard_registry,
+            &guard_bindings,
+            &outbound_headers,
+            method.as_str(),
+            &path_suffix,
+            &ctx,
+            &instance_uri,
+        )
+        .await?;
 
-            let guard_ctx = GuardContext {
-                method: method.to_string(),
-                path: path_suffix.clone(),
-                status: None,
-                headers: guard_headers.clone(),
-                config: binding.config.clone(),
-                security_context: ctx.clone(),
-            };
-
-            match guard.guard_request(&guard_ctx).await {
-                Ok(GuardDecision::Allow) => {}
-                Ok(GuardDecision::Reject {
-                    status,
-                    error_code,
-                    detail,
-                    resource_id,
-                }) => {
-                    return Err(DomainError::GuardRejected {
-                        status,
-                        error_code,
-                        detail,
-                        instance: instance_uri,
-                        resource_id,
-                    });
-                }
-                Err(e) => {
-                    return Err(DomainError::Internal {
-                        message: format!("guard plugin error: {e}"),
-                    });
-                }
-            }
-        }
-
-        // 4c. Collect transform plugin bindings (upstream then route).
+        // 5c. Collect transform plugin bindings (upstream then route).
         let transform_bindings =
             collect_plugin_bindings(&upstream, TransformPluginRegistry::is_transform_plugin);
 
-        // 5. Apply header rules + set Host.
+        // 5d. Apply header rules.
         if let Some(ref hc) = upstream.headers
             && let Some(ref rules) = hc.request
         {
             headers::apply_request_header_rules(&mut outbound_headers, rules);
         }
 
-        // 5-transform. Execute transform plugins (on_request phase).
+        // 5e. Execute transform plugins (on_request phase).
         //
         // Placed after header rules so transforms have the final word on
         // outbound headers. Errors are logged and skipped — transforms use
-        // log-and-continue semantics so a single misbehaving transform cannot
-        // block the pipeline. Compare with guards (step 4b) which fail-hard.
-        if !transform_bindings.is_empty() {
-            let mut transform_headers = headers::header_map_to_vec(&outbound_headers);
-            let mut transform_query: Vec<(String, String)> = query_params.clone();
+        // log-and-continue semantics. Compare with guards (step 5b) which
+        // fail-hard.
+        execute_transform_requests(
+            &self.transform_registry,
+            &transform_bindings,
+            &mut outbound_headers,
+            &mut query_params,
+            method.as_str(),
+            &path_suffix,
+            &ctx,
+        )
+        .await;
 
-            for binding in &transform_bindings {
-                let mut transform_ctx = TransformRequestContext {
-                    method: method.to_string(),
-                    path: path_suffix.clone(),
-                    query: transform_query.clone(),
-                    headers: transform_headers.clone(),
-                    config: binding.config.clone(),
-                    security_context: ctx.clone(),
-                };
-                match self.transform_registry.resolve(&binding.plugin_ref) {
-                    Ok(transform) => match transform.on_request(&mut transform_ctx).await {
-                        Ok(()) => {
-                            transform_headers = transform_ctx.headers;
-                            transform_query = transform_ctx.query;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                plugin = %binding.plugin_ref,
-                                error = %e,
-                                "transform on_request failed, continuing"
-                            );
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!(
-                            plugin = %binding.plugin_ref,
-                            error = %e,
-                            "transform plugin resolution failed, continuing"
-                        );
-                        continue;
-                    }
-                }
-            }
-
-            // Write mutated headers back to outbound_headers.
-            outbound_headers = headers::vec_to_header_map(&transform_headers);
-
-            // Write mutated query params back.
-            query_params = transform_query;
-        }
-
-        // 5a. Endpoint selection (D1 — two-tier).
+        // 6. Endpoint selection (two-tier: target-host header or round-robin).
         let selected = self
             .select_endpoint(&upstream, &req_headers, &instance_uri)
             .await?;
         let endpoint = &selected.endpoint;
 
-        // 5b. Enforce HTTPS-only constraint (cpt-cf-oagw-constraint-https-only).
+        // 6b. Enforce HTTPS-only upstream constraint.
         if !self.allow_http_upstream && matches!(endpoint.scheme, Scheme::Http) {
             return Err(DomainError::Validation {
                 field: "endpoint.scheme",
@@ -705,63 +644,19 @@ impl DataPlaneService for DataPlaneServiceImpl {
 
         headers::set_host_header(&mut outbound_headers, &endpoint.host, endpoint.port);
 
-        // 6. Check rate limit (upstream then route) with scope-aware keying.
-        //    Both try_consume calls decrement their respective buckets
-        //    unconditionally — an upstream token is spent even when a stricter
-        //    route-level bucket later causes rejection.
-        let mut rate_limit_outcome: Option<(RateLimitOutcome, bool)> = None;
-        let client_ip = headers::extract_client_ip(&req_headers);
-        let client_ip_ref = client_ip.as_deref();
-        let tenant_id = ctx.subject_tenant_id();
-        let subject_id = ctx.subject_id();
+        // 7. Check rate limits (upstream then route) with scope-aware keying.
+        let rate_limit_outcome = check_rate_limits(
+            &self.rate_limiter,
+            &upstream,
+            &route,
+            &req_headers,
+            &ctx,
+            &instance_uri,
+        )?;
 
-        if let Some(ref rl) = upstream.rate_limit {
-            // For shared-pool budgets, use the pool owner's ID so all children
-            // sharing the pool consume from the same token bucket.
-            let effective_resource_id = rl.pool_owner_id.as_ref().unwrap_or(&upstream.id);
-            let key = build_rate_limit_key(&RateLimitKeyContext {
-                resource: RateLimitResource::Upstream,
-                resource_id: effective_resource_id,
-                scope: &rl.scope,
-                tenant_id: &tenant_id,
-                subject_id: &subject_id,
-                client_ip: client_ip_ref,
-                window: &rl.sustained.window,
-            });
-            let outcome = self.rate_limiter.try_consume(&key, rl, &instance_uri)?;
-            rate_limit_outcome = Some((outcome, rl.response_headers));
-        }
-        if let Some(ref rl) = route.rate_limit {
-            let key = build_rate_limit_key(&RateLimitKeyContext {
-                resource: RateLimitResource::Route,
-                resource_id: &route.id,
-                scope: &rl.scope,
-                tenant_id: &tenant_id,
-                subject_id: &subject_id,
-                client_ip: client_ip_ref,
-                window: &rl.sustained.window,
-            });
-            let outcome = self.rate_limiter.try_consume(&key, rl, &instance_uri)?;
-            match &rate_limit_outcome {
-                Some((existing, show_headers)) if existing.remaining <= outcome.remaining => {
-                    // Tighter (or equal) bucket wins for enforcement; on ties
-                    // upstream wins — both remaining counts are identical so the
-                    // allow/reject decision is the same either way.  OR the header
-                    // flags so headers are emitted if either scope enables them.
-                    if rl.response_headers && !show_headers {
-                        rate_limit_outcome = rate_limit_outcome.map(|(o, _)| (o, true));
-                    }
-                }
-                _ => {
-                    let prev_headers = rate_limit_outcome.as_ref().is_some_and(|(_, h)| *h);
-                    rate_limit_outcome = Some((outcome, rl.response_headers || prev_headers));
-                }
-            }
-        }
-
-        // 7. Build URL.
-        // path_suffix is the full path from the proxy URL; strip the route prefix
-        // so we get: endpoint + route_path + remaining_suffix.
+        // 8. Build upstream URL.
+        // Strip the route prefix from the full path so we get:
+        // endpoint + route_path + remaining_suffix.
         let route_path = route
             .match_rules
             .http
@@ -775,7 +670,7 @@ impl DataPlaneService for DataPlaneServiceImpl {
             &query_params,
         )?;
 
-        // 7b. Inject internal context headers for PingoraProxy (D9).
+        // 8b. Inject internal context headers for PingoraProxy.
         let scheme_str = match endpoint.scheme {
             Scheme::Http => "http",
             Scheme::Https => "https",
@@ -819,103 +714,176 @@ impl DataPlaneService for DataPlaneServiceImpl {
             rate_limit_outcome,
         };
 
-        // 8. WebSocket upgrade path: bypass the normal request/response bridge
-        // and set up a bidirectional raw-byte tunnel through Pingora.
+        // 9. WebSocket upgrade: bypass the normal bridge and set up a
+        // bidirectional raw-byte tunnel through Pingora.
         if is_upgrade {
-            let (mut client_io, server_io) = tokio::io::duplex(65_536);
-            let session =
-                pingora_core::protocols::http::ServerSession::new_http1(Box::new(server_io));
-            let proxy = self.proxy.clone();
-            let shutdown = self.shutdown_rx.clone();
-            tokio::spawn(async move {
-                proxy.process_new_http(session, &shutdown).await;
-            });
-
-            // Write the upgrade request (Connection: Upgrade, no body).
-            let wire =
-                session_bridge::serialize_upgrade_request_wire(&method, &url, &outbound_headers);
-            client_io
-                .write_all(&wire)
-                .await
-                .map_err(|e| DomainError::DownstreamError {
-                    detail: format!("failed to write upgrade request to proxy bridge: {e}"),
-                    instance: instance_uri.clone(),
-                })?;
-
-            // Parse only the response headers (IO stays intact for bidirectional copy).
-            let upgrade_timeout = self.request_timeout;
-            let (status, resp_headers, leftover) = tokio::time::timeout(
-                upgrade_timeout,
-                session_bridge::parse_upgrade_response(&mut client_io),
-            )
-            .await
-            .map_err(|_| DomainError::RequestTimeout {
-                detail: format!("WebSocket upgrade to {url} timed out after {upgrade_timeout:?}"),
-                instance: instance_uri.clone(),
-            })?
-            .map_err(|e| DomainError::DownstreamError {
-                detail: format!("proxy bridge error during WebSocket upgrade: {e}"),
-                instance: instance_uri.clone(),
-            })?;
-
-            if status != http::StatusCode::SWITCHING_PROTOCOLS {
-                return Err(DomainError::ProtocolError {
-                    detail: format!("upstream rejected WebSocket upgrade with status {status}"),
-                    instance: instance_uri,
-                });
-            }
-
-            // Execute response guards on the 101.
-            execute_guard_responses(
-                &self.guard_registry,
-                &pipeline.guard_bindings,
-                status,
-                &resp_headers,
-                pipeline.method,
-                pipeline.path_suffix,
-                &instance_uri,
-                pipeline.ctx,
-            )
-            .await?;
-
-            // Sanitize response headers, preserving Upgrade/Connection.
-            let mut resp_headers = resp_headers;
-            headers::sanitize_response_headers_for_upgrade(&mut resp_headers);
-
-            // Inject rate-limit response headers if configured (the normal path
-            // does this in finalize_response, which the upgrade path bypasses).
-            if let Some((ref outcome, true)) = pipeline.rate_limit_outcome {
-                resp_headers.insert("x-ratelimit-limit", HeaderValue::from(outcome.limit));
-                resp_headers.insert(
-                    "x-ratelimit-remaining",
-                    HeaderValue::from(outcome.remaining),
-                );
-                resp_headers.insert("x-ratelimit-reset", HeaderValue::from(outcome.reset_epoch));
-            }
-
-            // Build the 101 response with the DuplexStream stashed in extensions.
-            let mut resp = http::Response::builder()
-                .status(http::StatusCode::SWITCHING_PROTOCOLS)
-                .body(Body::Empty)
-                .map_err(|e| DomainError::Internal {
-                    message: format!("failed to build WebSocket upgrade response: {e}"),
-                })?;
-            *resp.headers_mut() = resp_headers;
-            resp.extensions_mut()
-                .insert(super::websocket::WebSocketBridgeHandle::new(
-                    super::websocket::WebSocketBridgeIo {
-                        io: client_io,
-                        leftover,
-                        idle_timeout: self.websocket_idle_timeout,
-                        close_timeout: self.websocket_close_timeout,
-                        max_frame_size: self.websocket_max_frame_size,
-                        shutdown_rx: self.shutdown_rx.clone(),
-                    },
-                ));
-            return Ok(resp);
+            return self
+                .handle_websocket_upgrade(
+                    &method,
+                    &url,
+                    &outbound_headers,
+                    &pipeline,
+                    &instance_uri,
+                )
+                .await;
         }
 
-        // 8. Bridge request into Pingora via in-memory DuplexStream.
+        // 10. Bridge request into Pingora and read response.
+        let upstream_result = self
+            .bridge_and_respond(
+                &method,
+                &url,
+                &outbound_headers,
+                body_bytes,
+                body_stream,
+                max_body,
+                &pipeline,
+                &instance_uri,
+            )
+            .await;
+
+        // 10b. Execute transform error plugins on upstream failures.
+        match upstream_result {
+            Ok(resp) => Ok(resp),
+            Err(err) => {
+                execute_transform_errors(
+                    &self.transform_registry,
+                    &pipeline.transform_bindings,
+                    &err,
+                    pipeline.ctx,
+                )
+                .await;
+                Err(err)
+            }
+        }
+    }
+
+    fn remove_rate_limit_keys_for_upstream(&self, upstream_id: Uuid) {
+        self.rate_limiter.remove_keys_for_upstream(upstream_id);
+    }
+
+    fn remove_rate_limit_keys_for_route(&self, route_id: Uuid) {
+        self.rate_limiter.remove_keys_for_route(route_id);
+    }
+}
+
+/// Private helpers for the proxy pipeline.
+impl DataPlaneServiceImpl {
+    /// Handle a WebSocket upgrade request through the Pingora bridge.
+    ///
+    /// Sets up a bidirectional raw-byte tunnel, writes the upgrade request,
+    /// validates the 101 response, runs response guards, and returns the
+    /// upgraded response with the bridge IO stashed in extensions.
+    async fn handle_websocket_upgrade(
+        &self,
+        method: &http::Method,
+        url: &str,
+        outbound_headers: &HeaderMap,
+        pipeline: &ResponsePipelineCtx<'_>,
+        instance_uri: &str,
+    ) -> Result<http::Response<Body>, DomainError> {
+        let (mut client_io, server_io) = tokio::io::duplex(65_536);
+        let session = pingora_core::protocols::http::ServerSession::new_http1(Box::new(server_io));
+        let proxy = self.proxy.clone();
+        let shutdown = self.shutdown_rx.clone();
+        tokio::spawn(async move {
+            proxy.process_new_http(session, &shutdown).await;
+        });
+
+        // Write the upgrade request (Connection: Upgrade, no body).
+        let wire = session_bridge::serialize_upgrade_request_wire(method, url, outbound_headers);
+        client_io
+            .write_all(&wire)
+            .await
+            .map_err(|e| DomainError::DownstreamError {
+                detail: format!("failed to write upgrade request to proxy bridge: {e}"),
+                instance: instance_uri.to_string(),
+            })?;
+
+        // Parse only the response headers (IO stays intact for bidirectional copy).
+        let upgrade_timeout = self.request_timeout;
+        let (status, resp_headers, leftover) = tokio::time::timeout(
+            upgrade_timeout,
+            session_bridge::parse_upgrade_response(&mut client_io),
+        )
+        .await
+        .map_err(|_| DomainError::RequestTimeout {
+            detail: format!("WebSocket upgrade to {url} timed out after {upgrade_timeout:?}"),
+            instance: instance_uri.to_string(),
+        })?
+        .map_err(|e| DomainError::DownstreamError {
+            detail: format!("proxy bridge error during WebSocket upgrade: {e}"),
+            instance: instance_uri.to_string(),
+        })?;
+
+        if status != http::StatusCode::SWITCHING_PROTOCOLS {
+            return Err(DomainError::ProtocolError {
+                detail: format!("upstream rejected WebSocket upgrade with status {status}"),
+                instance: instance_uri.to_string(),
+            });
+        }
+
+        // Execute response guards on the 101.
+        execute_guard_responses(
+            &self.guard_registry,
+            &pipeline.guard_bindings,
+            status,
+            &resp_headers,
+            pipeline.method,
+            pipeline.path_suffix,
+            instance_uri,
+            pipeline.ctx,
+        )
+        .await?;
+
+        // Run response transforms first, then sanitize — ensures transforms
+        // cannot reintroduce hop-by-hop or body-related headers that would
+        // break the 101 tunnel contract.
+        let mut resp_headers = resp_headers;
+        self.apply_response_pipeline(pipeline, status, &mut resp_headers)
+            .await;
+        headers::sanitize_response_headers_for_upgrade(&mut resp_headers);
+
+        // Build the 101 response with the DuplexStream stashed in extensions.
+        let mut resp = http::Response::builder()
+            .status(http::StatusCode::SWITCHING_PROTOCOLS)
+            .body(Body::Empty)
+            .map_err(|e| DomainError::Internal {
+                message: format!("failed to build WebSocket upgrade response: {e}"),
+            })?;
+        *resp.headers_mut() = resp_headers;
+        resp.extensions_mut()
+            .insert(super::websocket::WebSocketBridgeHandle::new(
+                super::websocket::WebSocketBridgeIo {
+                    io: client_io,
+                    leftover,
+                    idle_timeout: self.websocket_idle_timeout,
+                    close_timeout: self.websocket_close_timeout,
+                    max_frame_size: self.websocket_max_frame_size,
+                    shutdown_rx: self.shutdown_rx.clone(),
+                },
+            ));
+        Ok(resp)
+    }
+
+    /// Bridge a request into Pingora via in-memory DuplexStream and read the
+    /// response.
+    ///
+    /// Handles both streaming (chunked) and buffered request bodies. The
+    /// streaming path spawns a body-forwarding task that enforces
+    /// `max_body_size` and signals 413 or abort on failures.
+    #[allow(clippy::too_many_arguments)]
+    async fn bridge_and_respond(
+        &self,
+        method: &http::Method,
+        url: &str,
+        outbound_headers: &HeaderMap,
+        body_bytes: Bytes,
+        body_stream: Option<BodyStream>,
+        max_body: usize,
+        pipeline: &ResponsePipelineCtx<'_>,
+        instance_uri: &str,
+    ) -> Result<http::Response<Body>, DomainError> {
         let (client_io, server_io) = tokio::io::duplex(65_536);
 
         // Create Pingora H1 session from the server side of the DuplexStream.
@@ -929,22 +897,18 @@ impl DataPlaneService for DataPlaneServiceImpl {
             proxy.process_new_http(session, &shutdown).await;
         });
 
-        // Write the request and read the response from the client side.
         let timeout = self.request_timeout;
 
-        let upstream_result: Result<http::Response<Body>, DomainError> = if let Some(
-            mut body_stream,
-        ) = body_stream
-        {
+        if let Some(mut body_stream) = body_stream {
             // Streaming path: write headers, then forward body chunks concurrently.
             let (client_read, mut client_write) = tokio::io::split(client_io);
 
             let header_bytes =
-                session_bridge::serialize_request_wire(&method, &url, &outbound_headers, None);
+                session_bridge::serialize_request_wire(method, url, outbound_headers, None);
             client_write.write_all(&header_bytes).await.map_err(|e| {
                 DomainError::DownstreamError {
                     detail: format!("failed to write to proxy bridge: {e}"),
-                    instance: instance_uri.clone(),
+                    instance: instance_uri.to_string(),
                 }
             })?;
 
@@ -954,7 +918,7 @@ impl DataPlaneService for DataPlaneServiceImpl {
             // fast instead of waiting for the full request timeout.
             let (limit_tx, limit_rx) = tokio::sync::oneshot::channel::<usize>();
             let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<String>();
-            let body_instance_uri = instance_uri.clone();
+            let body_instance_uri = instance_uri.to_string();
             tokio::spawn(async move {
                 let mut total_bytes: usize = 0;
                 let mut exceeded = false;
@@ -1017,8 +981,8 @@ impl DataPlaneService for DataPlaneServiceImpl {
                 }
             });
 
-            // 9. Parse response from the read half, but short-circuit to 413
-            //    if the body-forwarding task signals a limit breach.
+            // Parse response from the read half, but short-circuit to 413
+            // if the body-forwarding task signals a limit breach.
             let resp_future =
                 tokio::time::timeout(timeout, session_bridge::parse_response_stream(client_read));
             tokio::select! {
@@ -1041,28 +1005,28 @@ impl DataPlaneService for DataPlaneServiceImpl {
                     let (status, resp_headers, resp_body_stream) = result
                         .map_err(|_| DomainError::RequestTimeout {
                             detail: format!("request to {url} timed out after {timeout:?}"),
-                            instance: instance_uri.clone(),
+                            instance: instance_uri.to_string(),
                         })?
                         .map_err(|e| DomainError::DownstreamError {
                             detail: format!("proxy bridge error: {e}"),
-                            instance: instance_uri.clone(),
+                            instance: instance_uri.to_string(),
                         })?;
                     self.finalize_response(
-                        &pipeline,
+                        pipeline,
                         status,
                         resp_headers,
                         resp_body_stream,
-                        instance_uri,
+                        instance_uri.to_string(),
                     )
                     .await
                 }
             }
         } else {
-            // Buffered path: write full request, shutdown write side, then read response.
+            // Buffered path: write full request then read response.
             let wire = session_bridge::serialize_request_wire(
-                &method,
-                &url,
-                &outbound_headers,
+                method,
+                url,
+                outbound_headers,
                 Some(&body_bytes),
             );
             let mut client_io = client_io;
@@ -1071,58 +1035,310 @@ impl DataPlaneService for DataPlaneServiceImpl {
                 .await
                 .map_err(|e| DomainError::DownstreamError {
                     detail: format!("failed to write to proxy bridge: {e}"),
-                    instance: instance_uri.clone(),
+                    instance: instance_uri.to_string(),
                 })?;
             // Do NOT shutdown the write side — Pingora uses Content-Length to
             // determine the request boundary, and an early write-close is
             // misinterpreted as "downstream dropped the connection".
 
-            // 9. Parse response.
             let (status, resp_headers, resp_body_stream) =
                 tokio::time::timeout(timeout, session_bridge::parse_response_stream(client_io))
                     .await
                     .map_err(|_| DomainError::RequestTimeout {
                         detail: format!("request to {url} timed out after {timeout:?}"),
-                        instance: instance_uri.clone(),
+                        instance: instance_uri.to_string(),
                     })?
                     .map_err(|e| DomainError::DownstreamError {
                         detail: format!("proxy bridge error: {e}"),
-                        instance: instance_uri.clone(),
+                        instance: instance_uri.to_string(),
                     })?;
 
             self.finalize_response(
-                &pipeline,
+                pipeline,
                 status,
                 resp_headers,
                 resp_body_stream,
-                instance_uri,
+                instance_uri.to_string(),
             )
             .await
+        }
+    }
+}
+
+/// Execute the auth plugin for the upstream, mutating outbound headers with
+/// injected credentials (e.g. Bearer token, API key).
+///
+/// Returns the updated header map. No-op if the upstream has no auth config.
+async fn execute_auth_plugin(
+    auth_registry: &AuthPluginRegistry,
+    auth: &crate::domain::model::AuthConfig,
+    outbound_headers: &HeaderMap,
+    ctx: &SecurityContext,
+    instance_uri: &str,
+) -> Result<HeaderMap, DomainError> {
+    tracing::debug!(plugin = %auth.plugin_type, "executing auth plugin");
+    let plugin = auth_registry.resolve(&auth.plugin_type).map_err(|e| {
+        DomainError::AuthenticationFailed {
+            reason: "AUTH_PLUGIN_NOT_FOUND",
+            detail: e.to_string(),
+            instance: instance_uri.to_string(),
+        }
+    })?;
+    let mut auth_ctx = AuthContext {
+        headers: headers::header_map_to_hash_map(outbound_headers),
+        config: auth.config.clone().unwrap_or_default(),
+        security_context: ctx.clone(),
+    };
+    plugin
+        .authenticate(&mut auth_ctx)
+        .await
+        .map_err(|e| match e {
+            crate::domain::plugin::PluginError::SecretNotFound(ref s) => {
+                DomainError::SecretNotFound {
+                    detail: s.clone(),
+                    instance: instance_uri.to_string(),
+                }
+            }
+            crate::domain::plugin::PluginError::Rejected(ref msg)
+            | crate::domain::plugin::PluginError::InvalidConfig(ref msg) => {
+                DomainError::Validation {
+                    field: "plugin",
+                    reason: "INVALID_PLUGIN_CONFIG",
+                    detail: msg.clone(),
+                    instance: instance_uri.to_string(),
+                }
+            }
+            crate::domain::plugin::PluginError::AuthFailed(_) => {
+                DomainError::AuthenticationFailed {
+                    reason: "AUTH_PLUGIN_FAILED",
+                    detail: e.to_string(),
+                    instance: instance_uri.to_string(),
+                }
+            }
+            crate::domain::plugin::PluginError::Internal(_) => DomainError::AuthenticationFailed {
+                reason: "AUTH_PLUGIN_INTERNAL",
+                detail: e.to_string(),
+                instance: instance_uri.to_string(),
+            },
+        })?;
+    tracing::debug!(plugin = %auth.plugin_type, "auth plugin succeeded");
+    Ok(headers::hash_map_to_header_map(&auth_ctx.headers))
+}
+
+/// Execute guard plugins on the request, returning the first rejection.
+///
+/// Guards use fail-hard semantics: the first rejection or error terminates the
+/// pipeline immediately.
+async fn execute_guard_requests(
+    guard_registry: &GuardPluginRegistry,
+    guard_bindings: &[&crate::domain::model::PluginBinding],
+    outbound_headers: &HeaderMap,
+    method: &str,
+    path_suffix: &str,
+    ctx: &SecurityContext,
+    instance_uri: &str,
+) -> Result<(), DomainError> {
+    let guard_headers = headers::header_map_to_vec(outbound_headers);
+    for binding in guard_bindings {
+        let guard =
+            guard_registry
+                .resolve(&binding.plugin_ref)
+                .map_err(|e| DomainError::Internal {
+                    message: format!(
+                        "guard plugin '{}' resolution failed: {e}",
+                        binding.plugin_ref
+                    ),
+                })?;
+
+        let guard_ctx = GuardContext {
+            method: method.to_string(),
+            path: path_suffix.to_string(),
+            status: None,
+            headers: guard_headers.clone(),
+            config: binding.config.clone(),
+            security_context: ctx.clone(),
         };
 
-        // 9d. Execute transform error plugins on upstream failures.
-        match upstream_result {
-            Ok(resp) => Ok(resp),
-            Err(err) => {
-                execute_transform_errors(
-                    &self.transform_registry,
-                    &pipeline.transform_bindings,
-                    &err,
-                    pipeline.ctx,
-                )
-                .await;
-                Err(err)
+        match guard.guard_request(&guard_ctx).await {
+            Ok(GuardDecision::Allow) => {}
+            Ok(GuardDecision::Reject {
+                status,
+                error_code,
+                detail,
+                resource_id,
+            }) => {
+                return Err(DomainError::GuardRejected {
+                    status,
+                    error_code,
+                    detail,
+                    instance: instance_uri.to_string(),
+                    resource_id,
+                });
+            }
+            Err(e) => {
+                return Err(DomainError::Internal {
+                    message: format!("guard plugin error: {e}"),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Execute transform plugins on the request (on_request phase).
+///
+/// Placed after header rules so transforms have the final word on outbound
+/// headers. Errors are logged and skipped — transforms use log-and-continue
+/// semantics so a single misbehaving transform cannot block the pipeline.
+async fn execute_transform_requests(
+    transform_registry: &TransformPluginRegistry,
+    transform_bindings: &[&crate::domain::model::PluginBinding],
+    outbound_headers: &mut HeaderMap,
+    query_params: &mut Vec<(String, String)>,
+    method: &str,
+    path_suffix: &str,
+    ctx: &SecurityContext,
+) {
+    if transform_bindings.is_empty() {
+        return;
+    }
+
+    let mut transform_headers = headers::header_map_to_vec(outbound_headers);
+    let mut transform_query: Vec<(String, String)> = query_params.clone();
+
+    for binding in transform_bindings {
+        let mut transform_ctx = TransformRequestContext {
+            method: method.to_string(),
+            path: path_suffix.to_string(),
+            query: transform_query.clone(),
+            headers: transform_headers.clone(),
+            config: binding.config.clone(),
+            security_context: ctx.clone(),
+        };
+        match transform_registry.resolve(&binding.plugin_ref) {
+            Ok(transform) => match transform.on_request(&mut transform_ctx).await {
+                Ok(()) => {
+                    transform_headers = transform_ctx.headers;
+                    transform_query = transform_ctx.query;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        plugin = %binding.plugin_ref,
+                        error = %e,
+                        "transform on_request failed, continuing"
+                    );
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    plugin = %binding.plugin_ref,
+                    error = %e,
+                    "transform plugin resolution failed, continuing"
+                );
+                continue;
             }
         }
     }
 
-    fn remove_rate_limit_keys_for_upstream(&self, upstream_id: Uuid) {
-        self.rate_limiter.remove_keys_for_upstream(upstream_id);
+    // Write mutated headers and query params back.
+    *outbound_headers = headers::vec_to_header_map(&transform_headers);
+    *query_params = transform_query;
+}
+
+/// Enforce CORS origin and method constraints for actual (non-preflight) requests.
+///
+/// Validates the `Origin` header against the upstream's CORS config and rejects
+/// disallowed origins/methods before the request reaches the upstream.
+fn enforce_cors_origin(
+    cors_config: Option<&crate::domain::model::CorsConfig>,
+    origin: Option<&str>,
+    method: &str,
+    instance_uri: &str,
+) -> Result<(), DomainError> {
+    if let Some(cors_config) = cors_config
+        && cors_config.enabled
+        && let Some(origin) = origin
+    {
+        if !crate::domain::cors::is_origin_allowed(cors_config, origin) {
+            return Err(DomainError::CorsOriginNotAllowed {
+                origin: origin.to_string(),
+                instance: instance_uri.to_string(),
+            });
+        }
+        if !crate::domain::cors::is_method_allowed(cors_config, method) {
+            return Err(DomainError::CorsMethodNotAllowed {
+                method: method.to_string(),
+                instance: instance_uri.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Check rate limits for both upstream and route, returning the tightest outcome.
+///
+/// Both upstream and route buckets are decremented unconditionally — an upstream
+/// token is spent even when a stricter route-level bucket later causes rejection.
+fn check_rate_limits(
+    rate_limiter: &RateLimiter,
+    upstream: &Upstream,
+    route: &crate::domain::model::Route,
+    req_headers: &HeaderMap,
+    ctx: &SecurityContext,
+    instance_uri: &str,
+) -> Result<Option<(RateLimitOutcome, bool)>, DomainError> {
+    let mut outcome: Option<(RateLimitOutcome, bool)> = None;
+    let client_ip = headers::extract_client_ip(req_headers);
+    let client_ip_ref = client_ip.as_deref();
+    let tenant_id = ctx.subject_tenant_id();
+    let subject_id = ctx.subject_id();
+
+    if let Some(ref rl) = upstream.rate_limit {
+        // For shared-pool budgets, use the pool owner's ID so all children
+        // sharing the pool consume from the same token bucket.
+        let effective_resource_id = rl.pool_owner_id.as_ref().unwrap_or(&upstream.id);
+        let key = build_rate_limit_key(&RateLimitKeyContext {
+            resource: RateLimitResource::Upstream,
+            resource_id: effective_resource_id,
+            scope: &rl.scope,
+            tenant_id: &tenant_id,
+            subject_id: &subject_id,
+            client_ip: client_ip_ref,
+            window: &rl.sustained.window,
+        });
+        let result = rate_limiter.try_consume(&key, rl, instance_uri)?;
+        outcome = Some((result, rl.response_headers));
     }
 
-    fn remove_rate_limit_keys_for_route(&self, route_id: Uuid) {
-        self.rate_limiter.remove_keys_for_route(route_id);
+    if let Some(ref rl) = route.rate_limit {
+        let key = build_rate_limit_key(&RateLimitKeyContext {
+            resource: RateLimitResource::Route,
+            resource_id: &route.id,
+            scope: &rl.scope,
+            tenant_id: &tenant_id,
+            subject_id: &subject_id,
+            client_ip: client_ip_ref,
+            window: &rl.sustained.window,
+        });
+        let result = rate_limiter.try_consume(&key, rl, instance_uri)?;
+        match &outcome {
+            Some((existing, show_headers)) if existing.remaining <= result.remaining => {
+                // Tighter (or equal) bucket wins for enforcement; on ties
+                // upstream wins — both remaining counts are identical so the
+                // allow/reject decision is the same either way. OR the header
+                // flags so headers are emitted if either scope enables them.
+                if rl.response_headers && !show_headers {
+                    outcome = outcome.map(|(o, _)| (o, true));
+                }
+            }
+            _ => {
+                let prev_headers = outcome.as_ref().is_some_and(|(_, h)| *h);
+                outcome = Some((result, rl.response_headers || prev_headers));
+            }
+        }
     }
+
+    Ok(outcome)
 }
 
 /// Collect plugin bindings from the effective upstream, filtered by a type predicate.
