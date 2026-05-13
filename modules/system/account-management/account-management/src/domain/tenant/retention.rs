@@ -264,13 +264,13 @@ impl HardDeleteResult {
 /// `compensated` counts rows where the reaper actively drove the
 /// `IdP`-side teardown (clean `Ok` or `UnsupportedOperation`-mapped to
 /// success). `already_absent` counts rows where the `IdP` reported the
-/// tenant was already gone (`DeprovisionFailure::NotFound`) — the DB
+/// tenant was already gone (`IdpDeprovisionFailure::NotFound`) — the DB
 /// teardown still ran, but the operator-visible signal differs:
 /// `already_absent` typically points at a lost claim or a
 /// cross-system inconsistency that warrants investigation, whereas
 /// `compensated` is the steady-state success path. `terminal` counts
 /// rows the `IdP` plugin classified as
-/// [`account_management_sdk::DeprovisionFailure::Terminal`] — the
+/// [`account_management_sdk::IdpDeprovisionFailure::Terminal`] — the
 /// reaper stamps `terminal_failure_at` on the row and stops cycling
 /// it through the retry loop; the operator-action-required signal is
 /// emitted via this counter and the

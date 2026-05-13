@@ -25,10 +25,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use modkit_macros::domain_model;
 use modkit_security::AccessScope;
+use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use account_management_sdk::{ListChildrenQuery, ProvisionMetadataEntry, TenantPage, TenantUpdate};
+use account_management_sdk::{ListChildrenQuery, TenantPage, TenantUpdate};
 
 use crate::domain::error::DomainError;
 use crate::domain::tenant::closure::ClosureRow;
@@ -79,7 +80,12 @@ pub enum NextAuditOutcome {
 pub struct RepoState {
     pub tenants: HashMap<Uuid, TenantModel>,
     pub closure: Vec<ClosureRow>,
-    pub metadata: Vec<(Uuid, ProvisionMetadataEntry)>,
+    /// Mirror of `tenant_idp_metadata` — one entry per activated
+    /// tenant; the value is `None` when the `IdP` plugin returned no
+    /// per-tenant state from `IdpProvisionResult::metadata`. Tests that
+    /// drive the user-ops path can seed entries directly to script
+    /// the blob `TenantContext::metadata` carries on each `IdP` call.
+    pub idp_metadata: HashMap<Uuid, Option<Value>>,
     /// Phase 3 — per-tenant retention metadata mirroring the columns
     /// added in migration `0002_add_retention_columns.sql`.
     pub retention: HashMap<Uuid, (OffsetDateTime, Option<Duration>)>,
@@ -91,7 +97,7 @@ pub struct RepoState {
     pub claims: HashMap<Uuid, Uuid>,
     /// Mirror of `tenants.terminal_failure_at`. Stamped by
     /// [`TenantRepo::mark_provisioning_terminal_failure`] when the
-    /// reaper observes [`account_management_sdk::DeprovisionFailure::Terminal`];
+    /// reaper observes [`account_management_sdk::IdpDeprovisionFailure::Terminal`];
     /// rows present in this map are filtered out of
     /// `scan_stuck_provisioning` to keep the operator-action-required
     /// state out of the automatic retry loop.
@@ -116,6 +122,12 @@ pub struct RepoState {
     /// path and silently weakening combined-flow coverage.
     /// Defaults to the same `Ok` arm as `next_audit_outcome`.
     pub next_repair_outcome: NextAuditOutcome,
+    /// One-shot control over the next `upsert_idp_metadata` call.
+    /// `Some(detail)` injects a `DomainError::Internal` to drive the
+    /// pre-activation persistence failure branch of the create-child
+    /// saga (mirrors [`Self::next_activation_outcome`] for the
+    /// activation-failure branch). Consumed via `mem::take`.
+    pub next_upsert_idp_metadata_failure: Option<String>,
 }
 
 #[domain_model]
@@ -163,8 +175,43 @@ impl FakeTenantRepo {
         self.state.lock().expect("lock").tenants.insert(t.id, t);
     }
 
+    /// Seed a `tenant_idp_metadata` row directly, without going
+    /// through `activate_tenant`. Used by service-level tests that
+    /// need to script the `TenantContext::metadata` payload carried
+    /// on every `IdP` user-ops call.
+    pub fn seed_idp_metadata(&self, tenant_id: Uuid, metadata: Option<Value>) {
+        self.state
+            .lock()
+            .expect("lock")
+            .idp_metadata
+            .insert(tenant_id, metadata);
+    }
+
     pub fn snapshot_closure(&self) -> Vec<ClosureRow> {
         self.state.lock().expect("lock").closure.clone()
+    }
+
+    /// Push one [`ClosureRow`] directly into the fake's closure
+    /// storage. Used by tests that seed a hand-built tree to assert
+    /// closure-mutating service paths (conversion approval, status
+    /// flips) without going through the production saga that would
+    /// otherwise materialize closure rows. Mirrors `insert_tenant_raw`
+    /// in shape — bypasses the production write path on purpose so
+    /// tests can stage state that wouldn't be reachable through the
+    /// repo's regular trait surface.
+    pub fn seed_closure(
+        &self,
+        ancestor_id: Uuid,
+        descendant_id: Uuid,
+        barrier: i16,
+        descendant_status: TenantStatus,
+    ) {
+        self.state.lock().expect("lock").closure.push(ClosureRow {
+            ancestor_id,
+            descendant_id,
+            barrier,
+            descendant_status: descendant_status.as_smallint(),
+        });
     }
 
     /// Direct row lookup that bypasses the `AccessScope` visibility
@@ -276,6 +323,19 @@ impl FakeTenantRepo {
     pub fn expect_next_activation_failure(&self, detail: impl Into<String>) {
         self.state.lock().expect("lock").next_activation_outcome =
             NextActivationOutcome::InternalErr(detail.into());
+    }
+
+    /// Arm the next `upsert_idp_metadata` call to return
+    /// `DomainError::Internal { diagnostic: detail }` exactly once.
+    /// Drives the create-child saga's pre-activation persistence
+    /// failure branch — pinning that a transient DB blip on the
+    /// metadata write does NOT bypass `compensate_failed_activation`
+    /// (closes codex P1 on the previous review pass).
+    pub fn expect_next_upsert_idp_metadata_failure(&self, detail: impl Into<String>) {
+        self.state
+            .lock()
+            .expect("lock")
+            .next_upsert_idp_metadata_failure = Some(detail.into());
     }
 
     /// Script `run_integrity_check_for_scope` to return a non-empty
@@ -433,6 +493,44 @@ impl TenantRepo for FakeTenantRepo {
         Ok(state.tenants.get(&id).cloned())
     }
 
+    async fn find_many(
+        &self,
+        scope: &AccessScope,
+        ids: &[Uuid],
+    ) -> Result<Vec<TenantModel>, DomainError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Mirror the production de-dup: a caller-supplied id slice
+        // with duplicates collapses to one row per unique id.
+        let mut deduped: Vec<Uuid> = ids.to_vec();
+        deduped.sort_unstable();
+        deduped.dedup();
+
+        let state = self.state.lock().expect("lock");
+        let visible = visible_ids_for(&state, scope);
+        let mut out = Vec::with_capacity(deduped.len());
+        for id in deduped {
+            if let Some(ref vis) = visible
+                && !vis.contains(&id)
+            {
+                continue;
+            }
+            // Mirror the production `find_many`'s `deleted_at IS NULL`
+            // filter — a soft-deleted row MUST NOT surface through the
+            // batch lookup so the parent listing's live-name fallback
+            // path stays exercised in tests. `find_by_id` is
+            // intentionally broader (it returns soft-deleted rows too)
+            // and that asymmetry is documented on the trait.
+            if let Some(t) = state.tenants.get(&id)
+                && t.deleted_at.is_none()
+            {
+                out.push(t.clone());
+            }
+        }
+        Ok(out)
+    }
+
     async fn list_children(
         &self,
         scope: &AccessScope,
@@ -465,12 +563,7 @@ impl TenantRepo for FakeTenantRepo {
         let skip = usize::try_from(query.skip).unwrap_or(usize::MAX);
         let top = usize::try_from(query.top()).unwrap_or(usize::MAX);
         let paged: Vec<TenantModel> = items.into_iter().skip(skip).take(top).collect();
-        Ok(TenantPage {
-            items: paged,
-            top: query.top(),
-            skip: query.skip,
-            total: Some(total),
-        })
+        Ok(TenantPage::new(paged, query.top(), query.skip, Some(total)))
     }
 
     async fn insert_provisioning(
@@ -535,7 +628,7 @@ impl TenantRepo for FakeTenantRepo {
         _scope: &AccessScope,
         tenant_id: Uuid,
         closure_rows: &[ClosureRow],
-        metadata_entries: &[ProvisionMetadataEntry],
+        idp_metadata: Option<&Value>,
     ) -> Result<TenantModel, DomainError> {
         let mut state = self.state.lock().expect("lock");
         // F3 — finalization-TX failure injection: consume the typed
@@ -590,13 +683,46 @@ impl TenantRepo for FakeTenantRepo {
         tenant.status = TenantStatus::Active;
         let activated = tenant.clone();
         state.closure.extend(closure_rows.iter().cloned());
-        state.metadata.extend(
-            metadata_entries
-                .iter()
-                .cloned()
-                .map(|entry| (tenant_id, entry)),
-        );
+        state.idp_metadata.insert(tenant_id, idp_metadata.cloned());
         Ok(activated)
+    }
+
+    async fn find_idp_metadata(
+        &self,
+        _scope: &AccessScope,
+        tenant_id: Uuid,
+    ) -> Result<Option<Value>, DomainError> {
+        let state = self.state.lock().expect("lock");
+        Ok(state.idp_metadata.get(&tenant_id).cloned().flatten())
+    }
+
+    async fn upsert_idp_metadata(
+        &self,
+        _scope: &AccessScope,
+        tenant_id: Uuid,
+        idp_metadata: Option<&Value>,
+    ) -> Result<(), DomainError> {
+        // Mirror of the production `ON CONFLICT (tenant_id) DO
+        // UPDATE`: `HashMap::insert` overwrites the existing value
+        // when present and inserts otherwise, matching the upsert
+        // semantics. The fake intentionally does NOT fence on row
+        // existence in `tenants` — the production migration relies
+        // on the FK + ON DELETE CASCADE, but the fake's
+        // `compensate_provisioning` / `hard_delete_one` already
+        // remove the metadata row explicitly when the parent
+        // tenant goes away, so the cascade semantics are reproduced
+        // without modeling the FK directly.
+        let mut state = self.state.lock().expect("lock");
+        // Consume the one-shot failure injection so tests can drive
+        // the create-child saga's pre-activation failure branch.
+        if let Some(detail) = state.next_upsert_idp_metadata_failure.take() {
+            return Err(DomainError::Internal {
+                diagnostic: format!("fake upsert_idp_metadata aborted for {tenant_id}: {detail}"),
+                cause: None,
+            });
+        }
+        state.idp_metadata.insert(tenant_id, idp_metadata.cloned());
+        Ok(())
     }
 
     async fn compensate_provisioning(
@@ -637,6 +763,13 @@ impl TenantRepo for FakeTenantRepo {
                 // production schema would have dropped with it.
                 state.claims.remove(&tenant_id);
                 state.terminal_failures.remove(&tenant_id);
+                // Parity with the real explicit `tenant_idp_metadata`
+                // DELETE in `repo_impl::lifecycle::compensate_provisioning`.
+                // The fake doesn't model a FK; this mirror keeps test
+                // assertions over `find_idp_metadata` honest when a
+                // pre-activation upsert produced a row that
+                // `compensate_failed_activation` cleaned up.
+                state.idp_metadata.remove(&tenant_id);
                 Ok(())
             }
             Some(_) => Err(DomainError::Conflict {
@@ -1068,7 +1201,7 @@ impl TenantRepo for FakeTenantRepo {
         state
             .closure
             .retain(|r| r.ancestor_id != id && r.descendant_id != id);
-        state.metadata.retain(|(tid, _)| *tid != id);
+        state.idp_metadata.remove(&id);
         state.tenants.remove(&id);
         state.retention.remove(&id);
         state.claims.remove(&id);
@@ -1398,7 +1531,7 @@ mod repo_contract_tests {
         let closure_rows = build_activation_rows(child, TenantStatus::Active, false, &[root_model]);
 
         let err = repo
-            .activate_tenant(&AccessScope::allow_all(), child, &closure_rows, &[])
+            .activate_tenant(&AccessScope::allow_all(), child, &closure_rows, None)
             .await
             .expect_err("activation must reject reaper-claimed row");
         assert!(
@@ -1415,7 +1548,7 @@ mod repo_contract_tests {
     }
 
     /// Sibling race: a peer reaper has classified the in-flight
-    /// provision as `DeprovisionFailure::Terminal` and stamped
+    /// provision as `IdpDeprovisionFailure::Terminal` and stamped
     /// `terminal_failure_at`, parking the row out of the retry loop.
     /// A late saga finalization MUST observe the parked marker and
     /// refuse to activate, so operators retain their action-required
@@ -1446,7 +1579,7 @@ mod repo_contract_tests {
         let closure_rows = build_activation_rows(child, TenantStatus::Active, false, &[root_model]);
 
         let err = repo
-            .activate_tenant(&AccessScope::allow_all(), child, &closure_rows, &[])
+            .activate_tenant(&AccessScope::allow_all(), child, &closure_rows, None)
             .await
             .expect_err("activation must reject terminal-stamped row");
         assert!(

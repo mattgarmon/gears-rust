@@ -164,7 +164,7 @@ pub(super) async fn scan_retention_due(
                     // `hard_delete_batch` step classified the
                     // outcome as non-recoverable (cascade hook
                     // returned `HookError::Terminal` / panicked, or
-                    // IdP returned `DeprovisionFailure::Terminal`).
+                    // IdP returned `IdpDeprovisionFailure::Terminal`).
                     // Without this predicate the same broken row
                     // would re-enter the scanner every tick and
                     // re-fail with the same terminal outcome, churning
@@ -432,10 +432,10 @@ pub(super) async fn scan_stuck_provisioning(
     limit: usize,
 ) -> Result<Vec<TenantProvisioningRow>, DomainError> {
     // Atomic claim-and-go pattern symmetric to `scan_retention_due`:
-    // two replicas cannot stamp `IdpTenantProvisionerClient::deprovision_tenant`
+    // two replicas cannot stamp `IdpPluginClient::deprovision_tenant`
     // calls onto the same row inside one `RETENTION_CLAIM_TTL` window.
     // Defense-in-depth on top of the
-    // `DeprovisionFailure::NotFound`-as-success-equivalent error
+    // `IdpDeprovisionFailure::NotFound`-as-success-equivalent error
     // mapping — that mapping handles edge-case races (lost claim
     // after crash recovery, TTL-expired peer takeover); the claim
     // here prevents the routine concurrent-replica double-call.
@@ -466,7 +466,7 @@ pub(super) async fn scan_stuck_provisioning(
                     // Filter out rows the reaper previously stamped
                     // as terminal-failure (`mark_provisioning_terminal_failure`).
                     // The SDK contract says
-                    // `DeprovisionFailure::Terminal` is non-recoverable
+                    // `IdpDeprovisionFailure::Terminal` is non-recoverable
                     // and operator-action-required, so re-issuing the
                     // deprovision call on every tick would loop
                     // forever without surfacing any new signal. The

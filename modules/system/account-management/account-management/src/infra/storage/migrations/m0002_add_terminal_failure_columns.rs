@@ -3,7 +3,7 @@
 //! `algo-tenant-hierarchy-management-provisioning-reaper-compensation`.
 //!
 //! When the `IdP` plugin returns
-//! [`account_management_sdk::DeprovisionFailure::Terminal`], the SDK
+//! [`account_management_sdk::IdpDeprovisionFailure::Terminal`], the SDK
 //! contract says the tenant cannot be deprovisioned by the provider
 //! and operator intervention is required. The reaper used to map
 //! `Terminal` to `ReaperOutcome::Defer` which released the claim,

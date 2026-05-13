@@ -1,6 +1,6 @@
 //! `SeaORM` entity for the AM-owned `tenant_metadata` table.
 //!
-//! Bootstrap persists provider-returned `ProvisionResult` metadata here
+//! Bootstrap persists provider-returned `IdpProvisionResult` metadata here
 //! during the same activation transaction that flips a tenant from
 //! `provisioning` to `active`.
 

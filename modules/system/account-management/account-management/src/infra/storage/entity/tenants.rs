@@ -76,7 +76,7 @@ pub struct Model {
     pub claimed_at: Option<OffsetDateTime>,
     /// Phase 5 — operator-action-required marker for provisioning rows
     /// the `IdP` plugin classified as
-    /// [`account_management_sdk::DeprovisionFailure::Terminal`]. Once
+    /// [`account_management_sdk::IdpDeprovisionFailure::Terminal`]. Once
     /// stamped, [`scan_stuck_provisioning`](super::super::repo_impl::retention::scan_stuck_provisioning)
     /// filters the row out of the reaper retry loop until an operator
     /// clears the column or hard-deletes the row. Always `None` for

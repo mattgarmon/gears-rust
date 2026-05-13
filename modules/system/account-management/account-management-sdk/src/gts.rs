@@ -45,3 +45,68 @@ pub const TENANT_METADATA_RESOURCE_TYPE: &str = "gts.cf.core.am.tenant_metadata.
 /// by the conversion-request feature and for the future PEP gate on
 /// conversion read / approve / reject endpoints.
 pub const CONVERSION_REQUEST_RESOURCE_TYPE: &str = "gts.cf.core.am.conversion_request.v1~";
+
+/// AM `IdpUser` resource projection. Mirror of the
+/// `gts.cf.core.am.user.v1~` JSON Schema declared in
+/// `modules/system/account-management/docs/schemas/user.v1.schema.json`
+/// and produced by [`crate::IdpUser`]. Surfaces as the `resource_type`
+/// on user-scoped canonical errors raised by the user-operations
+/// feature (`feature-idp-user-operations-contract`).
+pub const USER_RESOURCE_TYPE: &str = "gts.cf.core.am.user.v1~";
+
+// ---------------------------------------------------------------------------
+// IdP provider plugin spec
+// ---------------------------------------------------------------------------
+
+use modkit::gts::PluginV1;
+use modkit_gts::gts_type_schema;
+
+/// GTS type definition for `IdP` provider plugin instances.
+///
+/// Each `IdP` plugin registers an instance of this type with its
+/// vendor-specific instance ID. AM resolves the active plugin
+/// through `ClientHub` keyed by the schema id below per
+/// `cpt-cf-account-management-adr-idp-contract-separation` (ADR-0001).
+///
+/// Mirrors the established `AuthNResolverPluginSpecV1` pattern from
+/// `cyberware-authn-resolver-sdk::gts` so plugin discovery is
+/// uniform across the Cyber Ware plugin contracts (`IdpPluginClient`,
+/// `AuthNResolverPluginClient`, `TenantResolverPluginClient`, …).
+///
+/// # Instance ID Format
+///
+/// ```text
+/// gts.cf.modkit.plugins.plugin.v1~<vendor>.<package>.idp.plugin.v1~
+/// ```
+///
+/// # Example
+///
+/// ```ignore
+/// use account_management_sdk::IdpPluginSpecV1;
+/// use modkit::gts::PluginV1;
+///
+/// // Plugin generates its instance ID
+/// let instance_id = IdpPluginSpecV1::gts_make_instance_id(
+///     "cf.builtin.keycloak_idp.plugin.v1",
+/// );
+///
+/// // Plugin builds the registration record
+/// let instance = PluginV1::<IdpPluginSpecV1> {
+///     id: instance_id.clone(),
+///     vendor: "cyberfabric".to_owned(),
+///     priority: 100,
+///     properties: IdpPluginSpecV1,
+/// };
+///
+/// // Register with types-registry
+/// // registry.register(vec![serde_json::to_value(&instance)?]).await?;
+/// ```
+#[derive(Default)]
+#[gts_type_schema(
+    dir_path = "schemas",
+    base = PluginV1,
+    schema_id = "gts.cf.modkit.plugins.plugin.v1~cf.core.idp.plugin.v1~",
+    description = "IdP provider plugin specification",
+    properties = "",
+)]
+pub struct IdpPluginSpecV1;

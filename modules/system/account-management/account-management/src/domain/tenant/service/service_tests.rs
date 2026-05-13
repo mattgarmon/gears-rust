@@ -18,6 +18,257 @@ use modkit_security::AccessScope;
 use std::sync::Mutex;
 use time::OffsetDateTime;
 
+/// Test-only `TypesRegistryClient` that resolves every UUID to the
+/// same hard-coded chained `GtsTypeSchema`. The reaper / retention
+/// pipelines (and `UserService::resolve_active_tenant`) call
+/// `get_type_schema_by_uuid` on the tenant's `tenant_type_uuid`
+/// before `IdpPluginClient::deprovision_tenant`; the production code
+/// surfaces a miss as `ServiceUnavailable`, but the in-memory test
+/// repo seeds an opaque `Uuid::from_u128(0xAA)` that no real
+/// registry would know about. Returning the canonical
+/// `gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~` schema for
+/// any UUID keeps the existing fixtures viable without touching every
+/// `with_root` / `seed_tenant` call site — the precise UUID is not
+/// load-bearing for these tests, only the typed `tenant_type` on the
+/// resulting `TenantContext`.
+struct ConstantTypesRegistry;
+
+fn synth_type_schema(type_id: &str) -> types_registry_sdk::GtsTypeSchema {
+    let parent = types_registry_sdk::GtsTypeSchema::derive_parent_type_id(type_id)
+        .map(|p| std::sync::Arc::new(synth_type_schema(p.as_ref())));
+    types_registry_sdk::GtsTypeSchema::try_new(
+        types_registry_sdk::GtsTypeId::new(type_id),
+        serde_json::json!({}),
+        None,
+        parent,
+    )
+    .expect("synthetic GtsTypeSchema for test is valid")
+}
+
+#[async_trait]
+impl types_registry_sdk::TypesRegistryClient for ConstantTypesRegistry {
+    async fn register(
+        &self,
+        _entities: Vec<serde_json::Value>,
+    ) -> Result<Vec<types_registry_sdk::RegisterResult>, types_registry_sdk::TypesRegistryError>
+    {
+        Ok(Vec::new())
+    }
+    async fn register_type_schemas(
+        &self,
+        _schemas: Vec<serde_json::Value>,
+    ) -> Result<Vec<types_registry_sdk::RegisterResult>, types_registry_sdk::TypesRegistryError>
+    {
+        Ok(Vec::new())
+    }
+    async fn get_type_schema(
+        &self,
+        type_id: &str,
+    ) -> Result<types_registry_sdk::GtsTypeSchema, types_registry_sdk::TypesRegistryError> {
+        // Surface NOT_FOUND for AM-owned resource schemas
+        // (`gts.cf.core.am.tenant.v1~` / `.user.v1~`) so callers like
+        // `validate_tenant_name_via_gts` short-circuit to `Ok(())`
+        // and the AM-side `trim+empty` / DB `CHECK` constraints
+        // remain the authoritative gate in tests. The
+        // `get_type_schema_by_uuid` path below still returns a
+        // synthetic schema because `load_tenant_context` treats
+        // missing entries as a hard failure (`ServiceUnavailable`)
+        // after the IdP-metadata isolation refactor.
+        Err(types_registry_sdk::TypesRegistryError::gts_type_schema_not_found(type_id))
+    }
+    async fn get_type_schema_by_uuid(
+        &self,
+        _type_uuid: Uuid,
+    ) -> Result<types_registry_sdk::GtsTypeSchema, types_registry_sdk::TypesRegistryError> {
+        Ok(synth_type_schema(
+            "gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~",
+        ))
+    }
+    async fn get_type_schemas(
+        &self,
+        _ids: Vec<String>,
+    ) -> std::collections::HashMap<
+        String,
+        Result<types_registry_sdk::GtsTypeSchema, types_registry_sdk::TypesRegistryError>,
+    > {
+        std::collections::HashMap::new()
+    }
+    async fn get_type_schemas_by_uuid(
+        &self,
+        _ids: Vec<Uuid>,
+    ) -> std::collections::HashMap<
+        Uuid,
+        Result<types_registry_sdk::GtsTypeSchema, types_registry_sdk::TypesRegistryError>,
+    > {
+        std::collections::HashMap::new()
+    }
+    async fn list_type_schemas(
+        &self,
+        _query: types_registry_sdk::TypeSchemaQuery,
+    ) -> Result<Vec<types_registry_sdk::GtsTypeSchema>, types_registry_sdk::TypesRegistryError>
+    {
+        Ok(Vec::new())
+    }
+    async fn register_instances(
+        &self,
+        _instances: Vec<serde_json::Value>,
+    ) -> Result<Vec<types_registry_sdk::RegisterResult>, types_registry_sdk::TypesRegistryError>
+    {
+        Ok(Vec::new())
+    }
+    async fn get_instance(
+        &self,
+        _id: &str,
+    ) -> Result<types_registry_sdk::GtsInstance, types_registry_sdk::TypesRegistryError> {
+        Err(types_registry_sdk::TypesRegistryError::Internal(
+            "not implemented for constant test fake".into(),
+        ))
+    }
+    async fn get_instance_by_uuid(
+        &self,
+        _uuid: Uuid,
+    ) -> Result<types_registry_sdk::GtsInstance, types_registry_sdk::TypesRegistryError> {
+        Err(types_registry_sdk::TypesRegistryError::Internal(
+            "not implemented for constant test fake".into(),
+        ))
+    }
+    async fn get_instances(
+        &self,
+        _ids: Vec<String>,
+    ) -> std::collections::HashMap<
+        String,
+        Result<types_registry_sdk::GtsInstance, types_registry_sdk::TypesRegistryError>,
+    > {
+        std::collections::HashMap::new()
+    }
+    async fn get_instances_by_uuid(
+        &self,
+        _ids: Vec<Uuid>,
+    ) -> std::collections::HashMap<
+        Uuid,
+        Result<types_registry_sdk::GtsInstance, types_registry_sdk::TypesRegistryError>,
+    > {
+        std::collections::HashMap::new()
+    }
+    async fn list_instances(
+        &self,
+        _query: types_registry_sdk::InstanceQuery,
+    ) -> Result<Vec<types_registry_sdk::GtsInstance>, types_registry_sdk::TypesRegistryError> {
+        Ok(Vec::new())
+    }
+}
+
+/// Stub registry where `get_type_schema_by_uuid` always returns
+/// `GtsTypeSchemaNotFound`. Drives the H1 fix's catalog-drift
+/// fallback path on `load_tenant_context`.
+struct UuidNotFoundTypesRegistry;
+
+#[async_trait]
+impl types_registry_sdk::TypesRegistryClient for UuidNotFoundTypesRegistry {
+    async fn register(
+        &self,
+        _entities: Vec<serde_json::Value>,
+    ) -> Result<Vec<types_registry_sdk::RegisterResult>, types_registry_sdk::TypesRegistryError>
+    {
+        Ok(Vec::new())
+    }
+    async fn register_type_schemas(
+        &self,
+        _schemas: Vec<serde_json::Value>,
+    ) -> Result<Vec<types_registry_sdk::RegisterResult>, types_registry_sdk::TypesRegistryError>
+    {
+        Ok(Vec::new())
+    }
+    async fn get_type_schema(
+        &self,
+        type_id: &str,
+    ) -> Result<types_registry_sdk::GtsTypeSchema, types_registry_sdk::TypesRegistryError> {
+        Err(types_registry_sdk::TypesRegistryError::gts_type_schema_not_found(type_id))
+    }
+    async fn get_type_schema_by_uuid(
+        &self,
+        type_uuid: Uuid,
+    ) -> Result<types_registry_sdk::GtsTypeSchema, types_registry_sdk::TypesRegistryError> {
+        Err(
+            types_registry_sdk::TypesRegistryError::gts_type_schema_not_found(
+                type_uuid.as_simple().to_string(),
+            ),
+        )
+    }
+    async fn get_type_schemas(
+        &self,
+        _ids: Vec<String>,
+    ) -> std::collections::HashMap<
+        String,
+        Result<types_registry_sdk::GtsTypeSchema, types_registry_sdk::TypesRegistryError>,
+    > {
+        std::collections::HashMap::new()
+    }
+    async fn get_type_schemas_by_uuid(
+        &self,
+        _ids: Vec<Uuid>,
+    ) -> std::collections::HashMap<
+        Uuid,
+        Result<types_registry_sdk::GtsTypeSchema, types_registry_sdk::TypesRegistryError>,
+    > {
+        std::collections::HashMap::new()
+    }
+    async fn list_type_schemas(
+        &self,
+        _query: types_registry_sdk::TypeSchemaQuery,
+    ) -> Result<Vec<types_registry_sdk::GtsTypeSchema>, types_registry_sdk::TypesRegistryError>
+    {
+        Ok(Vec::new())
+    }
+    async fn register_instances(
+        &self,
+        _instances: Vec<serde_json::Value>,
+    ) -> Result<Vec<types_registry_sdk::RegisterResult>, types_registry_sdk::TypesRegistryError>
+    {
+        Ok(Vec::new())
+    }
+    async fn get_instance(
+        &self,
+        _id: &str,
+    ) -> Result<types_registry_sdk::GtsInstance, types_registry_sdk::TypesRegistryError> {
+        Err(types_registry_sdk::TypesRegistryError::Internal(
+            "not implemented for uuid-not-found fake".into(),
+        ))
+    }
+    async fn get_instance_by_uuid(
+        &self,
+        _uuid: Uuid,
+    ) -> Result<types_registry_sdk::GtsInstance, types_registry_sdk::TypesRegistryError> {
+        Err(types_registry_sdk::TypesRegistryError::Internal(
+            "not implemented for uuid-not-found fake".into(),
+        ))
+    }
+    async fn get_instances(
+        &self,
+        _ids: Vec<String>,
+    ) -> std::collections::HashMap<
+        String,
+        Result<types_registry_sdk::GtsInstance, types_registry_sdk::TypesRegistryError>,
+    > {
+        std::collections::HashMap::new()
+    }
+    async fn get_instances_by_uuid(
+        &self,
+        _ids: Vec<Uuid>,
+    ) -> std::collections::HashMap<
+        Uuid,
+        Result<types_registry_sdk::GtsInstance, types_registry_sdk::TypesRegistryError>,
+    > {
+        std::collections::HashMap::new()
+    }
+    async fn list_instances(
+        &self,
+        _query: types_registry_sdk::InstanceQuery,
+    ) -> Result<Vec<types_registry_sdk::GtsInstance>, types_registry_sdk::TypesRegistryError> {
+        Ok(Vec::new())
+    }
+}
+
 fn ctx_for(tenant_id: Uuid) -> SecurityContext {
     SecurityContext::builder()
         .subject_id(Uuid::from_u128(0xDEAD))
@@ -39,6 +290,7 @@ fn make_service(repo: Arc<FakeTenantRepo>, outcome: FakeOutcome) -> TenantServic
         mock_enforcer(),
         AccountManagementConfig::default(),
     )
+    .with_types_registry(Arc::new(ConstantTypesRegistry))
 }
 
 /// Variant of [`make_service`] with `integrity_check.repair.enabled
@@ -59,17 +311,16 @@ fn make_service_repair_enabled(
         mock_enforcer(),
         cfg,
     )
+    .with_types_registry(Arc::new(ConstantTypesRegistry))
 }
 
-fn child_input(child_id: Uuid, parent_id: Uuid) -> CreateChildInput {
-    CreateChildInput {
+fn child_input(child_id: Uuid, parent_id: Uuid) -> CreateTenantRequest {
+    CreateTenantRequest::new(
         child_id,
         parent_id,
-        name: "child".into(),
-        self_managed: false,
-        tenant_type: gts::GtsSchemaId::new("gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~"),
-        provisioning_metadata: None,
-    }
+        "child",
+        gts::GtsSchemaId::new("gts.cf.core.am.tenant_type.v1~cf.core.am.customer.v1~"),
+    )
 }
 
 // -----------------------------------------------------------------
@@ -330,10 +581,7 @@ async fn list_children_status_filter_applies() {
     svc.update_tenant(
         &ctx_for(root),
         c2,
-        TenantUpdate {
-            status: Some(PublicTenantStatus::Suspended),
-            ..Default::default()
-        },
+        TenantUpdate::new().with_status(PublicTenantStatus::Suspended),
     )
     .await
     .expect("patch c2");
@@ -375,10 +623,7 @@ async fn update_tenant_accepts_name_and_supported_status_transitions() {
         .update_tenant(
             &ctx_for(root),
             child,
-            TenantUpdate {
-                name: Some("renamed".into()),
-                ..Default::default()
-            },
+            TenantUpdate::new().with_name("renamed"),
         )
         .await
         .expect("rename ok");
@@ -388,10 +633,7 @@ async fn update_tenant_accepts_name_and_supported_status_transitions() {
         .update_tenant(
             &ctx_for(root),
             child,
-            TenantUpdate {
-                status: Some(PublicTenantStatus::Suspended),
-                ..Default::default()
-            },
+            TenantUpdate::new().with_status(PublicTenantStatus::Suspended),
         )
         .await
         .expect("suspend ok");
@@ -401,10 +643,7 @@ async fn update_tenant_accepts_name_and_supported_status_transitions() {
         .update_tenant(
             &ctx_for(root),
             child,
-            TenantUpdate {
-                status: Some(PublicTenantStatus::Active),
-                ..Default::default()
-            },
+            TenantUpdate::new().with_status(PublicTenantStatus::Active),
         )
         .await
         .expect("unsuspend ok");
@@ -456,10 +695,7 @@ async fn update_tenant_status_no_op_is_idempotent() {
         .update_tenant(
             &ctx_for(root),
             child,
-            TenantUpdate {
-                status: Some(PublicTenantStatus::Active),
-                ..Default::default()
-            },
+            TenantUpdate::new().with_status(PublicTenantStatus::Active),
         )
         .await
         .expect("same-status PATCH must be idempotent ok, not 409");
@@ -504,10 +740,7 @@ async fn update_tenant_name_no_op_is_idempotent() {
     svc.update_tenant(
         &ctx_for(root),
         child,
-        TenantUpdate {
-            name: Some(current_name),
-            ..Default::default()
-        },
+        TenantUpdate::new().with_name(current_name),
     )
     .await
     .expect("same-name PATCH is an idempotent no-op");
@@ -544,10 +777,7 @@ async fn update_tenant_double_patch_is_observably_identical() {
         .update_tenant(
             &ctx_for(root),
             child,
-            TenantUpdate {
-                status: Some(PublicTenantStatus::Suspended),
-                ..Default::default()
-            },
+            TenantUpdate::new().with_status(PublicTenantStatus::Suspended),
         )
         .await
         .expect("first PATCH ok");
@@ -564,10 +794,7 @@ async fn update_tenant_double_patch_is_observably_identical() {
         .update_tenant(
             &ctx_for(root),
             child,
-            TenantUpdate {
-                status: Some(PublicTenantStatus::Suspended),
-                ..Default::default()
-            },
+            TenantUpdate::new().with_status(PublicTenantStatus::Suspended),
         )
         .await
         .expect("retry of identical PATCH MUST also succeed");
@@ -611,10 +838,7 @@ async fn update_tenant_rejects_transition_to_deleted() {
         .update_tenant(
             &ctx_for(root),
             child,
-            TenantUpdate {
-                status: Some(PublicTenantStatus::Deleted),
-                ..Default::default()
-            },
+            TenantUpdate::new().with_status(PublicTenantStatus::Deleted),
         )
         .await
         .expect_err("delete must go through DELETE flow");
@@ -650,10 +874,7 @@ async fn update_tenant_rejects_transition_from_provisioning() {
         .update_tenant(
             &ctx_for(root),
             child,
-            TenantUpdate {
-                status: Some(PublicTenantStatus::Active),
-                ..Default::default()
-            },
+            TenantUpdate::new().with_status(PublicTenantStatus::Active),
         )
         .await
         .expect_err("must not see provisioning tenant");
@@ -662,22 +883,32 @@ async fn update_tenant_rejects_transition_from_provisioning() {
 }
 
 #[tokio::test]
-async fn update_tenant_rejects_oversized_name() {
+async fn update_tenant_accepts_oversized_name_when_gts_schema_unregistered() {
+    // The synchronous `validate_tenant_name` was deleted in favour
+    // of `domain::gts_validation::validate_tenant_name_via_gts`,
+    // which mirrors the resource-group `validate_metadata_via_gts`
+    // posture: when the registry has no `gts.cf.core.am.tenant.v1~`
+    // schema registered, validation short-circuits to `Ok(())` and
+    // the database `CHECK (length(name) BETWEEN 1 AND 255)`
+    // constraint declared by `m0001` becomes the authoritative
+    // gate. The unit-level fake repo does NOT enforce DB CHECK
+    // constraints, so this test pins the documented no-op
+    // behaviour for the unregistered-schema path. The
+    // schema-registered rejection path is exercised by the
+    // integration suite, which boots the real Types Registry with
+    // the AM schemas loaded.
     let root = Uuid::from_u128(0x100);
     let repo = Arc::new(FakeTenantRepo::with_root(root));
     let svc = make_service(repo, FakeOutcome::Ok);
-    let err = svc
+    let info = svc
         .update_tenant(
             &ctx_for(root),
             root,
-            TenantUpdate {
-                name: Some("x".repeat(256)),
-                ..Default::default()
-            },
+            TenantUpdate::new().with_name("x".repeat(256)),
         )
         .await
-        .expect_err("reject oversized");
-    assert_eq!(err.code(), "validation");
+        .expect("rename succeeds without registered schema; DB CHECK is the prod fence");
+    assert_eq!(info.name.chars().count(), 256);
 }
 
 // ---- Closure invariant end-to-end ------------------------------
@@ -794,6 +1025,7 @@ fn svc_with(
         mock_enforcer(),
         cfg,
     )
+    .with_types_registry(Arc::new(ConstantTypesRegistry))
 }
 
 #[allow(unknown_lints, de0309_must_have_domain_model)]
@@ -1026,7 +1258,7 @@ async fn scan_retention_does_not_starve_due_rows_behind_older_not_due_backlog() 
 #[tokio::test]
 async fn reaper_records_idp_not_found_as_already_absent_distinct_from_compensated() {
     // Plugin reports the vendor never had the tenant (or already
-    // wiped it) — surfaces as `DeprovisionFailure::NotFound`. AM
+    // wiped it) — surfaces as `IdpDeprovisionFailure::NotFound`. AM
     // treats this as success-equivalent for *teardown*: the
     // provisioning row is **physically removed** (not flipped to
     // `Deleted`) because provisioning rows never become SDK-visible,
@@ -1061,7 +1293,8 @@ async fn reaper_records_idp_not_found_as_already_absent_distinct_from_compensate
         crate::domain::tenant_type::inert_tenant_type_checker(),
         mock_enforcer(),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
     let res = svc.reap_stuck_provisioning(StdDuration::from_secs(0)).await;
     assert_eq!(res.scanned, 1);
     assert_eq!(
@@ -1126,7 +1359,8 @@ async fn reaper_defers_on_idp_retryable_failure() {
         crate::domain::tenant_type::inert_tenant_type_checker(),
         mock_enforcer(),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
     let res = svc.reap_stuck_provisioning(StdDuration::from_secs(0)).await;
     assert_eq!(res.scanned, 1);
     assert_eq!(res.deferred, 1, "retryable failure defers");
@@ -1184,7 +1418,8 @@ async fn reaper_redrives_on_each_tick_when_idp_keeps_failing() {
         crate::domain::tenant_type::inert_tenant_type_checker(),
         mock_enforcer(),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let r1 = svc.reap_stuck_provisioning(StdDuration::from_secs(0)).await;
     assert_eq!(r1.scanned, 1);
@@ -1203,7 +1438,7 @@ async fn reaper_redrives_on_each_tick_when_idp_keeps_failing() {
 
 #[tokio::test]
 async fn reaper_marks_terminal_failure_and_parks_row_out_of_retry_loop() {
-    // Per the SDK contract, `DeprovisionFailure::Terminal` is
+    // Per the SDK contract, `IdpDeprovisionFailure::Terminal` is
     // non-recoverable — the IdP plugin is signalling that the
     // vendor refuses to deprovision and operator intervention is
     // required. The reaper must:
@@ -1243,7 +1478,8 @@ async fn reaper_marks_terminal_failure_and_parks_row_out_of_retry_loop() {
         crate::domain::tenant_type::inert_tenant_type_checker(),
         mock_enforcer(),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let r1 = svc.reap_stuck_provisioning(StdDuration::from_secs(0)).await;
     assert_eq!(r1.scanned, 1);
@@ -1301,7 +1537,7 @@ async fn reaper_marks_terminal_failure_and_parks_row_out_of_retry_loop() {
 /// Concurrent-claim invariant: a stuck `Provisioning` row that is
 /// already claimed by another worker (within `RETENTION_CLAIM_TTL`)
 /// MUST be skipped by `scan_stuck_provisioning`, so two replicas
-/// cannot stamp duplicate `IdpTenantProvisionerClient::deprovision_tenant`
+/// cannot stamp duplicate `IdpPluginClient::deprovision_tenant`
 /// calls onto the same row inside one TTL window.
 ///
 /// Set-up: two stuck rows, only one of them pre-claimed via
@@ -1350,7 +1586,8 @@ async fn reaper_skips_rows_already_claimed_by_another_worker() {
         crate::domain::tenant_type::inert_tenant_type_checker(),
         mock_enforcer(),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let res = svc.reap_stuck_provisioning(StdDuration::from_secs(0)).await;
     assert_eq!(
@@ -1394,7 +1631,7 @@ async fn reaper_skips_rows_already_claimed_by_another_worker() {
 /// reaper test above). `tenants.claimed_by` backs both pipelines, so the
 /// same fence MUST work end-to-end through `hard_delete_batch`: a
 /// soft-deleted, retention-due row already claimed by another worker
-/// MUST be skipped — no `IdpTenantProvisionerClient::deprovision_tenant`
+/// MUST be skipped — no `IdpPluginClient::deprovision_tenant`
 /// call, no DB teardown, the held claim survives.
 ///
 /// Set-up: two soft-deleted children due for hard-delete; pre-seed a
@@ -1457,7 +1694,8 @@ async fn hard_delete_batch_skips_rows_already_claimed_by_another_worker() {
             },
             ..AccountManagementConfig::default()
         },
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let res = svc.hard_delete_batch(64).await;
     assert_eq!(
@@ -1521,7 +1759,8 @@ async fn hard_delete_batch_skips_parent_when_child_still_exists() {
             },
             ..AccountManagementConfig::default()
         },
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
     svc.create_child(&ctx_for(root), child_input(parent, root))
         .await
         .expect("p");
@@ -1604,7 +1843,8 @@ async fn hard_delete_batch_holds_claim_on_deferred_child_present() {
             },
             ..AccountManagementConfig::default()
         },
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
     svc.create_child(&ctx_for(root), child_input(parent, root))
         .await
         .expect("parent");
@@ -1645,7 +1885,7 @@ async fn hard_delete_batch_holds_claim_on_deferred_child_present() {
     );
 }
 
-/// Test-only `IdpTenantProvisionerClient` that pushes `"idp"` into a
+/// Test-only `IdpPluginClient` that pushes `"idp"` into a
 /// shared ordering log when `deprovision_tenant` is called. Paired with
 /// a hook that pushes `"hook"` to the same log, this lets us prove the
 /// hook-before-IdP ordering on hard-delete (rather than just counting
@@ -1656,27 +1896,24 @@ struct OrderingRecordingIdp {
 }
 
 #[async_trait]
-impl account_management_sdk::IdpTenantProvisionerClient for OrderingRecordingIdp {
-    async fn check_availability(
-        &self,
-    ) -> Result<(), account_management_sdk::CheckAvailabilityFailure> {
-        Ok(())
-    }
+impl account_management_sdk::IdpPluginClient for OrderingRecordingIdp {
     async fn provision_tenant(
         &self,
-        _req: &account_management_sdk::ProvisionRequest,
-    ) -> Result<account_management_sdk::ProvisionResult, account_management_sdk::ProvisionFailure>
-    {
+        _req: &account_management_sdk::IdpProvisionTenantRequest,
+    ) -> Result<
+        account_management_sdk::IdpProvisionResult,
+        account_management_sdk::IdpProvisionFailure,
+    > {
         // Not pushed: this test only verifies hook-before-IdP ordering
         // on the hard-delete path; provisioning runs before the hook
         // is even registered, so recording it would just clutter the
         // log without strengthening the assertion.
-        Ok(account_management_sdk::ProvisionResult::default())
+        Ok(account_management_sdk::IdpProvisionResult::default())
     }
     async fn deprovision_tenant(
         &self,
-        _req: &account_management_sdk::DeprovisionRequest,
-    ) -> Result<(), account_management_sdk::DeprovisionFailure> {
+        _req: &account_management_sdk::IdpDeprovisionTenantRequest,
+    ) -> Result<(), account_management_sdk::IdpDeprovisionFailure> {
         self.log.lock().expect("lock").push("idp");
         Ok(())
     }
@@ -1705,7 +1942,8 @@ async fn hard_delete_batch_invokes_cascade_hook_before_idp() {
         crate::domain::tenant_type::inert_tenant_type_checker(),
         mock_enforcer(),
         cfg,
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     svc.create_child(&ctx_for(root), child_input(child, root))
         .await
@@ -1778,7 +2016,8 @@ async fn hard_delete_batch_panicking_cascade_hook_classifies_terminal_and_parks(
         crate::domain::tenant_type::inert_tenant_type_checker(),
         mock_enforcer(),
         cfg,
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     svc.create_child(&ctx_for(root), child_input(child, root))
         .await
@@ -1882,7 +2121,8 @@ async fn hard_delete_batch_panicking_cascade_hook_classifies_terminal_and_parks(
             },
             ..AccountManagementConfig::default()
         },
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
     let healthy_hook: TenantHardDeleteHook =
         Arc::new(|_id: Uuid| async move { Ok::<(), HookError>(()) }.boxed());
     svc_after_fix.register_hard_delete_hook(healthy_hook);
@@ -1915,7 +2155,7 @@ async fn hard_delete_batch_panicking_cascade_hook_classifies_terminal_and_parks(
 
 /// Pins the parking path for the IdP-terminal arm of the retention
 /// pipeline. Symmetric to the cascade-hook parking test above:
-/// when the `IdP` returns `DeprovisionFailure::Terminal` during
+/// when the `IdP` returns `IdpDeprovisionFailure::Terminal` during
 /// `hard_delete_batch`, the row is classified as `IdpTerminal` and
 /// must be parked via `mark_retention_terminal_failure` so the
 /// scanner stops re-attempting on every tick. Mirrors the reaper's
@@ -1941,7 +2181,8 @@ async fn hard_delete_batch_idp_terminal_parks_row_via_terminal_failure_at() {
         crate::domain::tenant_type::inert_tenant_type_checker(),
         mock_enforcer(),
         cfg,
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     svc.create_child(&ctx_for(root), child_input(child, root))
         .await
@@ -2472,6 +2713,7 @@ fn make_service_with_type_checker(
         mock_enforcer(),
         AccountManagementConfig::default(),
     )
+    .with_types_registry(Arc::new(ConstantTypesRegistry))
 }
 
 /// AC §6 first bullet -- when the parent's `tenant_type` is not in
@@ -2707,10 +2949,7 @@ async fn soft_delete_succeeds_on_suspended_leaf_tenant() {
         .update_tenant(
             &ctx_for(root),
             child,
-            TenantUpdate {
-                status: Some(PublicTenantStatus::Suspended),
-                ..Default::default()
-            },
+            TenantUpdate::new().with_status(PublicTenantStatus::Suspended),
         )
         .await
         .expect("suspension allowed");
@@ -2792,7 +3031,7 @@ async fn soft_delete_stamps_deleted_at_on_returned_model_and_subsequent_reads() 
 }
 
 /// F2 -- `hard_delete_batch` row-level outcome on
-/// `DeprovisionFailure::Terminal`.
+/// `IdpDeprovisionFailure::Terminal`.
 ///
 /// The existing `reaper_marks_terminal_failure_and_parks_row_out_of_retry_loop`
 /// test covers the reaper path. This adds the missing assertion for
@@ -2820,7 +3059,8 @@ async fn hard_delete_batch_marks_idp_terminal_failure_as_failed() {
             },
             ..AccountManagementConfig::default()
         },
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let res = svc.hard_delete_batch(64).await;
     assert_eq!(res.processed, 1, "exactly one due row was processed");
@@ -2877,7 +3117,8 @@ async fn create_child_finalization_tx_failure_compensates_idp_and_row() {
         crate::domain::tenant_type::inert_tenant_type_checker(),
         mock_enforcer(),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let result = svc
         .create_child(&ctx_for(root), child_input(child, root))
@@ -2931,7 +3172,8 @@ async fn create_child_finalization_failure_with_retryable_idp_leaves_row_for_rea
         crate::domain::tenant_type::inert_tenant_type_checker(),
         mock_enforcer(),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let result = svc
         .create_child(&ctx_for(root), child_input(child, root))
@@ -2959,9 +3201,182 @@ async fn create_child_finalization_failure_with_retryable_idp_leaves_row_for_rea
     assert_eq!(provisioning_rows[0].id, child);
 }
 
+/// Pins the `upsert_idp_metadata` up-front persistence: when the
+/// saga's step-3 finalization fails AND the best-effort
+/// compensation cannot confirm vendor-side teardown, the plugin's
+/// per-tenant metadata blob MUST already be in `tenant_idp_metadata`
+/// so the reaper can rebuild `IdpDeprovisionTenantRequest` carrying the
+/// blob on the next tick. Closes codex deep-review P1#2: without the
+/// up-front upsert, the only copy of `provision_result.metadata`
+/// dies in the saga's stack frame and the reaper forwards an empty
+/// `TenantContext::metadata`, silently leaking vendor-side state.
+#[tokio::test]
+async fn create_child_finalization_failure_persists_idp_metadata_for_reaper() {
+    let root = Uuid::from_u128(0x100);
+    let child = Uuid::from_u128(0xF303);
+    let plugin_blob = serde_json::json!({"realm": "acme-prod", "vendor_token": "opaque-blob"});
+
+    let repo = Arc::new(FakeTenantRepo::with_root(root));
+    repo.expect_next_activation_failure("simulated SERIALIZABLE abort");
+    let idp = Arc::new(FakeIdpProvisioner::new(FakeOutcome::Ok));
+    // Plugin returns non-empty metadata on provision so the reaper
+    // recovery path is load-bearing.
+    idp.set_metadata(Some(plugin_blob.clone()));
+    // Non-clean compensation outcome forces the saga to leave the
+    // row + metadata for the reaper.
+    idp.set_deprovision_outcome(FakeDeprovisionOutcome::Retryable);
+    let svc = TenantService::new(
+        repo.clone(),
+        idp.clone(),
+        Arc::new(InertResourceOwnershipChecker),
+        crate::domain::tenant_type::inert_tenant_type_checker(),
+        mock_enforcer(),
+        AccountManagementConfig::default(),
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
+
+    let result = svc
+        .create_child(&ctx_for(root), child_input(child, root))
+        .await;
+    assert!(
+        matches!(result, Err(DomainError::Internal { .. })),
+        "activate_tenant failure must surface as Internal, got {result:?}"
+    );
+
+    // Provisioning row MUST stay (Retryable compensation leaves it
+    // for the reaper).
+    let provisioning_rows = repo.snapshot_provisioning_rows();
+    assert_eq!(provisioning_rows.len(), 1, "row left for reaper");
+    assert_eq!(provisioning_rows[0].id, child);
+
+    // The load-bearing assertion: `tenant_idp_metadata` carries the
+    // plugin blob, so the reaper can rebuild `IdpDeprovisionTenantRequest`
+    // with the plugin's per-tenant state. A regression that drops
+    // the up-front `upsert_idp_metadata` call would leave this map
+    // empty for `child` and silently orphan vendor-side resources
+    // on the next reaper tick.
+    let metadata = repo
+        .find_idp_metadata(&AccessScope::allow_all(), child)
+        .await
+        .expect("find_idp_metadata succeeds");
+    assert_eq!(
+        metadata.as_ref(),
+        Some(&plugin_blob),
+        "tenant_idp_metadata MUST carry the plugin blob so the reaper can deprovision with it; got {metadata:?}"
+    );
+}
+
+/// Closes codex review P1: `upsert_idp_metadata` failure between
+/// `provision_tenant` and `finalize_provisioning` MUST run the
+/// best-effort `compensate_failed_activation` rung, NOT exit
+/// silently with `?`. A transient DB blip on the metadata write
+/// would otherwise leave the `IdP` holding vendor-side state with
+/// no AM-side handle to deprovision it later — exactly the bug
+/// pattern codex flagged on the previous review pass.
+#[tokio::test]
+async fn create_child_upsert_idp_metadata_failure_runs_idp_compensation() {
+    let root = Uuid::from_u128(0x100);
+    let child = Uuid::from_u128(0xF304);
+
+    let repo = Arc::new(FakeTenantRepo::with_root(root));
+    // Arm the failure injection on the pre-activation metadata
+    // upsert. `expect_next_activation_failure` is NOT armed — we
+    // want the failure to surface BEFORE `finalize_provisioning`
+    // runs.
+    repo.expect_next_upsert_idp_metadata_failure("simulated transient DB blip");
+    let idp = Arc::new(FakeIdpProvisioner::new(FakeOutcome::Ok));
+    idp.set_metadata(Some(serde_json::json!({"realm": "acme-prod"})));
+    let svc = TenantService::new(
+        repo.clone(),
+        idp.clone(),
+        Arc::new(InertResourceOwnershipChecker),
+        crate::domain::tenant_type::inert_tenant_type_checker(),
+        mock_enforcer(),
+        AccountManagementConfig::default(),
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
+
+    let result = svc
+        .create_child(&ctx_for(root), child_input(child, root))
+        .await;
+    assert!(
+        matches!(result, Err(DomainError::Internal { .. })),
+        "upsert_idp_metadata failure must surface as Internal, got {result:?}"
+    );
+
+    // The load-bearing assertion: IdP compensation MUST have been
+    // attempted exactly once. A regression that drops the
+    // compensation rung on this path (the previous `?` shape)
+    // would leave `deprovision_calls` empty here and the vendor-
+    // side tenant orphaned.
+    assert_eq!(
+        idp.deprovision_calls.lock().expect("lock").len(),
+        1,
+        "saga MUST attempt IdP compensation when upsert_idp_metadata fails after provision_tenant succeeded"
+    );
+}
+
+/// Closes codex review P2: explicit `tenant_idp_metadata` DELETE
+/// in `compensate_provisioning`. With the pre-activation upsert
+/// landing the row BEFORE the `Provisioning → Active` flip, a
+/// clean saga compensation would otherwise leave an orphaned
+/// metadata row on `SQLite` (no enforced FK). Pins that the row is
+/// gone after the compensation path succeeds (`FakeTenantRepo`
+/// mirrors the production explicit DELETE).
+#[tokio::test]
+async fn create_child_clean_compensation_removes_pre_activation_idp_metadata() {
+    let root = Uuid::from_u128(0x100);
+    let child = Uuid::from_u128(0xF305);
+    let plugin_blob = serde_json::json!({"realm": "acme-prod"});
+
+    let repo = Arc::new(FakeTenantRepo::with_root(root));
+    repo.expect_next_activation_failure("simulated SERIALIZABLE abort");
+    let idp = Arc::new(FakeIdpProvisioner::new(FakeOutcome::Ok));
+    idp.set_metadata(Some(plugin_blob.clone()));
+    // Clean compensation outcome — `Ok(())` means the saga proves
+    // vendor-side cleanup ran and proceeds to local row delete,
+    // which MUST also remove the metadata row.
+    idp.set_deprovision_outcome(FakeDeprovisionOutcome::Ok);
+    let svc = TenantService::new(
+        repo.clone(),
+        idp.clone(),
+        Arc::new(InertResourceOwnershipChecker),
+        crate::domain::tenant_type::inert_tenant_type_checker(),
+        mock_enforcer(),
+        AccountManagementConfig::default(),
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
+
+    let result = svc
+        .create_child(&ctx_for(root), child_input(child, root))
+        .await;
+    // Activation was armed to fail; surface is `Internal`. The
+    // post-error assertions below are the load-bearing checks.
+    assert!(matches!(result, Err(DomainError::Internal { .. })));
+
+    // Provisioning row removed by clean compensation.
+    let provisioning_rows = repo.snapshot_provisioning_rows();
+    assert!(
+        provisioning_rows.is_empty(),
+        "clean compensation MUST delete the provisioning row; got {provisioning_rows:?}"
+    );
+    // The load-bearing assertion: metadata row MUST also be gone.
+    // On Postgres production this is FK CASCADE; on SQLite the
+    // `compensate_provisioning` explicit DELETE is the only thing
+    // preventing the leak.
+    let metadata = repo
+        .find_idp_metadata(&AccessScope::allow_all(), child)
+        .await
+        .expect("find_idp_metadata succeeds");
+    assert!(
+        metadata.is_none(),
+        "tenant_idp_metadata row MUST be cleaned up by compensate_provisioning; got {metadata:?}"
+    );
+}
+
 /// Saga step-3 compensation must apply the same `idp.required`
 /// gate as the retention pipeline and the reaper: a real plugin
-/// returning `DeprovisionFailure::UnsupportedOperation` under
+/// returning `IdpDeprovisionFailure::UnsupportedOperation` under
 /// `idp.required = true` signals that vendor-side state may still
 /// exist and the AM row MUST be left for the reaper, NOT
 /// hard-deleted locally. Without this gate the saga compensation
@@ -2984,7 +3399,7 @@ async fn create_child_finalization_failure_with_unsupported_idp_required_leaves_
     // path the IdP returns `UnsupportedOperation` — under
     // `idp.required = true` this MUST be treated as "did not
     // confirm cleanup" (defer to reaper), NOT as the
-    // NoopProvisioner-style "no IdP-side state retained".
+    // NoopIdpProvider-style "no IdP-side state retained".
     idp.set_deprovision_outcome(FakeDeprovisionOutcome::Unsupported);
     let svc = TenantService::new(
         repo.clone(),
@@ -2996,7 +3411,8 @@ async fn create_child_finalization_failure_with_unsupported_idp_required_leaves_
             idp: IdpConfig { required: true },
             ..AccountManagementConfig::default()
         },
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let result = svc
         .create_child(&ctx_for(root), child_input(child, root))
@@ -3034,10 +3450,10 @@ async fn create_child_finalization_failure_with_unsupported_idp_required_leaves_
 // `cfg.idp.required` gates `UnsupportedOperation` semantics
 // ---------------------------------------------------------------------------
 //
-// `DeprovisionFailure::UnsupportedOperation` is only safe to map
+// `IdpDeprovisionFailure::UnsupportedOperation` is only safe to map
 // to "skip IdP, continue local teardown" when the deployment
 // opted out of an IdP entirely (`idp.required = false` → wired to
-// `NoopProvisioner`). When a real plugin returns this variant,
+// `NoopIdpProvider`). When a real plugin returns this variant,
 // vendor-side state may still exist and the AM row MUST NOT be
 // removed locally — the retention pipeline defers (`IdpRetryable`)
 // and the reaper parks (`Terminal`, operator action required).
@@ -3065,7 +3481,8 @@ async fn hard_delete_batch_defers_unsupported_when_idp_required_true() {
             idp: IdpConfig { required: true },
             ..AccountManagementConfig::default()
         },
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let res = svc.hard_delete_batch(64).await;
     assert_eq!(res.processed, 1);
@@ -3117,7 +3534,8 @@ async fn reaper_marks_unsupported_terminal_when_idp_required_true() {
             idp: IdpConfig { required: true },
             ..AccountManagementConfig::default()
         },
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let r = svc.reap_stuck_provisioning(StdDuration::from_secs(0)).await;
     assert_eq!(r.scanned, 1);
@@ -3180,7 +3598,8 @@ async fn soft_delete_propagates_rg_timeout_as_service_unavailable() {
         crate::domain::tenant_type::inert_tenant_type_checker(),
         mock_enforcer(),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
     // Create a child to act on.
     svc.create_child(&ctx_for(root), child_input(child, root))
         .await
@@ -3231,7 +3650,8 @@ async fn create_child_propagates_gts_timeout_as_service_unavailable() {
         checker,
         mock_enforcer(),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let err = svc
         .create_child(&ctx_for(root), child_input(child, root))
@@ -3300,7 +3720,8 @@ async fn read_tenant_does_not_deny_all_under_constraint_bearing_pdp() {
         crate::domain::tenant_type::inert_tenant_type_checker(),
         constraint_bearing_enforcer(root),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
     svc.create_child(&ctx_for(root), child_input(child, root))
         .await
         .expect("create child via mock provisioning happy path");
@@ -3323,7 +3744,8 @@ async fn update_tenant_does_not_deny_all_under_constraint_bearing_pdp() {
         crate::domain::tenant_type::inert_tenant_type_checker(),
         constraint_bearing_enforcer(root),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
     let target = Uuid::from_u128(0x301);
     svc.create_child(&ctx_for(root), child_input(target, root))
         .await
@@ -3332,10 +3754,7 @@ async fn update_tenant_does_not_deny_all_under_constraint_bearing_pdp() {
     // Switch the service to the constraint-bearing PDP for the
     // update step. (The create_child saga above used the same
     // enforcer; the constraint also applies to UPDATE in the fake.)
-    let patch = account_management_sdk::TenantUpdate {
-        name: Some("renamed".into()),
-        status: None,
-    };
+    let patch = account_management_sdk::TenantUpdate::new().with_name("renamed");
     let updated = svc
         .update_tenant(&ctx_for(root), target, patch)
         .await
@@ -3354,7 +3773,8 @@ async fn soft_delete_does_not_deny_all_under_constraint_bearing_pdp() {
         crate::domain::tenant_type::inert_tenant_type_checker(),
         constraint_bearing_enforcer(root),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
     let target = Uuid::from_u128(0x401);
     svc.create_child(&ctx_for(root), child_input(target, root))
         .await
@@ -3373,7 +3793,7 @@ async fn soft_delete_does_not_deny_all_under_constraint_bearing_pdp() {
 // Reaper terminal-counter / metric emission timing
 // ---------------------------------------------------------------------------
 
-/// Test-only `IdP` that returns `DeprovisionFailure::Terminal` AND, as
+/// Test-only `IdP` that returns `IdpDeprovisionFailure::Terminal` AND, as
 /// a side effect of the call, steals the row's claim by overwriting
 /// `state.claims[id]` with a sentinel "peer worker" UUID. This
 /// reproduces the lost-claim race: the reaper's `mark_provisioning_terminal_failure`
@@ -3391,29 +3811,27 @@ struct ClaimStealingTerminalIdp {
 }
 
 #[async_trait]
-impl account_management_sdk::IdpTenantProvisionerClient for ClaimStealingTerminalIdp {
-    async fn check_availability(
-        &self,
-    ) -> Result<(), account_management_sdk::CheckAvailabilityFailure> {
-        Ok(())
-    }
+impl account_management_sdk::IdpPluginClient for ClaimStealingTerminalIdp {
     async fn provision_tenant(
         &self,
-        _req: &account_management_sdk::ProvisionRequest,
-    ) -> Result<account_management_sdk::ProvisionResult, account_management_sdk::ProvisionFailure>
-    {
-        Ok(account_management_sdk::ProvisionResult::default())
+        _req: &account_management_sdk::IdpProvisionTenantRequest,
+    ) -> Result<
+        account_management_sdk::IdpProvisionResult,
+        account_management_sdk::IdpProvisionFailure,
+    > {
+        Ok(account_management_sdk::IdpProvisionResult::default())
     }
     async fn deprovision_tenant(
         &self,
-        req: &account_management_sdk::DeprovisionRequest,
-    ) -> Result<(), account_management_sdk::DeprovisionFailure> {
+        req: &account_management_sdk::IdpDeprovisionTenantRequest,
+    ) -> Result<(), account_management_sdk::IdpDeprovisionFailure> {
         // Mid-call: rotate the claim to a peer worker. Production
         // analogue: the original claim's `RETENTION_CLAIM_TTL`
         // elapsed during the IdP round-trip and a peer reaper claimed
         // the row.
-        self.repo.seed_claim(req.tenant_id, self.peer_worker);
-        Err(account_management_sdk::DeprovisionFailure::Terminal {
+        self.repo
+            .seed_claim(req.tenant_context.tenant_id, self.peer_worker);
+        Err(account_management_sdk::IdpDeprovisionFailure::Terminal {
             detail: "vendor refuses".into(),
         })
     }
@@ -3458,7 +3876,8 @@ async fn reaper_terminal_counter_does_not_bump_on_lost_claim_during_mark() {
         crate::domain::tenant_type::inert_tenant_type_checker(),
         mock_enforcer(),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let r = svc.reap_stuck_provisioning(StdDuration::from_secs(0)).await;
     assert_eq!(r.scanned, 1);
@@ -3487,7 +3906,7 @@ async fn reaper_terminal_counter_does_not_bump_on_lost_claim_during_mark() {
     );
 }
 
-/// Test-only `IdP` that returns `DeprovisionFailure::NotFound`
+/// Test-only `IdP` that returns `IdpDeprovisionFailure::NotFound`
 /// (success-equivalent -> drives the reaper's `Compensable` path)
 /// AND, as a side effect of the call, rotates the row's claim to a
 /// peer worker AND stamps `terminal_failure_at`. Reproduces the
@@ -3501,23 +3920,20 @@ struct ClaimStealingCompensableIdp {
 }
 
 #[async_trait]
-impl account_management_sdk::IdpTenantProvisionerClient for ClaimStealingCompensableIdp {
-    async fn check_availability(
-        &self,
-    ) -> Result<(), account_management_sdk::CheckAvailabilityFailure> {
-        Ok(())
-    }
+impl account_management_sdk::IdpPluginClient for ClaimStealingCompensableIdp {
     async fn provision_tenant(
         &self,
-        _req: &account_management_sdk::ProvisionRequest,
-    ) -> Result<account_management_sdk::ProvisionResult, account_management_sdk::ProvisionFailure>
-    {
-        Ok(account_management_sdk::ProvisionResult::default())
+        _req: &account_management_sdk::IdpProvisionTenantRequest,
+    ) -> Result<
+        account_management_sdk::IdpProvisionResult,
+        account_management_sdk::IdpProvisionFailure,
+    > {
+        Ok(account_management_sdk::IdpProvisionResult::default())
     }
     async fn deprovision_tenant(
         &self,
-        req: &account_management_sdk::DeprovisionRequest,
-    ) -> Result<(), account_management_sdk::DeprovisionFailure> {
+        req: &account_management_sdk::IdpDeprovisionTenantRequest,
+    ) -> Result<(), account_management_sdk::IdpDeprovisionFailure> {
         let now = OffsetDateTime::from_unix_timestamp(1_700_000_500).expect("epoch");
         // Mid-call: peer worker takes over and parks the row terminal.
         // Production analogue: `RETENTION_CLAIM_TTL` elapsed during the
@@ -3527,10 +3943,14 @@ impl account_management_sdk::IdpTenantProvisionerClient for ClaimStealingCompens
         // from its own (success-equivalent) IdP call.
         {
             let mut state = self.repo.state.lock().expect("lock");
-            state.claims.insert(req.tenant_id, self.peer_worker);
-            state.terminal_failures.insert(req.tenant_id, now);
+            state
+                .claims
+                .insert(req.tenant_context.tenant_id, self.peer_worker);
+            state
+                .terminal_failures
+                .insert(req.tenant_context.tenant_id, now);
         }
-        Err(account_management_sdk::DeprovisionFailure::NotFound {
+        Err(account_management_sdk::IdpDeprovisionFailure::NotFound {
             detail: "vendor reports already absent".into(),
         })
     }
@@ -3574,7 +3994,8 @@ async fn reaper_compensable_path_refuses_delete_when_peer_reclaimed_and_parked_t
         crate::domain::tenant_type::inert_tenant_type_checker(),
         mock_enforcer(),
         AccountManagementConfig::default(),
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let r = svc.reap_stuck_provisioning(StdDuration::from_secs(0)).await;
     assert_eq!(r.scanned, 1);
@@ -3626,7 +4047,7 @@ async fn reaper_compensable_path_refuses_delete_when_peer_reclaimed_and_parked_t
 // is the call site flagged by independent reviewers (Codex P1 +
 // subagent B1).
 
-/// Test-only `IdP` that returns `DeprovisionFailure::{Retryable,Terminal}`
+/// Test-only `IdP` that returns `IdpDeprovisionFailure::{Retryable,Terminal}`
 /// with operator-supplied detail strings, so the redaction test can
 /// feed in unmistakable sentinel substrings and assert they do NOT
 /// appear in any captured tracing event.
@@ -3637,29 +4058,26 @@ struct LeakySentinelIdp {
 }
 
 #[async_trait]
-impl account_management_sdk::IdpTenantProvisionerClient for LeakySentinelIdp {
-    async fn check_availability(
-        &self,
-    ) -> Result<(), account_management_sdk::CheckAvailabilityFailure> {
-        Ok(())
-    }
+impl account_management_sdk::IdpPluginClient for LeakySentinelIdp {
     async fn provision_tenant(
         &self,
-        _req: &account_management_sdk::ProvisionRequest,
-    ) -> Result<account_management_sdk::ProvisionResult, account_management_sdk::ProvisionFailure>
-    {
-        Ok(account_management_sdk::ProvisionResult::default())
+        _req: &account_management_sdk::IdpProvisionTenantRequest,
+    ) -> Result<
+        account_management_sdk::IdpProvisionResult,
+        account_management_sdk::IdpProvisionFailure,
+    > {
+        Ok(account_management_sdk::IdpProvisionResult::default())
     }
     async fn deprovision_tenant(
         &self,
-        _req: &account_management_sdk::DeprovisionRequest,
-    ) -> Result<(), account_management_sdk::DeprovisionFailure> {
+        _req: &account_management_sdk::IdpDeprovisionTenantRequest,
+    ) -> Result<(), account_management_sdk::IdpDeprovisionFailure> {
         if self.classify_terminal {
-            Err(account_management_sdk::DeprovisionFailure::Terminal {
+            Err(account_management_sdk::IdpDeprovisionFailure::Terminal {
                 detail: self.detail.into(),
             })
         } else {
-            Err(account_management_sdk::DeprovisionFailure::Retryable {
+            Err(account_management_sdk::IdpDeprovisionFailure::Retryable {
                 detail: self.detail.into(),
             })
         }
@@ -3675,7 +4093,7 @@ const VENDOR_SECRET_SENTINEL: &str = "TOKEN-LEAK-9f3a7c2e host=secret.internal";
 #[tokio::test]
 #[tracing_test::traced_test]
 async fn hard_delete_batch_redacts_vendor_detail_on_retryable_failure() {
-    // The `am.retention` warn! event for `DeprovisionFailure::Retryable`
+    // The `am.retention` warn! event for `IdpDeprovisionFailure::Retryable`
     // MUST log only the FNV-1a digest + character length of the
     // provider detail, not the raw string. Pinned via `tracing-test`'s
     // global capture; the assertions are negative (sentinel ABSENT)
@@ -3700,7 +4118,8 @@ async fn hard_delete_batch_redacts_vendor_detail_on_retryable_failure() {
             },
             ..AccountManagementConfig::default()
         },
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let _res = svc.hard_delete_batch(64).await;
 
@@ -3757,7 +4176,8 @@ async fn hard_delete_batch_redacts_vendor_detail_on_terminal_failure() {
             },
             ..AccountManagementConfig::default()
         },
-    );
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
 
     let _res = svc.hard_delete_batch(64).await;
 
@@ -3777,4 +4197,182 @@ async fn hard_delete_batch_redacts_vendor_detail_on_terminal_failure() {
         logs_contain("provider_detail_len"),
         "expected redacted-length field on Terminal-arm retention warn event"
     );
+}
+
+// ---- catalog-drift on load_tenant_context surfaces as ServiceUnavailable ---
+//
+// `GtsTypeSchemaNotFound` on `get_type_schema_by_uuid` means the row's
+// `tenant_type_uuid` no longer resolves through the Types Registry.
+// The SDK contract on `IdpTenantContext::tenant_type` requires a
+// *resolved* chained `GtsSchemaId`, so the helper surfaces
+// `ServiceUnavailable` rather than fabricating a placeholder; the
+// cleanup pipeline (`reap_stuck_provisioning` / `hard_delete_batch`)
+// already routes that variant through its existing `Defer` /
+// `context_load_failed` arm. Recovery is a registry restore or schema
+// backfill — not a silent fake.
+
+#[tokio::test]
+async fn load_tenant_context_defers_on_gts_type_schema_not_found() {
+    let root = Uuid::from_u128(0x100);
+    let repo = Arc::new(FakeTenantRepo::with_root(root));
+    let svc = TenantService::new(
+        repo,
+        Arc::new(FakeIdpProvisioner::new(FakeOutcome::Ok)),
+        Arc::new(InertResourceOwnershipChecker),
+        crate::domain::tenant_type::inert_tenant_type_checker(),
+        mock_enforcer(),
+        AccountManagementConfig::default(),
+    )
+    .with_types_registry(Arc::new(UuidNotFoundTypesRegistry));
+
+    let err = svc
+        .load_tenant_context(root)
+        .await
+        .expect_err("catalog drift on tenant_type_uuid MUST surface as ServiceUnavailable");
+
+    match &err {
+        DomainError::ServiceUnavailable { detail, .. } => {
+            assert!(
+                detail.contains("catalog drift")
+                    && detail.contains("not registered in the Types Registry"),
+                "ServiceUnavailable.detail must name the drift cause for operator \
+                 correlation; got: {detail}"
+            );
+        }
+        other => panic!("expected ServiceUnavailable, got {other:?}"),
+    }
+}
+
+// ---- H4: MAX_IDP_METADATA_BYTES boundary cap --------------------------
+//
+// The opaque idp-metadata blob is reshipped on every subsequent IdP
+// call via `TenantContext::metadata`, so an unbounded payload
+// amplifies per user-op (not per provisioning call). The
+// `check_idp_metadata_size` helper enforces a 64 KiB cap on both
+// the caller-supplied input AND the plugin-returned blob in the
+// create-child saga (and in the bootstrap saga via the preflight +
+// `handle_provision_success`).
+
+#[tokio::test]
+async fn create_child_rejects_oversize_provisioning_metadata_input() {
+    use crate::domain::tenant::service::MAX_IDP_METADATA_BYTES;
+
+    let root = Uuid::from_u128(0x100);
+    let child = Uuid::from_u128(0xB100);
+    let repo = Arc::new(FakeTenantRepo::with_root(root));
+    let idp = Arc::new(FakeIdpProvisioner::new(FakeOutcome::Ok));
+    let svc = TenantService::new(
+        repo,
+        idp.clone(),
+        Arc::new(InertResourceOwnershipChecker),
+        crate::domain::tenant_type::inert_tenant_type_checker(),
+        mock_enforcer(),
+        AccountManagementConfig::default(),
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
+
+    // Construct a blob whose serialised JSON exceeds the cap. A
+    // single string of `MAX_IDP_METADATA_BYTES + 1` ASCII bytes
+    // serialises to ~ `MAX_IDP_METADATA_BYTES + 3` bytes (two
+    // wrapping quotes); fine for the cap check.
+    let oversize = serde_json::json!("x".repeat(MAX_IDP_METADATA_BYTES + 1));
+    let mut input = child_input(child, root);
+    input.provisioning_metadata = Some(oversize);
+
+    let err = svc
+        .create_child(&ctx_for(root), input)
+        .await
+        .expect_err("oversize provisioning_metadata MUST reject");
+    match err {
+        DomainError::Validation { detail } => {
+            assert!(
+                detail.contains("create_child.provisioning_metadata")
+                    && detail.contains("byte AM boundary cap"),
+                "Validation must name the cap source; got: {detail}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+    assert_eq!(
+        idp.calls.lock().expect("lock").len(),
+        0,
+        "AM-side cap MUST short-circuit BEFORE the IdP round-trip"
+    );
+}
+
+#[tokio::test]
+async fn create_child_rejects_oversize_plugin_returned_metadata_and_compensates() {
+    use crate::domain::tenant::service::MAX_IDP_METADATA_BYTES;
+
+    let root = Uuid::from_u128(0x100);
+    let child = Uuid::from_u128(0xB200);
+    let repo = Arc::new(FakeTenantRepo::with_root(root));
+    let idp = Arc::new(FakeIdpProvisioner::new(FakeOutcome::Ok));
+    // Plugin returns an oversize blob on `provision_tenant`.
+    let oversize = serde_json::json!("x".repeat(MAX_IDP_METADATA_BYTES + 1));
+    idp.set_metadata(Some(oversize));
+    let svc = TenantService::new(
+        repo.clone(),
+        idp.clone(),
+        Arc::new(InertResourceOwnershipChecker),
+        crate::domain::tenant_type::inert_tenant_type_checker(),
+        mock_enforcer(),
+        AccountManagementConfig::default(),
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
+
+    let err = svc
+        .create_child(&ctx_for(root), child_input(child, root))
+        .await
+        .expect_err("oversize plugin-returned metadata MUST reject");
+    match err {
+        DomainError::Validation { detail } => {
+            assert!(
+                detail.contains("create_child.idp_returned_metadata")
+                    && detail.contains("byte AM boundary cap"),
+                "Validation must name the cap source; got: {detail}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+    // Best-effort compensation MUST run so the plugin-side state
+    // does not orphan — same compensation rung as the upsert /
+    // activation failure paths.
+    assert_eq!(
+        idp.deprovision_calls.lock().expect("lock").len(),
+        1,
+        "saga MUST attempt IdP compensation when the plugin-returned \
+         metadata exceeds the AM cap"
+    );
+}
+
+#[tokio::test]
+async fn create_child_accepts_metadata_at_cap_boundary() {
+    use crate::domain::tenant::service::MAX_IDP_METADATA_BYTES;
+
+    let root = Uuid::from_u128(0x100);
+    let child = Uuid::from_u128(0xB300);
+    let repo = Arc::new(FakeTenantRepo::with_root(root));
+    let idp = Arc::new(FakeIdpProvisioner::new(FakeOutcome::Ok));
+    let svc = TenantService::new(
+        repo,
+        idp.clone(),
+        Arc::new(InertResourceOwnershipChecker),
+        crate::domain::tenant_type::inert_tenant_type_checker(),
+        mock_enforcer(),
+        AccountManagementConfig::default(),
+    )
+    .with_types_registry(::std::sync::Arc::new(ConstantTypesRegistry));
+
+    // `MAX_IDP_METADATA_BYTES - 10` ASCII bytes wrapped in JSON
+    // quotes lands well under the cap. Pinned that "at the cap"
+    // is accepted (symmetric with the reject test).
+    let near_cap = serde_json::json!("x".repeat(MAX_IDP_METADATA_BYTES - 10));
+    let mut input = child_input(child, root);
+    input.provisioning_metadata = Some(near_cap);
+
+    let _ = svc
+        .create_child(&ctx_for(root), input)
+        .await
+        .expect("metadata just under the cap MUST pass");
 }

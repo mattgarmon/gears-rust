@@ -4,7 +4,7 @@
 //!
 //! The service depends only on the domain-level [`TenantRepo`] and
 //! the SDK-level
-//! [`account_management_sdk::IdpTenantProvisionerClient`] traits. All
+//! [`account_management_sdk::IdpPluginClient`] traits. All
 //! tests in this file use pure in-memory fakes — no DB, no network,
 //! no filesystem.
 
@@ -70,12 +70,13 @@ pub(crate) mod pep {
 }
 
 use account_management_sdk::{
-    CreateChildInput, DeprovisionFailure, DeprovisionRequest, IdpTenantProvisionerClient,
-    ListChildrenQuery, ProvisionFailure, ProvisionMetadataEntry, ProvisionRequest, TenantInfo,
-    TenantPage, TenantUpdate,
+    CreateTenantRequest, IdpDeprovisionFailure, IdpDeprovisionTenantRequest, IdpPluginClient,
+    IdpProvisionFailure, IdpProvisionTenantRequest, IdpTenantContext, ListChildrenQuery,
+    TenantInfo, TenantPage, TenantUpdate,
 };
+use serde_json::Value;
 use tenant_resolver_sdk::TenantId;
-use types_registry_sdk::TypesRegistryClient;
+use types_registry_sdk::{TypesRegistryClient, TypesRegistryError};
 
 use crate::config::AccountManagementConfig;
 use crate::domain::error::DomainError;
@@ -86,21 +87,78 @@ use crate::domain::metrics::{
     emit_metric,
 };
 use crate::domain::tenant::closure::build_activation_rows;
+use crate::domain::tenant::context::TenantContext;
 use crate::domain::tenant::hooks::TenantHardDeleteHook;
 use crate::domain::tenant::integrity::{IntegrityCategory, IntegrityReport, Violation};
 use crate::domain::tenant::model::{
     ChildCountFilter, NewTenant, TenantModel, TenantStatus, validate_status_transition,
-    validate_tenant_name,
 };
 use crate::domain::tenant::repo::TenantRepo;
 use crate::domain::tenant::resource_checker::ResourceOwnershipChecker;
 use crate::domain::tenant_type::checker::TenantTypeChecker;
 
+/// Upper bound on the byte size of the opaque `IdP`-metadata blob AM
+/// will persist into `tenant_idp_metadata` and replay on every
+/// subsequent `IdpPluginClient` call. The cap protects against:
+///
+/// * A buggy / hostile plugin returning a multi-MB
+///   `IdpProvisionResult::metadata` blob (which would then be reshipped
+///   on every `provision_user` / `deprovision_user` / `list_users` /
+///   `deprovision_tenant` call for the tenant — the cost amplifies
+///   per user-op, not per provisioning call).
+/// * A caller-supplied `provisioning_metadata` / `root_tenant_metadata`
+///   blob exceeding the AM-side serialization budget on the
+///   activation `SERIALIZABLE` TX.
+///
+/// 64 KiB is generous for realistic plugin state (Keycloak realm
+/// name + vendor org id + a few token-bearing fields fit comfortably
+/// in `~1 KiB`) and matches the order-of-magnitude conservatism of
+/// `IdpUserPagination::MAX_CURSOR_LEN` (4 KiB) and
+/// `child_tenant_name` (255 chars at most). Above this cap the
+/// service rejects with `DomainError::Validation` before the `IdP`
+/// round-trip / DB write happens. The doc string on
+/// `tenant_idp_metadata` (entity + `docs/migration.sql` + SDK
+/// `IdpProvisionResult::metadata`) references this constant as the
+/// load-bearing cap.
+pub const MAX_IDP_METADATA_BYTES: usize = 64 * 1024;
+
+/// Reject an opaque IdP-metadata blob whose serialised JSON
+/// representation exceeds [`MAX_IDP_METADATA_BYTES`]. `None`
+/// short-circuits to `Ok(())` — the documented "plugin owns no
+/// per-tenant state" / "caller submitted no provisioning hint" path
+/// has nothing to measure. Used by the create-child saga (both on
+/// the caller-supplied input and on the plugin-returned blob) and by
+/// the platform-bootstrap saga.
+///
+/// `pub(crate)` so the bootstrap module shares the same cap without
+/// duplicating the const + serde-roundtrip logic.
+pub(crate) fn check_idp_metadata_size(
+    label: &'static str,
+    value: Option<&Value>,
+) -> Result<(), DomainError> {
+    let Some(v) = value else {
+        return Ok(());
+    };
+    let bytes = serde_json::to_vec(v).map_err(|err| DomainError::Internal {
+        diagnostic: format!("{label}: idp metadata serialization failed: {err}"),
+        cause: None,
+    })?;
+    if bytes.len() > MAX_IDP_METADATA_BYTES {
+        return Err(DomainError::Validation {
+            detail: format!(
+                "{label}: idp metadata exceeds the {MAX_IDP_METADATA_BYTES}-byte AM boundary cap (got {} bytes)",
+                bytes.len()
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Central AM domain service for tenant-hierarchy CRUD.
 #[domain_model]
 pub struct TenantService<R: TenantRepo> {
     repo: Arc<R>,
-    idp: Arc<dyn IdpTenantProvisionerClient>,
+    idp: Arc<dyn IdpPluginClient>,
     cfg: AccountManagementConfig,
     /// Cascade hooks registered by sibling AM features (user-groups,
     /// tenant-metadata). Invoked in registration order at the start of
@@ -154,7 +212,7 @@ impl<R: TenantRepo> TenantService<R> {
     #[must_use]
     pub fn new(
         repo: Arc<R>,
-        idp: Arc<dyn IdpTenantProvisionerClient>,
+        idp: Arc<dyn IdpPluginClient>,
         resource_checker: Arc<dyn ResourceOwnershipChecker>,
         tenant_type_checker: Arc<dyn TenantTypeChecker + Send + Sync>,
         enforcer: PolicyEnforcer,
@@ -184,6 +242,98 @@ impl<R: TenantRepo> TenantService<R> {
     pub fn with_types_registry(mut self, registry: Arc<dyn TypesRegistryClient>) -> Self {
         self.types_registry = Some(registry);
         self
+    }
+
+    /// Assemble a [`TenantContext`] for a tenant the reaper / retention
+    /// pipeline is about to feed into
+    /// [`account_management_sdk::IdpPluginClient::deprovision_tenant`].
+    /// Fetches the `tenants` row, resolves `tenant_type_uuid` to the
+    /// chained [`gts::GtsSchemaId`] via the configured registry, and
+    /// loads the opaque plugin-private metadata from
+    /// `tenant_idp_metadata`. A registry blip surfaces as
+    /// [`DomainError::service_unavailable`] (uniform with the user-ops
+    /// path) so the caller knows to defer the row to the next tick
+    /// instead of calling the plugin with a stale or invented type.
+    ///
+    /// Both retention (`hard_delete_batch`) and the provisioning
+    /// reaper consume this helper. A row that has been removed
+    /// underneath them returns [`DomainError::NotFound`].
+    pub(crate) async fn load_tenant_context(
+        &self,
+        tenant_id: Uuid,
+    ) -> Result<TenantContext, DomainError> {
+        let system_scope = AccessScope::allow_all();
+        let tenant = self
+            .repo
+            .find_by_id(&system_scope, tenant_id)
+            .await?
+            .ok_or_else(|| DomainError::NotFound {
+                detail: format!("tenant {tenant_id} not found"),
+                resource: tenant_id.to_string(),
+            })?;
+        let registry = self.types_registry.as_ref().ok_or_else(|| {
+            DomainError::service_unavailable(format!(
+                "tenant_type resolution requires a types-registry client \
+                 (tenant {tenant_id} cannot be fed to IdpPluginClient::deprovision_tenant \
+                 without one)"
+            ))
+        })?;
+        let tenant_type = match registry
+            .get_type_schema_by_uuid(tenant.tenant_type_uuid)
+            .await
+        {
+            Ok(schema) => schema.type_id,
+            // Catalog drift: the tenant row references a
+            // `tenant_type_uuid` that the registry no longer
+            // resolves. SDK contract on `IdpTenantContext::tenant_type`
+            // is that the value is the *resolved* chained
+            // `GtsSchemaId` ("AM treats failures of the underlying
+            // Types Registry reverse-resolve as service-level errors
+            // rather than leaking an `Option` into the plugin"), so
+            // a synthesised placeholder would violate the contract
+            // — a plugin that routes teardown by `tenant_type` could
+            // either no-op (leaving IdP state behind) or target the
+            // wrong vendor backend. Surface `ServiceUnavailable` so
+            // the calling pipeline (`reap_stuck_provisioning` /
+            // `hard_delete_batch`) routes the row through its
+            // existing `context_load_failed` Defer arm. Drift is
+            // operationally observable via the
+            // `am.tenant.retention{outcome="context_load_failed"}`
+            // counter plus the dedicated `am.tenant.service` warn
+            // event below; recovery is a registry restore or a
+            // backfill of the missing schema, not a silent fake.
+            Err(TypesRegistryError::GtsTypeSchemaNotFound(_)) => {
+                tracing::warn!(
+                    target: "am.tenant.service",
+                    tenant_id = %tenant.id,
+                    tenant_type_uuid = %tenant.tenant_type_uuid,
+                    "tenant_type uuid not registered (catalog drift); deferring row \
+                     to the next cleanup tick -- operator must restore or backfill the \
+                     missing type schema before the IdP plugin can be called"
+                );
+                return Err(DomainError::service_unavailable(format!(
+                    "tenant_type uuid {} is not registered in the Types Registry \
+                     (catalog drift); deprovision_tenant cannot be called without a \
+                     resolved tenant_type",
+                    tenant.tenant_type_uuid
+                )));
+            }
+            Err(err) => {
+                return Err(DomainError::service_unavailable(format!(
+                    "tenant_type resolution failed for tenant {tenant_id}: {err}"
+                )));
+            }
+        };
+        let metadata = self
+            .repo
+            .find_idp_metadata(&system_scope, tenant_id)
+            .await?;
+        Ok(TenantContext::new(
+            tenant.id,
+            tenant.name,
+            tenant_type,
+            metadata,
+        ))
     }
 
     /// Resolve a tenant-type UUID into its chained GTS string via the
@@ -254,6 +404,7 @@ impl<R: TenantRepo> TenantService<R> {
             top,
             skip,
             total,
+            ..
         } = page;
 
         // Fan out one batch lookup for distinct uuids in the page; we
@@ -299,12 +450,7 @@ impl<R: TenantRepo> TenantService<R> {
             });
         }
 
-        Ok(TenantPage {
-            items: mapped,
-            top,
-            skip,
-            total,
-        })
+        Ok(TenantPage::new(mapped, top, skip, total))
     }
 
     /// Append a cascade hook. Hooks run in registration order.
@@ -459,7 +605,7 @@ impl<R: TenantRepo> TenantService<R> {
     pub async fn create_child(
         &self,
         ctx: &SecurityContext,
-        input: CreateChildInput,
+        input: CreateTenantRequest,
     ) -> Result<TenantInfo, DomainError> {
         // PEP gate (DESIGN §4.2). For `Tenant.create` the resource
         // owner is the parent tenant; the child id is not yet a
@@ -468,19 +614,17 @@ impl<R: TenantRepo> TenantService<R> {
             .authorize(ctx, pep::actions::CREATE, input.parent_id, None)
             .await?;
 
-        // Validate the caller-supplied tenant name before any DB
-        // writes / IdP calls. Mirrors `update_tenant`; otherwise an
-        // out-of-contract name persists and reaches the IdP.
-        validate_tenant_name(&input.name)?;
-
-        // Derive the canonical UUIDv5 from the chained GTS string.
-        // `gts::GtsID::new` enforces the chain shape; `to_uuid()` is
-        // the same algorithm Types Registry uses internally
-        // (`types-registry-sdk/src/models.rs:152`), so the derived
-        // uuid is the lookup key the registry stores under. This
-        // replaces the older `tenant_type_uuid` field on
-        // `CreateChildInput`, removing the AM/IdP state-divergence
-        // class where the two could drift.
+        // Pure parse — derives the canonical UUIDv5 from the chained
+        // GTS string. No IO. `gts::GtsID::new` enforces the chain
+        // shape; `to_uuid()` is the same algorithm Types Registry
+        // uses internally (`types-registry-sdk/src/models.rs:152`),
+        // so the derived uuid is the lookup key the registry stores
+        // under. This replaces the older `tenant_type_uuid` field on
+        // `CreateTenantRequest`, removing the AM/IdP state-divergence
+        // class where the two could drift. Runs ahead of any
+        // registry-backed validation so a malformed `tenant_type`
+        // string fails fast as `InvalidTenantType` rather than after
+        // a wasted Types Registry round-trip.
         let tenant_type_uuid = gts::GtsID::new(input.tenant_type.as_ref())
             .map_err(|e| DomainError::InvalidTenantType {
                 detail: format!("invalid tenant_type chain `{}`: {e}", input.tenant_type),
@@ -490,7 +634,12 @@ impl<R: TenantRepo> TenantService<R> {
         // Saga pre-step: validate parent exists + is Active.
         // allow_all: structural read per DESIGN §4.2 — the PEP has
         // already gated the operation; the parent-status check is a
-        // saga precondition, not a data-disclosure read.
+        // saga precondition, not a data-disclosure read. Runs BEFORE
+        // any registry-backed GTS validation so a Types Registry
+        // outage cannot mask `parent tenant not found / not active`
+        // as a 503 or add external latency to a request that would
+        // fail locally anyway — same error-channel protection that
+        // `update_tenant` already applies.
         let parent = self
             .repo
             .find_by_id(&AccessScope::allow_all(), input.parent_id)
@@ -506,6 +655,43 @@ impl<R: TenantRepo> TenantService<R> {
                 ),
             });
         }
+
+        // Validate the caller-supplied tenant name through the
+        // published `gts.cf.core.am.tenant.v1~` schema. Mirrors the
+        // resource-group `validate_metadata_via_gts` posture: when the
+        // registry has the schema the JSON-Schema bounds (`minLength`,
+        // `maxLength`) gate the call; when the schema is not yet
+        // registered the helper short-circuits to `Ok(())` and the DB
+        // `CHECK (length(name) BETWEEN 1 AND 255)` constraint serves
+        // as the last-line guard. Tests that pin a deterministic
+        // rejection inject a registry that has the schema registered.
+        //
+        // Runs AFTER the local parent precondition so a missing or
+        // inactive parent fails fast on the local read instead of
+        // burning a Types Registry round-trip first.
+        if let Some(registry) = self.types_registry.as_ref() {
+            crate::domain::gts_validation::validate_tenant_name_via_gts(
+                &input.name,
+                registry.as_ref(),
+            )
+            .await?;
+        }
+        // No AM-side schema validation of `input.provisioning_metadata`:
+        // the IdP plugin owns that shape end-to-end per the
+        // IdP-metadata isolation contract. A misshaped payload
+        // surfaces during the IdP call below and routes through
+        // the standard `IdpProvisionFailure` ladder.
+        //
+        // Size-only cap is enforced here: the blob will be reshipped
+        // on every subsequent IdP call via `TenantContext::metadata`,
+        // so an unbounded payload amplifies per user-op (not per
+        // provisioning call). Cap at the AM boundary before the
+        // saga's first DB write so an oversize payload never
+        // produces a `provisioning` row.
+        check_idp_metadata_size(
+            "create_child.provisioning_metadata",
+            input.provisioning_metadata.as_ref(),
+        )?;
 
         // Pre-saga gate — `inst-algo-saga-type-check`. Pre-write
         // tenant-type compatibility barrier (FEATURE 2.3
@@ -603,13 +789,15 @@ impl<R: TenantRepo> TenantService<R> {
 
         // Saga step 2 — invoke IdP provider outside any TX.
         // @cpt-begin:cpt-cf-account-management-dod-tenant-hierarchy-management-idp-tenant-provision:p1:inst-dod-idp-provision-call
-        let req = ProvisionRequest {
-            tenant_id: provisioning_row.id,
-            parent_id: Some(parent.id),
-            name: input.name.clone(),
-            tenant_type: input.tenant_type.clone(),
-            metadata: input.provisioning_metadata.clone(),
-        };
+        let mut req = IdpProvisionTenantRequest::new(
+            provisioning_row.id,
+            parent.id,
+            input.name.clone(),
+            input.tenant_type.clone(),
+        );
+        if let Some(meta) = input.provisioning_metadata.clone() {
+            req = req.with_metadata(meta);
+        }
         let provision_result = match self.idp.provision_tenant(&req).await {
             Ok(result) => {
                 emit_metric(
@@ -635,7 +823,7 @@ impl<R: TenantRepo> TenantService<R> {
                     ],
                 );
                 match failure {
-                    ProvisionFailure::CleanFailure { detail } => {
+                    IdpProvisionFailure::CleanFailure { detail } => {
                         // Compensating TX — delete the provisioning row. No
                         // closure cleanup needed: nothing was ever written.
                         // Log compensation failures but always return the
@@ -681,18 +869,18 @@ impl<R: TenantRepo> TenantService<R> {
                                 ],
                             );
                         }
-                        return Err(ProvisionFailure::CleanFailure { detail }
+                        return Err(IdpProvisionFailure::CleanFailure { detail }
                             .into_domain_error(provisioning_row.id));
                     }
-                    ProvisionFailure::Ambiguous { detail } => {
+                    IdpProvisionFailure::Ambiguous { detail } => {
                         // Leave the provisioning row in place for the reaper.
-                        // The `From<ProvisionFailure> for DomainError` impl
+                        // The `From<IdpProvisionFailure> for DomainError` impl
                         // redacts the raw provider detail so vendor text
                         // never reaches the public envelope.
-                        return Err(ProvisionFailure::Ambiguous { detail }
+                        return Err(IdpProvisionFailure::Ambiguous { detail }
                             .into_domain_error(provisioning_row.id));
                     }
-                    ProvisionFailure::UnsupportedOperation { detail } => {
+                    IdpProvisionFailure::UnsupportedOperation { detail } => {
                         // Treat as clean compensable — no IdP-side state exists.
                         // Same compensation-failure policy as CleanFailure above.
                         if let Err(e) = self
@@ -727,7 +915,7 @@ impl<R: TenantRepo> TenantService<R> {
                                 ],
                             );
                         }
-                        return Err(ProvisionFailure::UnsupportedOperation { detail }
+                        return Err(IdpProvisionFailure::UnsupportedOperation { detail }
                             .into_domain_error(provisioning_row.id));
                     }
                     other => {
@@ -746,7 +934,7 @@ impl<R: TenantRepo> TenantService<R> {
                             target: "am.tenant.saga",
                             tenant_id = %provisioning_row.id,
                             variant = other.as_metric_label(),
-                            "unknown ProvisionFailure variant; treating as Ambiguous (provisioning row left for reaper)"
+                            "unknown IdpProvisionFailure variant; treating as Ambiguous (provisioning row left for reaper)"
                         );
                         return Err(other.into_domain_error(provisioning_row.id));
                     }
@@ -772,18 +960,108 @@ impl<R: TenantRepo> TenantService<R> {
         // propagated unchanged — the reaper still owns the
         // last-resort cleanup if any compensation step fails.
         // @cpt-begin:cpt-cf-account-management-dod-tenant-hierarchy-management-idp-tenant-provision:p1:inst-dod-idp-provision-metadata
+        let idp_metadata = provision_result.metadata;
+        // Size cap on the plugin-returned blob: same
+        // `MAX_IDP_METADATA_BYTES` budget as the caller-supplied
+        // input above. Reject + run best-effort `deprovision_tenant`
+        // compensation so an oversize plugin blob does not orphan
+        // vendor-side state OR get persisted into
+        // `tenant_idp_metadata` past the boundary cap.
+        if let Err(size_err) =
+            check_idp_metadata_size("create_child.idp_returned_metadata", idp_metadata.as_ref())
+        {
+            tracing::warn!(
+                target: "am.tenant.saga",
+                tenant_id = %provisioning_row.id,
+                error = %size_err,
+                "plugin returned an oversize idp metadata blob; running best-effort \
+                 IdP compensation so the vendor-side tenant does not orphan"
+            );
+            self.compensate_failed_activation(
+                &parent,
+                provisioning_row.id,
+                input.tenant_type.clone(),
+                input.name.clone(),
+                idp_metadata.as_ref(),
+            )
+            .await;
+            return Err(size_err);
+        }
+        // Persist the plugin-private metadata BEFORE
+        // `finalize_provisioning` opens its SERIALIZABLE TX. If the
+        // activation TX then fails AND the best-effort
+        // `compensate_failed_activation` cannot confirm vendor-side
+        // teardown (Retryable / Terminal / UnsupportedOperation
+        // under `idp.required=true`), the row is left for the reaper
+        // — and the reaper rebuilds `IdpDeprovisionTenantRequest`
+        // exclusively from `tenant_idp_metadata`. Without this
+        // up-front upsert, the only copy of the blob would die in
+        // this stack frame, the reaper would forward an empty
+        // `TenantContext::metadata`, and any plugin that keys
+        // vendor-side state off the blob would silently leak the
+        // tenant. On a successful activation the in-TX write inside
+        // `activate_tenant` overwrites this row with the same value
+        // atomically with the status flip (idempotent).
+        //
+        // # Upsert failure → `?` would orphan IdP state
+        //
+        // A naked `?` here would bypass `compensate_failed_activation`
+        // entirely on a transient DB blip (pool exhaustion,
+        // serialization conflict, fatal-but-retryable disconnect), so
+        // `provision_tenant` would leave vendor-side state with no
+        // local record. Route the upsert failure through the same
+        // compensation rung the activation-failure branch uses below
+        // — the saga MUST attempt IdP teardown for every post-
+        // provision failure, not only the ones that surface from
+        // `finalize_provisioning`.
+        if let Err(upsert_err) = self
+            .repo
+            .upsert_idp_metadata(
+                &AccessScope::allow_all(),
+                provisioning_row.id,
+                idp_metadata.as_ref(),
+            )
+            .await
+        {
+            tracing::warn!(
+                target: "am.tenant.saga",
+                tenant_id = %provisioning_row.id,
+                error = %upsert_err,
+                "saga step-3 pre-activation metadata upsert failed; running best-effort \
+                 IdP compensation so the vendor-side tenant does not orphan"
+            );
+            self.compensate_failed_activation(
+                &parent,
+                provisioning_row.id,
+                input.tenant_type.clone(),
+                input.name.clone(),
+                idp_metadata.as_ref(),
+            )
+            .await;
+            return Err(upsert_err);
+        }
         let activated = match self
             .finalize_provisioning(
                 &parent,
                 provisioning_row.id,
                 input.self_managed,
-                &provision_result.metadata_entries,
+                idp_metadata.as_ref(),
             )
             .await
         {
             Ok(row) => row,
             Err(err) => {
-                self.compensate_failed_activation(provisioning_row.id).await;
+                // Pass the same `idp_metadata` blob through to the
+                // compensation path so `deprovision_tenant` sees the
+                // plugin's own per-tenant state when tearing down.
+                self.compensate_failed_activation(
+                    &parent,
+                    provisioning_row.id,
+                    input.tenant_type.clone(),
+                    input.name.clone(),
+                    idp_metadata.as_ref(),
+                )
+                .await;
                 return Err(err);
             }
         };
@@ -836,8 +1114,14 @@ impl<R: TenantRepo> TenantService<R> {
         parent: &TenantModel,
         provisioning_id: Uuid,
         self_managed: bool,
-        metadata_entries: &[ProvisionMetadataEntry],
+        idp_metadata: Option<&Value>,
     ) -> Result<TenantModel, DomainError> {
+        // No AM-side schema validation of the IdP-returned blob —
+        // the plugin owns the shape end-to-end per the IdP-metadata
+        // isolation contract. Whatever the plugin produced is
+        // persisted verbatim in `tenant_idp_metadata` and replayed
+        // through `TenantContext::metadata` on every subsequent
+        // IdP call for this tenant.
         let ancestors = self
             .repo
             .load_ancestor_chain_through_parent(&AccessScope::allow_all(), parent.id)
@@ -853,7 +1137,7 @@ impl<R: TenantRepo> TenantService<R> {
                 &AccessScope::allow_all(),
                 provisioning_id,
                 &closure_rows,
-                metadata_entries,
+                idp_metadata,
             )
             .await
     }
@@ -876,7 +1160,15 @@ impl<R: TenantRepo> TenantService<R> {
         clippy::cognitive_complexity,
         reason = "best-effort multi-step compensation: each branch logs a distinct outcome and degrades silently to the reaper; collapsing the IdP/row legs hides which step ran"
     )]
-    async fn compensate_failed_activation(&self, provisioning_id: Uuid) {
+    async fn compensate_failed_activation(
+        &self,
+        parent: &TenantModel,
+        provisioning_id: Uuid,
+        tenant_type: gts::GtsSchemaId,
+        tenant_name: String,
+        idp_metadata: Option<&Value>,
+    ) {
+        let _ = parent; // reserved for future caller-context logging
         // Step 1 — vendor-side cleanup. We only run the row delete
         // when the IdP confirms there is nothing left to orphan
         // (`Ok` / `NotFound` / `UnsupportedOperation` under
@@ -885,15 +1177,32 @@ impl<R: TenantRepo> TenantService<R> {
         // `idp.required=true` — require vendor-side resolution;
         // leave the row for the reaper, which already classifies
         // these outcomes correctly.
+        //
+        // Build the AM-internal `TenantContext` from the saga's
+        // in-scope facts: the in-flight tenant id + name + chained
+        // type the caller submitted (saga step 2 already validated
+        // the chain shape via `tenant_type_uuid` derivation) plus
+        // whatever the plugin returned from `provision_tenant`.
+        // Convert to the SDK envelope `IdpTenantContext` at the
+        // `IdpPluginClient::deprovision_tenant` boundary so the
+        // public plugin contract sees only the SDK type — the
+        // internal `TenantContext` is kept distinct so future
+        // AM-internal additions do not leak through the SPI.
+        let tenant_context = TenantContext::new(
+            provisioning_id,
+            tenant_name,
+            tenant_type,
+            idp_metadata.cloned(),
+        );
         let idp_clean = match self
             .idp
-            .deprovision_tenant(&DeprovisionRequest {
-                tenant_id: provisioning_id,
-            })
+            .deprovision_tenant(&IdpDeprovisionTenantRequest::new(IdpTenantContext::from(
+                &tenant_context,
+            )))
             .await
         {
-            Ok(()) | Err(DeprovisionFailure::NotFound { .. }) => true,
-            Err(DeprovisionFailure::UnsupportedOperation { .. }) => {
+            Ok(()) | Err(IdpDeprovisionFailure::NotFound { .. }) => true,
+            Err(IdpDeprovisionFailure::UnsupportedOperation { .. }) => {
                 // Symmetric with the retention pipeline (see
                 // `process_single_hard_delete`'s `UnsupportedOperation`
                 // arm) and the reaper (`classify_deprovision`):
@@ -901,7 +1210,7 @@ impl<R: TenantRepo> TenantService<R> {
                 // "no IdP-side state retained" when the deployment
                 // explicitly opted out of an IdP via
                 // `cfg.idp.required = false` (the wired-in
-                // `NoopProvisioner` path). A real plugin returning
+                // `NoopIdpProvider` path). A real plugin returning
                 // this variant under `idp.required = true` signals
                 // that vendor-side state may exist but the plugin
                 // can't deprovision it — hard-deleting the AM row
@@ -1152,9 +1461,6 @@ impl<R: TenantRepo> TenantService<R> {
                 detail: "update patch is empty; at least one field required".into(),
             });
         }
-        if let Some(ref new_name) = patch.name {
-            validate_tenant_name(new_name)?;
-        }
         // PEP gate (DESIGN §4.2). The compiled scope is intentionally
         // discarded for both the pre-update read and the mutating
         // write: the `tenants` entity is `no_tenant, no_resource,
@@ -1170,6 +1476,12 @@ impl<R: TenantRepo> TenantService<R> {
         let _scope = self
             .authorize(ctx, pep::actions::UPDATE, id, Some(id))
             .await?;
+        // Load the current row BEFORE any GTS round-trip so an
+        // idempotent same-name PATCH (or a PATCH against a missing /
+        // soft-deleted tenant) reaches the no-op / `NotFound` path
+        // without paying a registry call. A naive ordering that hit
+        // GTS first would turn every registry blip into a `503` for
+        // PATCH requests that would otherwise be 200 no-ops or 404s.
         let current = self
             .repo
             .find_by_id(&AccessScope::allow_all(), id)
@@ -1183,6 +1495,25 @@ impl<R: TenantRepo> TenantService<R> {
                 detail: format!("tenant {id} not found"),
                 resource: id.to_string(),
             });
+        }
+        // Schema validation runs AFTER `authorize` AND `find_by_id`
+        // so a registry outage / malformed-schema response surfaces
+        // only to already-authorized callers acting on a real row —
+        // an out-of-scope caller still gets `403 CrossTenantDenied`,
+        // a missing/deleted-row caller still gets `404 NotFound`,
+        // instead of `503` leaking registry health through the error
+        // channel. Mirrors the ordering in `create_child`. Skipped
+        // when the patched name is identical to the current name
+        // (idempotent PATCH — no shape change, no need to validate).
+        if let Some(ref new_name) = patch.name
+            && new_name != &current.name
+            && let Some(registry) = self.types_registry.as_ref()
+        {
+            crate::domain::gts_validation::validate_tenant_name_via_gts(
+                new_name,
+                registry.as_ref(),
+            )
+            .await?;
         }
         // Lift the SDK 3-variant patch status into the AM-internal
         // 4-variant taxonomy for the transition guard. SDK status

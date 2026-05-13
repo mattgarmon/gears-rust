@@ -1,4 +1,4 @@
-//! Test stub for the [`IdpTenantProvisionerClient`] contract. Pairs
+//! Test stub for the [`IdpPluginClient`] contract. Pairs
 //! with the four-outcome enums [`FakeOutcome`] /
 //! [`FakeDeprovisionOutcome`] that drive the provision / deprovision
 //! branches independently so tests can exercise both compensable and
@@ -14,11 +14,12 @@
 use std::sync::{Arc, Mutex};
 
 use account_management_sdk::{
-    CheckAvailabilityFailure, DeprovisionFailure, DeprovisionRequest, IdpTenantProvisionerClient,
-    ProvisionFailure, ProvisionMetadataEntry, ProvisionRequest, ProvisionResult,
+    IdpDeprovisionFailure, IdpDeprovisionTenantRequest, IdpPluginClient, IdpProvisionFailure,
+    IdpProvisionResult, IdpProvisionTenantRequest,
 };
 use async_trait::async_trait;
 use modkit_macros::domain_model;
+use serde_json::Value;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -55,9 +56,13 @@ pub enum FakeDeprovisionOutcome {
 pub struct FakeIdpProvisioner {
     pub outcome: Mutex<FakeOutcome>,
     pub deprovision_outcome: Mutex<FakeDeprovisionOutcome>,
-    pub metadata_entries: Mutex<Vec<ProvisionMetadataEntry>>,
-    pub availability_failures: Mutex<u32>,
-    pub availability_calls: Mutex<u32>,
+    /// Opaque plugin-private metadata blob the fake returns from
+    /// [`IdpPluginClient::provision_tenant`] on the `FakeOutcome::Ok`
+    /// path. `None` (default) models the "plugin owns no per-tenant
+    /// state" case; `Some` lets a test pin the exact JSON the
+    /// production code will later replay via
+    /// [`account_management_sdk::IdpTenantContext::metadata`].
+    pub metadata: Mutex<Option<Value>>,
     pub calls: Mutex<Vec<Uuid>>,
     pub deprovision_calls: Mutex<Vec<Uuid>>,
     /// Notified once `provision_tenant` is entered (BEFORE the
@@ -73,9 +78,7 @@ impl FakeIdpProvisioner {
         Self {
             outcome: Mutex::new(outcome),
             deprovision_outcome: Mutex::new(FakeDeprovisionOutcome::Ok),
-            metadata_entries: Mutex::new(Vec::new()),
-            availability_failures: Mutex::new(0),
-            availability_calls: Mutex::new(0),
+            metadata: Mutex::new(None),
             calls: Mutex::new(Vec::new()),
             deprovision_calls: Mutex::new(Vec::new()),
             provision_entered: Arc::new(Notify::new()),
@@ -86,12 +89,11 @@ impl FakeIdpProvisioner {
         *self.deprovision_outcome.lock().expect("lock") = oc;
     }
 
-    pub fn set_metadata_entries(&self, entries: Vec<ProvisionMetadataEntry>) {
-        *self.metadata_entries.lock().expect("lock") = entries;
-    }
-
-    pub fn fail_availability_times(&self, failures: u32) {
-        *self.availability_failures.lock().expect("lock") = failures;
+    /// Pin the opaque metadata blob returned on the next
+    /// `FakeOutcome::Ok` provision call. `None` resets the fake to
+    /// the "plugin returns no per-tenant state" default.
+    pub fn set_metadata(&self, metadata: Option<Value>) {
+        *self.metadata.lock().expect("lock") = metadata;
     }
 
     /// Mutate the provision outcome between calls. Tests that need to
@@ -108,33 +110,14 @@ impl FakeIdpProvisioner {
     pub fn provision_call_count(&self) -> usize {
         self.calls.lock().expect("lock").len()
     }
-
-    /// Read the current count of `check_availability` calls observed
-    /// by this fake. Used by `wait_for_idp_availability` tests to pin
-    /// the attempt-count contract.
-    pub fn availability_call_count(&self) -> u32 {
-        *self.availability_calls.lock().expect("lock")
-    }
 }
 
 #[async_trait]
-impl IdpTenantProvisionerClient for FakeIdpProvisioner {
-    async fn check_availability(&self) -> Result<(), CheckAvailabilityFailure> {
-        *self.availability_calls.lock().expect("lock") += 1;
-        let mut failures = self.availability_failures.lock().expect("lock");
-        if *failures > 0 {
-            *failures -= 1;
-            return Err(CheckAvailabilityFailure::TransientError(
-                "fake availability failure".into(),
-            ));
-        }
-        Ok(())
-    }
-
+impl IdpPluginClient for FakeIdpProvisioner {
     async fn provision_tenant(
         &self,
-        req: &ProvisionRequest,
-    ) -> Result<ProvisionResult, ProvisionFailure> {
+        req: &IdpProvisionTenantRequest,
+    ) -> Result<IdpProvisionResult, IdpProvisionFailure> {
         self.calls.lock().expect("lock").push(req.tenant_id);
         // Signal that the saga has reached `provision_tenant`
         // BEFORE the per-outcome dispatch so a test using
@@ -143,16 +126,16 @@ impl IdpTenantProvisionerClient for FakeIdpProvisioner {
         self.provision_entered.notify_one();
         let oc = self.outcome.lock().expect("lock").clone();
         match oc {
-            FakeOutcome::Ok => Ok(ProvisionResult {
-                metadata_entries: self.metadata_entries.lock().expect("lock").clone(),
-            }),
-            FakeOutcome::CleanFailure => Err(ProvisionFailure::CleanFailure {
+            FakeOutcome::Ok => Ok(IdpProvisionResult::new(
+                self.metadata.lock().expect("lock").clone(),
+            )),
+            FakeOutcome::CleanFailure => Err(IdpProvisionFailure::CleanFailure {
                 detail: "fake clean".into(),
             }),
-            FakeOutcome::Ambiguous => Err(ProvisionFailure::Ambiguous {
+            FakeOutcome::Ambiguous => Err(IdpProvisionFailure::Ambiguous {
                 detail: "fake ambiguous".into(),
             }),
-            FakeOutcome::Unsupported => Err(ProvisionFailure::UnsupportedOperation {
+            FakeOutcome::Unsupported => Err(IdpProvisionFailure::UnsupportedOperation {
                 detail: "fake unsupported".into(),
             }),
             FakeOutcome::Hang => {
@@ -162,24 +145,29 @@ impl IdpTenantProvisionerClient for FakeIdpProvisioner {
         }
     }
 
-    async fn deprovision_tenant(&self, req: &DeprovisionRequest) -> Result<(), DeprovisionFailure> {
+    async fn deprovision_tenant(
+        &self,
+        req: &IdpDeprovisionTenantRequest,
+    ) -> Result<(), IdpDeprovisionFailure> {
         self.deprovision_calls
             .lock()
             .expect("lock")
-            .push(req.tenant_id);
+            .push(req.tenant_context.tenant_id);
         let oc = self.deprovision_outcome.lock().expect("lock").clone();
         match oc {
             FakeDeprovisionOutcome::Ok => Ok(()),
-            FakeDeprovisionOutcome::Retryable => Err(DeprovisionFailure::Retryable {
+            FakeDeprovisionOutcome::Retryable => Err(IdpDeprovisionFailure::Retryable {
                 detail: "fake retryable".into(),
             }),
-            FakeDeprovisionOutcome::Terminal => Err(DeprovisionFailure::Terminal {
+            FakeDeprovisionOutcome::Terminal => Err(IdpDeprovisionFailure::Terminal {
                 detail: "fake terminal".into(),
             }),
-            FakeDeprovisionOutcome::Unsupported => Err(DeprovisionFailure::UnsupportedOperation {
-                detail: "fake unsupported".into(),
-            }),
-            FakeDeprovisionOutcome::NotFound => Err(DeprovisionFailure::NotFound {
+            FakeDeprovisionOutcome::Unsupported => {
+                Err(IdpDeprovisionFailure::UnsupportedOperation {
+                    detail: "fake unsupported".into(),
+                })
+            }
+            FakeDeprovisionOutcome::NotFound => Err(IdpDeprovisionFailure::NotFound {
                 detail: "fake not found".into(),
             }),
         }

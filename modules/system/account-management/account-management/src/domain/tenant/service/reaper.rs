@@ -1,7 +1,7 @@
 //! Provisioning-reaper tick on `TenantService` —
 //! `reap_stuck_provisioning`. Cleanup is performed **directly**
 //! against the `tenants` row: a successful (or success-equivalent)
-//! `IdpTenantProvisionerClient::deprovision_tenant` call is followed
+//! `IdpPluginClient::deprovision_tenant` call is followed
 //! by an immediate hard-delete via `repo.compensate_provisioning()`,
 //! bypassing the soft-delete + retention pipeline entirely (see
 //! `compensate_provisioning_row`). This keeps stuck-`Provisioning`
@@ -17,12 +17,12 @@
 //! cannot stamp duplicate `deprovision_tenant` calls onto the same
 //! row inside one `RETENTION_CLAIM_TTL` window. Defense-in-depth
 //! against the
-//! [`account_management_sdk::DeprovisionFailure::NotFound`]-
+//! [`account_management_sdk::IdpDeprovisionFailure::NotFound`]-
 //! as-success-equivalent error mapping (which handles edge cases —
 //! crash recovery, stale claim takeover).
 //!
 //! Retry / backoff / circuit-breaker policy is owned by the
-//! [`account_management_sdk::IdpTenantProvisionerClient`]
+//! [`account_management_sdk::IdpPluginClient`]
 //! implementation — a `Retryable` return signals that the plugin
 //! has exhausted its own retry budget for that call, and AM simply
 //! defers the row to the next reaper tick (default 30 s).
@@ -35,7 +35,9 @@ use modkit_security::AccessScope;
 use time::OffsetDateTime;
 use tracing::warn;
 
-use account_management_sdk::{DeprovisionFailure, DeprovisionRequest};
+use account_management_sdk::{
+    IdpDeprovisionFailure, IdpDeprovisionTenantRequest, IdpTenantContext,
+};
 
 use crate::domain::metrics::{AM_TENANT_RETENTION, MetricKind, emit_metric};
 use crate::domain::tenant::repo::TenantRepo;
@@ -46,7 +48,7 @@ use super::TenantService;
 /// Compensation-arm classification for a single reaper row. Lets
 /// the per-row body in `reap_stuck_provisioning` decide whether to
 /// proceed with the local DB teardown without re-matching the full
-/// `DeprovisionFailure` shape twice.
+/// `IdpDeprovisionFailure` shape twice.
 #[domain_model]
 enum ReaperOutcome {
     /// Plugin acknowledged the deprovision (or there was nothing
@@ -54,7 +56,7 @@ enum ReaperOutcome {
     /// metric `outcome=` value emitted on success.
     Compensable(&'static str),
     /// `IdP` plugin classified the deprovision as non-recoverable
-    /// (`DeprovisionFailure::Terminal`). Stamp `terminal_failure_at`
+    /// (`IdpDeprovisionFailure::Terminal`). Stamp `terminal_failure_at`
     /// on the row so `scan_stuck_provisioning` filters it out of the
     /// retry loop until an operator intervenes. Distinct from
     /// [`Self::Defer`]: a deferred row goes back on the next tick;
@@ -252,20 +254,49 @@ impl<R: TenantRepo> TenantService<R> {
     )]
     #[allow(
         unreachable_patterns,
-        reason = "DeprovisionFailure is #[non_exhaustive]; the wildcard guards against future SDK variants"
+        reason = "IdpDeprovisionFailure is #[non_exhaustive]; the wildcard guards against future SDK variants"
     )]
     async fn classify_deprovision(&self, tenant_id: uuid::Uuid) -> ReaperOutcome {
+        let tenant_context = match self.load_tenant_context(tenant_id).await {
+            Ok(ctx) => ctx,
+            Err(err) => {
+                // Could not assemble the context — typically a
+                // types-registry blip or a missing row.
+                // Deprovision_tenant cannot proceed without a typed
+                // tenant_type per the SDK contract, so defer the
+                // row to the next tick and release the claim. A
+                // peer (or this worker on retry) will try again
+                // once the registry recovers.
+                warn!(
+                    target: "am.retention",
+                    tenant_id = %tenant_id,
+                    error = %err,
+                    "reaper: failed to assemble TenantContext for deprovision_tenant; deferring row"
+                );
+                emit_metric(
+                    AM_TENANT_RETENTION,
+                    MetricKind::Counter,
+                    &[
+                        ("job", "provisioning_reaper"),
+                        ("outcome", "context_load_failed"),
+                    ],
+                );
+                return ReaperOutcome::Defer;
+            }
+        };
         match self
             .idp
-            .deprovision_tenant(&DeprovisionRequest { tenant_id })
+            .deprovision_tenant(&IdpDeprovisionTenantRequest::new(IdpTenantContext::from(
+                &tenant_context,
+            )))
             .await
         {
             Ok(()) => ReaperOutcome::Compensable("compensated"),
-            Err(DeprovisionFailure::UnsupportedOperation { .. }) => {
+            Err(IdpDeprovisionFailure::UnsupportedOperation { .. }) => {
                 // `UnsupportedOperation` is only safe to treat as
                 // compensable when the deployment opted out of an
                 // IdP entirely (`cfg.idp.required = false` → wired
-                // to `NoopProvisioner`). A real plugin returning
+                // to `NoopIdpProvider`). A real plugin returning
                 // this is signalling that it cannot perform
                 // deprovision but external state may exist — hard-
                 // deleting the AM row would orphan that vendor-side
@@ -284,7 +315,7 @@ impl<R: TenantRepo> TenantService<R> {
                 }
                 ReaperOutcome::Compensable("compensated")
             }
-            Err(DeprovisionFailure::NotFound { .. }) => {
+            Err(IdpDeprovisionFailure::NotFound { .. }) => {
                 // Vendor reports the tenant is already gone (typical
                 // 404 / 410 from the SDK). Per the IdP trait
                 // contract this is success-equivalent: continue with
@@ -295,7 +326,7 @@ impl<R: TenantRepo> TenantService<R> {
                 // cross-system inconsistency.
                 ReaperOutcome::Compensable("already_absent")
             }
-            Err(DeprovisionFailure::Retryable { detail }) => {
+            Err(IdpDeprovisionFailure::Retryable { detail }) => {
                 // Vendor SDK detail strings may carry hostnames,
                 // endpoint paths, or token-bearing fragments — same
                 // class of secrets the `am.idp` mapping in
@@ -320,7 +351,7 @@ impl<R: TenantRepo> TenantService<R> {
                 );
                 ReaperOutcome::Defer
             }
-            Err(DeprovisionFailure::Terminal { detail }) => {
+            Err(IdpDeprovisionFailure::Terminal { detail }) => {
                 // Per the SDK contract, `Terminal` means the vendor
                 // refused to deprovision and operator intervention is
                 // required. The reaper used to map this to `Defer`,
@@ -352,14 +383,14 @@ impl<R: TenantRepo> TenantService<R> {
                 );
                 ReaperOutcome::Terminal
             }
-            // `DeprovisionFailure` is `#[non_exhaustive]`; the
+            // `IdpDeprovisionFailure` is `#[non_exhaustive]`; the
             // wildcard guards against a future SDK variant landing
             // without a service-side classification update.
             Err(_) => {
                 warn!(
                     target: "am.retention",
                     tenant_id = %tenant_id,
-                    "reaper: unknown DeprovisionFailure variant; deferring as retryable"
+                    "reaper: unknown IdpDeprovisionFailure variant; deferring as retryable"
                 );
                 emit_metric(
                     AM_TENANT_RETENTION,
@@ -505,7 +536,7 @@ impl<R: TenantRepo> TenantService<R> {
                 // Emit the `terminal` outcome counter only after the
                 // mark UPDATE confirmed `Ok(true)`. Counterpart to
                 // the comment in `classify_deprovision`'s
-                // `DeprovisionFailure::Terminal` arm: speculative
+                // `IdpDeprovisionFailure::Terminal` arm: speculative
                 // emission there would inflate the metric over rows
                 // whose `terminal_failure_at` never actually landed
                 // (lost claim or storage fault).

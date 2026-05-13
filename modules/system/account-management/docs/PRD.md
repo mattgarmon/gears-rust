@@ -1101,13 +1101,13 @@ IdP implementations may align with standards such as SCIM 2.0 and OIDC where app
 - IdP is not yet available
 
 **Main Flow**:
-1. System starts bootstrap and checks IdP availability.
-2. System detects that the IdP is unavailable.
-3. System retries with backoff until the IdP becomes available or the configured timeout is reached.
-4. If the IdP becomes available before the timeout, bootstrap continues.
+1. System starts bootstrap and attempts to provision the root tenant via `IdpPluginClient::provision_tenant` — `provision_tenant` itself is the readiness signal, there is no separate availability probe.
+2. The IdP returns `IdpProvisionFailure::CleanFailure` indicating no IdP-side state was retained. The saga compensates the provisioning row.
+3. System retries the saga with backoff until the IdP returns `Ok` or the configured timeout is reached.
+4. If the IdP succeeds before the timeout, bootstrap finalizes the root.
 
 **Postconditions**:
-- Bootstrap resumes only after IdP availability is confirmed, or stops at the timeout boundary
+- Bootstrap reaches the active root only after a `provision_tenant` succeeds, or stops at the timeout boundary
 
 **Alternative Flows**:
 - **Timeout expires**: Bootstrap fails with `CanonicalError::ServiceUnavailable` (HTTP 503)

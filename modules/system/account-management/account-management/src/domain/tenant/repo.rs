@@ -23,10 +23,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use modkit_security::AccessScope;
+use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use account_management_sdk::{ListChildrenQuery, ProvisionMetadataEntry, TenantPage, TenantUpdate};
+use account_management_sdk::{ListChildrenQuery, TenantPage, TenantUpdate};
 
 use crate::domain::error::DomainError;
 use crate::domain::tenant::closure::ClosureRow;
@@ -90,6 +91,47 @@ pub trait TenantRepo: Send + Sync {
         id: Uuid,
     ) -> Result<Option<TenantModel>, DomainError>;
 
+    /// Batch sibling of [`Self::find_by_id`]: return every row whose id
+    /// is in `ids` and that is visible under the supplied `scope`. The
+    /// caller-supplied id slice is deduplicated by the implementation;
+    /// missing ids do not surface as errors. Order of the returned
+    /// vector is unspecified — callers that need a positional mapping
+    /// MUST build a `HashMap<Uuid, TenantModel>` from the result. Used
+    /// by listings that resolve cross-row metadata (e.g. the
+    /// conversion parent listing's live `child_tenant_name` lookup) so
+    /// they avoid an N+1 round-trip pattern.
+    ///
+    /// # Soft-delete semantics — DELIBERATE asymmetry vs. `find_by_id`
+    ///
+    /// `find_many` returns only live rows (`deleted_at IS NULL`);
+    /// `find_by_id` does not filter by deletion. This is intentional:
+    /// `find_by_id`
+    /// is consumed by paths that need to disambiguate `NotFound` from
+    /// `Found-but-Deleted` (e.g. integrity check, conversion approve's
+    /// status precondition), while `find_many` is consumed by cross-
+    /// row metadata listings where surfacing a deleted tenant's name
+    /// would leak post-deletion state across a barrier. Callers that
+    /// need both behaviours should consult the trait method whose
+    /// docstring matches their semantics — do not paper over the
+    /// difference at the call site.
+    ///
+    /// # Batch-size ceiling
+    ///
+    /// The implementation lowers `ids` into a single SQL `IN (...)`
+    /// clause, which costs one bind parameter per id. Postgres caps
+    /// prepared-statement parameters at 65535, so callers MUST cap the
+    /// caller-supplied slice well below that limit (`SQLite` is
+    /// effectively unbounded but pays the same per-id round-trip cost
+    /// at very large fan-outs). Today every caller bounds its slice
+    /// from a paginated upstream listing whose `top` is small (under
+    /// `account_management_sdk::ListChildrenQuery::max_top`), so the
+    /// ceiling is implicit; new callers MUST keep this invariant.
+    async fn find_many(
+        &self,
+        scope: &AccessScope,
+        ids: &[Uuid],
+    ) -> Result<Vec<TenantModel>, DomainError>;
+
     /// Direct-children list. Excludes `Provisioning` rows at the query
     /// layer. Pagination is `top` / `skip` per `listChildren`. Order is
     /// stable (by `(created_at, id)`) so cursor re-reads are deterministic.
@@ -117,20 +159,70 @@ pub trait TenantRepo: Send + Sync {
     ) -> Result<TenantModel, DomainError>;
 
     /// Saga step 3: flip the tenant from `Provisioning` to `Active`,
-    /// insert the supplied closure rows, and persist any provider-returned
-    /// metadata entries in one transaction.
+    /// insert the supplied closure rows, and persist the optional
+    /// plugin-private metadata blob in one transaction.
     ///
     /// The `closure_rows` slice MUST contain the self-row plus one row per
     /// strict ancestor along the `parent_id` chain (built by
     /// [`crate::domain::tenant::closure::build_activation_rows`]). Any
     /// other composition violates the coverage / self-row invariants.
+    ///
+    /// `idp_metadata` is the opaque blob returned by the `IdP` plugin
+    /// from [`account_management_sdk::IdpProvisionResult::metadata`]; AM
+    /// upserts it into `tenant_idp_metadata` and replays it on every
+    /// subsequent `IdP` call via [`Self::find_idp_metadata`] /
+    /// [`account_management_sdk::IdpTenantContext::metadata`]. `None`
+    /// means the plugin reported no per-tenant state.
     async fn activate_tenant(
         &self,
         scope: &AccessScope,
         tenant_id: Uuid,
         closure_rows: &[ClosureRow],
-        metadata_entries: &[ProvisionMetadataEntry],
+        idp_metadata: Option<&Value>,
     ) -> Result<TenantModel, DomainError>;
+
+    /// Load the plugin-private metadata blob AM persisted at
+    /// `activate_tenant` time. Returns `None` when no row exists for
+    /// `tenant_id` (plugin returned no state, or the tenant was
+    /// provisioned before this column existed) OR when the row's
+    /// `metadata` column is SQL NULL.
+    ///
+    /// AM does NOT interpret the JSON shape; the plugin owns it
+    /// end-to-end. Callers forward the value verbatim into
+    /// [`account_management_sdk::IdpTenantContext::metadata`] on every
+    /// subsequent `IdP` call for this tenant.
+    async fn find_idp_metadata(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+    ) -> Result<Option<Value>, DomainError>;
+
+    /// Upsert plugin-private metadata for `tenant_id` outside the
+    /// activation SERIALIZABLE TX so the row survives a
+    /// `finalize_provisioning` failure mid-saga. Called by the
+    /// create-child saga and platform-bootstrap saga immediately after
+    /// a successful `provision_tenant` so the provisioning reaper can
+    /// rebuild a `IdpDeprovisionTenantRequest` carrying the plugin's
+    /// per-tenant state even when no activation TX ever committed.
+    ///
+    /// `idp_metadata = None` is the documented "plugin owns no per-
+    /// tenant state" path — the upsert still writes a row with SQL
+    /// NULL so `find_idp_metadata` can later distinguish "never
+    /// called" from "called with no payload" (mirrors the in-TX
+    /// `activate_tenant` invariant).
+    ///
+    /// Implementations MUST upsert (`ON CONFLICT (tenant_id) DO
+    /// UPDATE`): the create-child saga calls this BEFORE
+    /// `activate_tenant`, and the activation path performs its own
+    /// idempotent metadata write inside the SERIALIZABLE TX. A bare
+    /// INSERT would crash on the unique-primary-key constraint when
+    /// activation re-runs against an already-persisted row.
+    async fn upsert_idp_metadata(
+        &self,
+        scope: &AccessScope,
+        tenant_id: Uuid,
+        idp_metadata: Option<&Value>,
+    ) -> Result<(), DomainError>;
 
     /// Saga / reaper compensation: delete a `Provisioning` row that
     /// never reached activation. Guards on `status = Provisioning` to
@@ -151,7 +243,7 @@ pub trait TenantRepo: Send + Sync {
     ///
     /// Implementations MUST also fence on `terminal_failure_at IS
     /// NULL` so a peer that already classified the row as
-    /// `DeprovisionFailure::Terminal` and parked it for operator
+    /// `IdpDeprovisionFailure::Terminal` and parked it for operator
     /// action is not silently erased.
     ///
     /// On a fence-mismatch the implementation MUST return
@@ -244,7 +336,7 @@ pub trait TenantRepo: Send + Sync {
     /// older_than` AND atomically claim them for the calling worker.
     /// Used by the provisioning reaper; mirrors the
     /// `scan_retention_due` claim pattern so two replicas cannot
-    /// invoke `IdpTenantProvisionerClient::deprovision_tenant` for the
+    /// invoke `IdpPluginClient::deprovision_tenant` for the
     /// same row inside one `RETENTION_CLAIM_TTL` window.
     ///
     /// `now` is used to compute the stale-claim cutoff so a worker
@@ -292,7 +384,7 @@ pub trait TenantRepo: Send + Sync {
     /// Without this gate, a row that is in fact deferred (e.g. parent
     /// with a live child, status drifted, claim lost) would still
     /// trigger cascade hooks and an irreversible
-    /// `IdpTenantProvisionerClient::deprovision_tenant` call before
+    /// `IdpPluginClient::deprovision_tenant` call before
     /// `hard_delete_one` returned its non-`Cleaned` outcome — leaving
     /// `IdP`-side state torn down while AM keeps the row.
     ///
@@ -306,7 +398,7 @@ pub trait TenantRepo: Send + Sync {
     /// `hard_delete_one`'s in-tx defense-in-depth still rejects, and
     /// the retention pipeline retries on the next tick — by which
     /// point the `IdP` plugin maps a re-call to
-    /// `DeprovisionFailure::NotFound`, which the retention loop
+    /// `IdpDeprovisionFailure::NotFound`, which the retention loop
     /// classifies as success-equivalent and continues with the local
     /// teardown. (For the precise outcome label and the way the
     /// loop folds `NotFound` and `UnsupportedOperation` into the
@@ -347,7 +439,7 @@ pub trait TenantRepo: Send + Sync {
 
     /// Stamp `terminal_failure_at = now` on a `Provisioning` row that
     /// the `IdP` plugin has classified as
-    /// [`account_management_sdk::DeprovisionFailure::Terminal`]. The
+    /// [`account_management_sdk::IdpDeprovisionFailure::Terminal`]. The
     /// SDK contract treats this as non-recoverable and operator-
     /// action-required; the marker keeps the row out of the
     /// `scan_stuck_provisioning` retry loop until an operator
@@ -373,7 +465,7 @@ pub trait TenantRepo: Send + Sync {
     /// Stamp `terminal_failure_at = now` on a `Deleted` row whose
     /// retention-pipeline cleanup the service classified as
     /// non-recoverable: a `HookError::Terminal` (or panicking) cascade
-    /// hook, or a `DeprovisionFailure::Terminal` from the `IdP`
+    /// hook, or a `IdpDeprovisionFailure::Terminal` from the `IdP`
     /// plugin during `hard_delete_batch`. Symmetric to
     /// [`Self::mark_provisioning_terminal_failure`] for the
     /// reaper-side `Provisioning` path; the marker keeps the row out

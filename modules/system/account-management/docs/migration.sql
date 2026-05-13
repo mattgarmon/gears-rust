@@ -140,56 +140,136 @@ COMMENT ON COLUMN tenant_metadata.schema_uuid
 COMMENT ON COLUMN tenant_metadata.value
     IS 'Opaque JSON payload validated in AM against the registered schema identified by schema_id.';
 
+-- ── Tenant IdP metadata ──────────────────────────────────────────────────────
+--
+-- AM-owned plugin-private per-tenant state isolated from the public
+-- `tenant_metadata` table. AM persists the opaque blob returned by
+-- `IdpPluginClient::provision_tenant` (`IdpProvisionResult::metadata`) keyed
+-- by `tenant_id` (PK — at most one row per tenant) and replays it on every
+-- subsequent IdP call via `TenantContext::metadata` /
+-- `IdpDeprovisionTenantRequest::tenant_context`. AM does NOT validate,
+-- namespace, or interpret the JSON — the plugin owns the shape entirely.
+-- No `plugin_id` column today: AM resolves at most one `IdpPluginClient`
+-- per deployment; a multi-plugin disambiguator can land later together
+-- with a backfill migration.
+
+CREATE TABLE tenant_idp_metadata (
+    tenant_id UUID PRIMARY KEY,
+    metadata JSONB NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_tenant_idp_metadata_tenant
+        FOREIGN KEY (tenant_id)
+        REFERENCES tenants(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE
+);
+
+COMMENT ON TABLE tenant_idp_metadata
+    IS 'Plugin-private per-tenant state owned by the resolved `IdpPluginClient`. AM persists the opaque `IdpProvisionResult::metadata` blob at provisioning finalization and replays it to the plugin on every subsequent IdP call via `TenantContext::metadata` / `IdpDeprovisionTenantRequest::tenant_context`. AM never inspects, namespaces, or validates the JSON — the plugin owns the shape end-to-end. Size is capped at the AM service boundary by `MAX_IDP_METADATA_BYTES`. Lifecycle-bound to the owning tenant via `ON DELETE CASCADE` (Postgres); the SQLite migration variant relies on an explicit `delete_many` from `TenantRepoImpl::hard_delete_one` because `modkit-db` does not enable `PRAGMA foreign_keys`.';
+COMMENT ON COLUMN tenant_idp_metadata.metadata
+    IS 'Opaque JSON blob shaped by the IdP plugin. `NULL` means the plugin returned no per-tenant state.';
+
 -- ── Conversion requests ──────────────────────────────────────────────────────
+--
+-- Mirrors the runtime schema in
+-- `account-management/src/infra/storage/migrations/m0004_create_conversion_requests.rs`.
+-- The state-machine enums (`status`, `initiator_side`, `target_mode`) are
+-- SMALLINT-encoded for MySQL/PostgreSQL parity; int↔name translation
+-- is owned by the domain layer (`ConversionStatus::as_smallint`,
+-- `ConversionSide::as_smallint`, `TargetMode::as_smallint`). The
+-- `child_tenant_name` + `parent_id` columns carry the dual-consent
+-- request payload for parent-initiated rows that pre-create the child
+-- name; same column shape on both sides of the request.
+-- The actor/resolution CHECK is keyed off the SMALLINT codes and
+-- forces every terminal row to stamp `resolved_at`; the pending arm
+-- additionally pins `deleted_at IS NULL` so the partial-unique
+-- pending index cannot be circumvented via an out-of-band soft-delete.
 
 CREATE TABLE conversion_requests (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID PRIMARY KEY,
     tenant_id UUID NOT NULL,
-    target_mode TEXT NOT NULL CHECK (target_mode IN ('managed', 'self_managed')),
-    initiator_side TEXT NOT NULL CHECK (initiator_side IN ('child', 'parent')),
+    parent_id UUID NULL,
+    child_tenant_name TEXT NOT NULL CHECK (length(child_tenant_name) BETWEEN 1 AND 255),
+    -- 0=child, 1=parent
+    initiator_side SMALLINT NOT NULL CHECK (initiator_side IN (0, 1)),
+    -- 0=managed, 1=self_managed
+    target_mode SMALLINT NOT NULL CHECK (target_mode IN (0, 1)),
+    -- 0=pending, 1=approved, 2=cancelled, 3=rejected, 4=expired
+    status SMALLINT NOT NULL CHECK (status IN (0, 1, 2, 3, 4)),
     requested_by UUID NOT NULL,
     approved_by UUID NULL,
     cancelled_by UUID NULL,
     rejected_by UUID NULL,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'cancelled', 'rejected', 'expired')),
+    requested_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TIMESTAMP WITH TIME ZONE NULL,
     expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMP WITH TIME ZONE NULL,
     CONSTRAINT fk_conversion_requests_tenant
         FOREIGN KEY (tenant_id)
         REFERENCES tenants(id)
         ON UPDATE CASCADE
         ON DELETE CASCADE,
-    CONSTRAINT ck_conversion_actor_columns
+    CONSTRAINT fk_conversion_requests_parent
+        FOREIGN KEY (parent_id)
+        REFERENCES tenants(id)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+    CONSTRAINT ck_conversion_requests_actor_invariant
         CHECK (
-            (status = 'pending'   AND approved_by IS NULL AND cancelled_by IS NULL AND rejected_by IS NULL) OR
-            (status = 'approved'  AND approved_by IS NOT NULL AND cancelled_by IS NULL AND rejected_by IS NULL) OR
-            (status = 'cancelled' AND approved_by IS NULL AND cancelled_by IS NOT NULL AND rejected_by IS NULL) OR
-            (status = 'rejected'  AND approved_by IS NULL AND cancelled_by IS NULL AND rejected_by IS NOT NULL) OR
-            (status = 'expired'   AND approved_by IS NULL AND cancelled_by IS NULL AND rejected_by IS NULL)
+            (status = 0 AND approved_by IS NULL AND cancelled_by IS NULL
+                AND rejected_by IS NULL AND resolved_at IS NULL
+                AND deleted_at IS NULL)
+            OR (status = 1 AND approved_by IS NOT NULL AND cancelled_by IS NULL
+                AND rejected_by IS NULL AND resolved_at IS NOT NULL)
+            OR (status = 2 AND approved_by IS NULL AND cancelled_by IS NOT NULL
+                AND rejected_by IS NULL AND resolved_at IS NOT NULL)
+            OR (status = 3 AND approved_by IS NULL AND cancelled_by IS NULL
+                AND rejected_by IS NOT NULL AND resolved_at IS NOT NULL)
+            OR (status = 4 AND approved_by IS NULL AND cancelled_by IS NULL
+                AND rejected_by IS NULL AND resolved_at IS NOT NULL)
         )
 );
 
-CREATE UNIQUE INDEX ux_conversion_pending_per_tenant
+CREATE UNIQUE INDEX ux_conversion_requests_pending
     ON conversion_requests (tenant_id)
-    WHERE status = 'pending' AND deleted_at IS NULL;
+    WHERE status = 0 AND deleted_at IS NULL;
 
-CREATE INDEX idx_conversion_tenant_status
-    ON conversion_requests (tenant_id, status)
-    WHERE deleted_at IS NULL;
+CREATE INDEX idx_conversion_requests_tenant_status
+    ON conversion_requests (tenant_id, status);
 
-CREATE INDEX idx_conversion_expires
+CREATE INDEX idx_conversion_requests_parent_status
+    ON conversion_requests (parent_id, status)
+    WHERE parent_id IS NOT NULL;
+
+CREATE INDEX idx_conversion_requests_expiry_sweep
     ON conversion_requests (expires_at)
-    WHERE status = 'pending' AND deleted_at IS NULL;
+    WHERE status = 0 AND deleted_at IS NULL;
 
-CREATE INDEX idx_conversion_deleted_at
+CREATE INDEX idx_conversion_requests_retention_scan
+    ON conversion_requests (resolved_at)
+    WHERE status IN (1, 2, 3, 4) AND deleted_at IS NULL;
+
+CREATE INDEX idx_conversion_requests_deleted_at
     ON conversion_requests (deleted_at)
     WHERE deleted_at IS NOT NULL;
 
 COMMENT ON TABLE conversion_requests
     IS 'Durable dual-consent mode transition records. Approved requests atomically change tenant barrier state; resolved history is soft-deleted after the configured retention window.';
+COMMENT ON COLUMN conversion_requests.status
+    IS 'Conversion lifecycle state encoded as SMALLINT for MySQL/PostgreSQL parity. Mapping: 0=pending, 1=approved, 2=cancelled, 3=rejected, 4=expired. Int↔name translation is owned by the application layer (`ConversionStatus::as_smallint`); SQL authored outside the ORM MUST reference these codes, never string literals.';
+COMMENT ON COLUMN conversion_requests.initiator_side
+    IS 'Which side of the dual-consent pair originated the request. 0=child, 1=parent. SMALLINT for MySQL/PostgreSQL parity; mapped via `ConversionSide::as_smallint`.';
+COMMENT ON COLUMN conversion_requests.target_mode
+    IS 'The mode the tenant will move to on approval. 0=managed, 1=self_managed. SMALLINT for MySQL/PostgreSQL parity; mapped via `TargetMode::as_smallint`.';
+COMMENT ON COLUMN conversion_requests.parent_id
+    IS 'Parent tenant id for parent-initiated requests that pre-create the child tenant on approval. NULL for child-initiated requests on existing tenants.';
+COMMENT ON COLUMN conversion_requests.child_tenant_name
+    IS 'Tenant name carried on the request. For parent-initiated rows it is the prospective child name; for child-initiated rows it mirrors the existing tenant name at request time. CHECK constrains length to [1, 255] characters matching the `tenants.name` rule.';
 COMMENT ON COLUMN conversion_requests.requested_by
     IS 'Canonical platform subject UUID from SecurityContext. Raw provider user identifiers are not stored here.';
+COMMENT ON COLUMN conversion_requests.requested_at
+    IS 'Stamp set on row insert; together with `expires_at` drives the pending-row expiry sweep (`idx_conversion_requests_expiry_sweep`).';
+COMMENT ON COLUMN conversion_requests.resolved_at
+    IS 'Stamp set on the pending→terminal transition (statuses 1, 2, 3, 4). NULL for pending rows. Drives the retention scan (`idx_conversion_requests_retention_scan`) — the AM retention job soft-deletes resolved rows once `now() - resolved_at > resolved_retention`.';
 COMMENT ON COLUMN conversion_requests.deleted_at
-    IS 'Soft-delete tombstone. Stamped by the AM retention job when `resolved_retention` (default 30d) elapses past the row reaching a terminal status (`approved`, `cancelled`, `rejected`, `expired`). Default API reads filter `deleted_at IS NULL`. Hard-delete occurs on AM''s platform retention cadence.';
+    IS 'Soft-delete tombstone. Stamped by the AM retention job when `resolved_retention` (default 30d) elapses past `resolved_at` for a row in a terminal status (1=approved, 2=cancelled, 3=rejected, 4=expired). Default API reads filter `deleted_at IS NULL`. Hard-delete occurs on AM''s platform retention cadence.';
