@@ -2196,7 +2196,7 @@ def render_html(
 
 <div id="panel">
   <div id="panelHeader">
-    <div id="panelHeaderTitle">View configuration</div>
+    <div id="panelHeaderTitle">Markdown Fabric View</div>
     <button type="button" id="panelToggle" title="Collapse panel">▾</button>
   </div>
   <div id="panelContent">
