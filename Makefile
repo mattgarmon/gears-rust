@@ -311,7 +311,7 @@ security: deny fips-policy
 
 # -------- API and docs --------
 
-.PHONY: openapi md-map
+.PHONY: openapi md-fabric
 
 # Generate OpenAPI spec from running cyberware-example-server
 openapi:
@@ -326,8 +326,8 @@ openapi:
 	echo "OpenAPI spec saved to $(OPENAPI_OUT)"
 
 ## Generate Markdown files map
-md-map:
-	python3 ./tools/scripts/md-map.py --out docs/md-map/md-map.html
+md-fabric:
+	python3 ./tools/scripts/md-fabric.py --out docs/md-fabric/md-fabric.html
 
 # -------- Development and auto fix --------
 
