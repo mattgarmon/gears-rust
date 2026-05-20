@@ -77,10 +77,10 @@ async def test_list_upstreams_includes_created(
 
 
 @pytest.mark.asyncio
-async def test_update_upstream_alias(
+async def test_update_upstream_alias_immutable(
     oagw_base_url, oagw_headers, mock_upstream_url, mock_upstream,
 ):
-    """PUT /oagw/v1/upstreams/{id} updates the alias."""
+    """PUT /oagw/v1/upstreams/{id} rejects alias change (immutability rule)."""
     _ = mock_upstream
     alias = unique_alias("mgmt-upd")
     new_alias = unique_alias("mgmt-upd-v2")
@@ -90,17 +90,22 @@ async def test_update_upstream_alias(
         )
         uid = upstream["id"]
 
-        updated = await update_upstream(
-            client, oagw_base_url, oagw_headers, uid, mock_upstream_url,
-            alias=new_alias,
-        )
-        assert updated["alias"] == new_alias
+        # Attempt to change alias → should be rejected (alias is immutable).
+        try:
+            await update_upstream(
+                client, oagw_base_url, oagw_headers, uid, mock_upstream_url,
+                alias=new_alias,
+            )
+            pytest.fail("Expected 400 for alias change, but update succeeded")
+        except httpx.HTTPStatusError as exc:
+            assert exc.response.status_code == 400
 
+        # Original alias must be preserved.
         resp = await client.get(
             f"{oagw_base_url}/oagw/v1/upstreams/{uid}",
             headers=oagw_headers,
         )
-        assert resp.json()["alias"] == new_alias
+        assert resp.json()["alias"] == alias
 
         await delete_upstream(client, oagw_base_url, oagw_headers, uid)
 

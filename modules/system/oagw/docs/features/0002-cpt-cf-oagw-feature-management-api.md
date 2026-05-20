@@ -311,7 +311,7 @@ Adheres to `cpt-cf-oagw-principle-tenant-scope` (all operations tenant-scoped vi
 
 Alias behavior is determined entirely by endpoint type. Hostname-based endpoints always auto-derive; IP-based endpoints require explicit alias.
 
-**Create path** (`enforce_alias_create`):
+**Create path** (`enforce_alias_create_with` / `enforce_alias_create_derived`):
 1. [x] - `p1` - Attempt to derive alias from endpoints (`compute_derived_alias`) - `inst-alias-1`
 2. [x] - `p1` - **IF** derivable (hostname-based) - `inst-alias-2`
    1. [x] - `p1` - **IF** user provided explicit alias AND it differs from derived value - `inst-alias-2a`
@@ -323,7 +323,7 @@ Alias behavior is determined entirely by endpoint type. Hostname-based endpoints
    2. [x] - `p1` - Normalize and validate explicit alias (charset, length) - `inst-alias-3b`
    3. [x] - `p1` - **RETURN** normalized alias - `inst-alias-3c`
 
-**Update path** (`enforce_alias_update` — when endpoints change):
+**Update path** (`enforce_alias_update_with` / `enforce_alias_update_derived` — when endpoints change):
 1. [x] - `p1` - Determine old and new endpoint derivability - `inst-alias-upd-1`
 2. [x] - `p1` - **IF** new endpoints are hostname-based (derivable) - `inst-alias-upd-2`
    1. [x] - `p1` - Recompute alias from new endpoints; reject user-provided alias if different - `inst-alias-upd-2a`

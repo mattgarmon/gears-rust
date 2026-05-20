@@ -132,7 +132,7 @@ async fn update_upstream_preserves_id() {
                 "endpoints": [{"host": "10.0.0.1", "port": 443, "scheme": "https"}]
             },
             "protocol": "gts.cf.core.oagw.protocol.v1~cf.core.oagw.http.v1",
-            "alias": "openai-v2",
+            "alias": "openai",
             "enabled": true,
             "tags": []
         }))
@@ -141,7 +141,7 @@ async fn update_upstream_preserves_id() {
 
     let json = resp.json();
     assert_eq!(json["id"].as_str().unwrap(), gts_id);
-    assert_eq!(json["alias"].as_str().unwrap(), "openai-v2");
+    assert_eq!(json["alias"].as_str().unwrap(), "openai");
 }
 
 // 7.10: DELETE upstream -> 204 + routes cascade deleted.

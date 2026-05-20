@@ -393,15 +393,18 @@ async fn e2e_management_lifecycle() {
             .any(|u| u["id"].as_str() == Some(uid.as_str()))
     );
 
-    // Update alias (full replacement via PUT).
+    // Update upstream (full replacement via PUT — alias is immutable, add a second endpoint).
     h.api_v1()
         .put_upstream(&uid)
         .with_body(serde_json::json!({
             "server": {
-                "endpoints": [{"host": "127.0.0.1", "port": h.mock_port(), "scheme": "http"}]
+                "endpoints": [
+                    {"host": "127.0.0.1", "port": h.mock_port(), "scheme": "http"},
+                    {"host": "127.0.0.2", "port": h.mock_port(), "scheme": "http"}
+                ]
             },
             "protocol": "gts.cf.core.oagw.protocol.v1~cf.core.oagw.http.v1",
-            "alias": "lifecycle-v2",
+            "alias": "lifecycle",
             "enabled": true,
             "tags": []
         }))
@@ -410,7 +413,11 @@ async fn e2e_management_lifecycle() {
 
     // Get (updated).
     let resp = h.api_v1().get_upstream(&uid).expect_status(200).await;
-    assert_eq!(resp.json()["alias"].as_str().unwrap(), "lifecycle-v2");
+    assert_eq!(resp.json()["alias"].as_str().unwrap(), "lifecycle");
+    assert_eq!(
+        resp.json()["server"]["endpoints"].as_array().unwrap().len(),
+        2
+    );
 
     // Create route.
     h.api_v1()
