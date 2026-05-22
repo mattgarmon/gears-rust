@@ -8,7 +8,7 @@
 #   cargo run --bin cyberware-server --features mini-chat -- --config config/mini-chat.yaml run
 
 server:
-  home_dir: "~/.cybeware"
+  home_dir: "~/.cyberware"
 
 database:
   servers:
@@ -64,7 +64,7 @@ modules:
 
   grpc-hub:
     config:
-      listen_addr: "uds:///tmp/cybeware-grpc"
+      listen_addr: "uds:///tmp/cyberware-grpc"
 
   authn-resolver:
     config:

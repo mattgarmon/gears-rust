@@ -30,7 +30,7 @@ modules:
 
   static-tr-plugin:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
       priority: 100
       tenants:
         # Default tenant (used when auth_disabled)
@@ -48,7 +48,7 @@ modules:
 
   tenant-resolver:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
 
   users-info:
     database:

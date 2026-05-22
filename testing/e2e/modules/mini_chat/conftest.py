@@ -33,7 +33,7 @@ PROVIDER_DEFAULT_MODEL = {
     "openai": STANDARD_MODEL,
 }
 
-_TEMP_HOME = tempfile.mkdtemp(prefix="cybeware-test-")
+_TEMP_HOME = tempfile.mkdtemp(prefix="cyberware-test-")
 DB_PATH = os.path.join(_TEMP_HOME, "mini-chat", "mini_chat.db")
 
 MODULE_DIR = Path(__file__).resolve().parent

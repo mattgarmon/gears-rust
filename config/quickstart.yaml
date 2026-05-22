@@ -122,15 +122,15 @@ modules:
   # Requires --features static-authn,static-authz for the static plugins.
   authn-resolver:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
 
   authz-resolver:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
 
   static-authn-plugin:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
       priority: 100
       mode: accept_all
       s2s_credentials:
@@ -139,7 +139,7 @@ modules:
 
   static-authz-plugin:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
       priority: 100
 
   mini-chat:
@@ -248,10 +248,10 @@ modules:
 
   tenant-resolver:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
   static-tr-plugin:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
       priority: 20
       # Tenant tree configuration (example: company with 2 divisions, each with departments)
       tenants:

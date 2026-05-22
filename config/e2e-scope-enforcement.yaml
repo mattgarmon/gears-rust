@@ -66,11 +66,11 @@ modules:
   # AuthN pipeline - validates bearer tokens
   authn-resolver:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
 
   static-authn-plugin:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
       priority: 100
       mode: static_tokens
       # Define tokens with specific scopes for testing
@@ -109,21 +109,21 @@ modules:
   # AuthZ pipeline
   authz-resolver:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
 
   static-authz-plugin:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
       priority: 100
 
   # Tenant resolver
   tenant-resolver:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
 
   static-tr-plugin:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
       priority: 20
       tenants:
         - id: "00000000-df51-5b42-9538-d2b56b7ee953"

@@ -59,7 +59,7 @@ class ModuleTestEnv:
     sidecars: list[Any] = field(default_factory=list)  # list[SidecarProtocol]
 
     # Logging — default uses port to avoid collisions between parallel runs.
-    log_suffix: str | None = None  # e.g. "mini-chat" → cybeware-e2e-8087-mini-chat.log
+    log_suffix: str | None = None  # e.g. "mini-chat" → cyberware-e2e-8087-mini-chat.log
 
 
 # ── RunningTestEnv ────────────────────────────────────────────────────────
@@ -154,7 +154,7 @@ def _log_path(env: ModuleTestEnv) -> Path:
     logs_dir = PROJECT_ROOT / "testing" / "e2e" / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     suffix = f"-{env.log_suffix}" if env.log_suffix else ""
-    return logs_dir / f"cybeware-e2e-{env.port}{suffix}.log"
+    return logs_dir / f"cyberware-e2e-{env.port}{suffix}.log"
 
 
 def _start_server(binary: Path, config: Path, env: ModuleTestEnv) -> subprocess.Popen:

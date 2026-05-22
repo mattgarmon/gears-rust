@@ -13,12 +13,13 @@
 //!
 //! ## Configuration
 //!
-//! No configuration required. The plugin registers itself automatically with:
+//! Optional. When omitted the plugin uses these defaults:
 //! - Vendor: `cyberfabric`
 //! - Priority: `1000` (lower than static plugin, so static wins when both are enabled)
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+pub mod config;
 pub mod domain;
 pub mod module;
 

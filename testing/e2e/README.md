@@ -134,7 +134,7 @@ async def test_my_endpoint(base_url, auth_headers):
 
 If you see "Server not responding" when running local tests:
 
-1. Check build/startup logs in `logs/cybeware-e2e.log` and `logs/cybeware-e2e-error.log`
+1. Check build/startup logs in `logs/cyberware-e2e.log` and `logs/cyberware-e2e-error.log`
 2. Check that the API is reachable on the configured port (default: 8086)
 3. Verify the health endpoint: `curl http://localhost:8086/healthz`
 4. Rebuild release artifacts: `make build`

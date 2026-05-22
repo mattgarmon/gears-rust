@@ -215,7 +215,7 @@ Bidirectional items (used as both input context and output):
 Output-oriented items (model → consumer):
 - MessageOutput — Model message (type: "message", id, status, role: user | assistant | system | developer, content: OutputContentPart[])
 - ReasoningOutput — Model reasoning (type: "reasoning", id, summary, content: ReasoningText[] | null, encrypted_content)
-- DataOutput — Cyber Ware extension: binary data output (type: "cybeware:data", id, status: in_progress | completed, mime_type, base64: string | null, url: string | null). Generic binary output item used for image generation and extensible to audio/video. See [ADR-0006](./ADR/0006-cpt-cf-llm-gateway-adr-image-generation-api.md).
+- DataOutput — Cyber Ware extension: binary data output (type: "cyberware:data", id, status: in_progress | completed, mime_type, base64: string | null, url: string | null). Generic binary output item used for image generation and extensible to audio/video. See [ADR-0006](./ADR/0006-cpt-cf-llm-gateway-adr-image-generation-api.md).
 
 Provider-specific items use extension format: `{provider_slug}:{item_type}` (e.g., `openai:web_search_call`). Cyber Ware extensions use the `cyberfabric:` prefix (e.g., `cyberfabric:data`).
 

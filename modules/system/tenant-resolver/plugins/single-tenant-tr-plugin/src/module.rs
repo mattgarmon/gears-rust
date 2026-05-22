@@ -11,14 +11,8 @@ use tenant_resolver_sdk::{TenantResolverPluginClient, TenantResolverPluginSpecV1
 use tracing::info;
 use types_registry_sdk::{RegisterResult, TypesRegistryClient};
 
+use crate::config::SingleTenantTrPluginConfig;
 use crate::domain::Service;
-
-/// Hardcoded vendor name for GTS instance registration.
-const VENDOR: &str = "cyberfabric";
-
-/// Hardcoded priority (higher value = lower priority).
-/// Set to 1000 so `static_tr_plugin` (priority 100) wins when both are enabled.
-const PRIORITY: i16 = 1000;
 
 /// Single-tenant resolver plugin module.
 ///
@@ -39,12 +33,19 @@ impl Default for SingleTenantTrPlugin {
 #[async_trait]
 impl Module for SingleTenantTrPlugin {
     async fn init(&self, ctx: &ModuleCtx) -> anyhow::Result<()> {
+        let cfg: SingleTenantTrPluginConfig = ctx.config_or_default()?;
+        info!(
+            vendor = %cfg.vendor,
+            priority = cfg.priority,
+            "Loaded single-tenant resolver plugin configuration"
+        );
+
         // Build registration payload and instance id for this plugin.
         let (instance_id, instance_json) =
             PluginV1::<TenantResolverPluginSpecV1>::build_registration(
                 "cf.builtin.single_tenant_resolver.plugin.v1",
-                VENDOR,
-                PRIORITY,
+                &cfg.vendor,
+                cfg.priority,
             )?;
 
         // Publish to types-registry.
@@ -61,11 +62,7 @@ impl Module for SingleTenantTrPlugin {
                 api,
             );
 
-        info!(
-            instance_id = %instance_id,
-            vendor = VENDOR,
-            priority = PRIORITY
-        );
+        info!(instance_id = %instance_id, vendor = %cfg.vendor, priority = cfg.priority, "registered");
         Ok(())
     }
 }

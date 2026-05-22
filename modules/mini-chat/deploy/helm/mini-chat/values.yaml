@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: cybeware-mini-chat
+  repository: cyberware-mini-chat
   tag: latest
   pullPolicy: Never
 

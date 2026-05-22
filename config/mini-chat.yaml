@@ -66,15 +66,15 @@ modules:
 
   authn-resolver:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
 
   authz-resolver:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
 
   static-authn-plugin:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
       priority: 100
       mode: accept_all
       s2s_credentials:
@@ -83,15 +83,16 @@ modules:
 
   static-authz-plugin:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
       priority: 100
 
   tenant-resolver:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
 
   single-tenant-tr-plugin:
-    config: {}
+    config:
+      vendor: "cyberfabric"
 
   simple-user-settings:
     database:
@@ -110,11 +111,18 @@ modules:
     config:
       allowed_local_base_dir: /tmp
 
+  resource-group:
+    database:
+      server: "sqlite_mini_chat"
+      file: "resource_group.db"
+    config: {}      
+
   mini-chat:
     database:
       server: "sqlite_mini_chat"
       file: "mini_chat.db"
     config:
+      vendor: "cyberfabric"
       orphan_watchdog:
         scan_interval_secs: 10
         timeout_secs: 90
@@ -137,6 +145,7 @@ modules:
           host: "${AZURE_OPENAI_API_HOST}"
           api_path: "/openai/v1/responses"
           api_version: "2025-03-01-preview"
+          supports_file_search_filters: false
           auth_plugin_type: "gts.cf.core.oagw.auth_plugin.v1~cf.core.oagw.apikey.v1"
           auth_config:
             header: "api-key"
@@ -187,11 +196,13 @@ modules:
 
   static-mini-chat-audit-plugin:
     config:
+      vendor: "cyberfabric"
+      priority: 100
       enabled: true
 
   static-mini-chat-model-policy-plugin:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
       priority: 100
       model_catalog:
         # ── GPT-4.1 (Premium) ──

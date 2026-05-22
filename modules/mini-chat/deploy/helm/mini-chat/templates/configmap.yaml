@@ -72,19 +72,19 @@ data:
 
       grpc-hub:
         config:
-          listen_addr: "uds:///tmp/cybeware-grpc"
+          listen_addr: "uds:///tmp/cyberware-grpc"
 
       authn-resolver:
         config:
-          vendor: "cybeware"
+          vendor: "cyberfabric"
 
       authz-resolver:
         config:
-          vendor: "cybeware"
+          vendor: "cyberfabric"
 
       static-authn-plugin:
         config:
-          vendor: "cybeware"
+          vendor: "cyberfabric"
           priority: 100
           mode: accept_all
           s2s_credentials:
@@ -93,12 +93,12 @@ data:
 
       static-authz-plugin:
         config:
-          vendor: "cybeware"
+          vendor: "cyberfabric"
           priority: 100
 
       tenant-resolver:
         config:
-          vendor: "cybeware"
+          vendor: "cyberfabric"
 
       single-tenant-tr-plugin:
         config: {}
@@ -166,7 +166,7 @@ data:
 
       static-mini-chat-model-policy-plugin:
         config:
-          vendor: "cybeware"
+          vendor: "cyberfabric"
           priority: 100
           model_catalog:
             - id: "gpt-4.1"

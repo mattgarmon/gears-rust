@@ -168,10 +168,10 @@ modules:
 
   tenant-resolver:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
   static-tr-plugin:
     config:
-      vendor: "cyberware"
+      vendor: "cyberfabric"
       priority: 20
       # Tenant tree configuration (example: company with 2 divisions, each with departments)
       tenants:

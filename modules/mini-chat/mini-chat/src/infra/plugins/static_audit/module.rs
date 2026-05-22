@@ -13,9 +13,6 @@ use mini_chat_sdk::{MiniChatAuditPluginClientV1, MiniChatAuditPluginSpecV1};
 use super::config::StaticMiniChatAuditPluginConfig;
 use super::service::Service;
 
-const VENDOR: &str = "cyber-fabric";
-const PRIORITY: i16 = 100;
-
 /// Static audit plugin module for mini-chat.
 ///
 /// Logs all audit events via `tracing` for development and testing.
@@ -43,6 +40,8 @@ impl Module for StaticMiniChatAuditPlugin {
         let cfg: StaticMiniChatAuditPluginConfig = ctx.config_or_default()?;
         info!(
             enabled = cfg.enabled,
+            vendor = %cfg.vendor,
+            priority = cfg.priority,
             "Loaded static mini-chat audit plugin configuration"
         );
 
@@ -57,8 +56,8 @@ impl Module for StaticMiniChatAuditPlugin {
         let (instance_id, instance_json) =
             PluginV1::<MiniChatAuditPluginSpecV1>::build_registration(
                 "cf.core._.static_mini_chat_audit.v1",
-                VENDOR,
-                PRIORITY,
+                &cfg.vendor,
+                cfg.priority,
             )?;
 
         // Publish to types-registry.
