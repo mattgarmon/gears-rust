@@ -37,7 +37,9 @@ fn run_fixture_with_env(name: &str, extra_env: &[(&str, &str)]) -> Output {
     let fixture = fixtures_dir().join(name);
     let manifest_path = fixture.join("Cargo.toml");
     let lint_parent_dir = lint_parent_dir();
-    let target_dir = fixture.join("target").join(target_dir_name(name, extra_env));
+    let target_dir = fixture
+        .join("target")
+        .join(target_dir_name(name, extra_env));
 
     let mut command = Command::new("cargo");
     command
