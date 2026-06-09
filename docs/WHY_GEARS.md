@@ -1,5 +1,36 @@
 # Why Should I Use CF / Gears (Rust)?
 
+
+<!-- toc -->
+
+- [Executive Summary](#executive-summary)
+  - [At a glance: Go vs C# vs Rust vs Rust + Gears](#at-a-glance-go-vs-c-vs-rust-vs-rust--gears)
+- [Part A — Where Rust has advantages over Go and C# (for platform code)](#part-a--where-rust-has-advantages-over-go-and-c-for-platform-code)
+  - [A.1 Errors are part of the type system](#a1-errors-are-part-of-the-type-system)
+  - [A.2 Data races are a compile error, not a `-race` flag](#a2-data-races-are-a-compile-error-not-a--race-flag)
+  - [A.3 No `nil` interfaces, no exceptions-from-anywhere](#a3-no-nil-interfaces-no-exceptions-from-anywhere)
+  - [A.4 Sum types make illegal states unrepresentable](#a4-sum-types-make-illegal-states-unrepresentable)
+  - [A.5 Exhaustive `match` makes state evolution safer](#a5-exhaustive-match-makes-state-evolution-safer)
+  - [A.6 Zero-cost abstractions and predictable performance](#a6-zero-cost-abstractions-and-predictable-performance)
+  - [A.7 Tooling and static analysis as a first-class citizen](#a7-tooling-and-static-analysis-as-a-first-class-citizen)
+- [Part B — Why "just Rust" is not enough: what Gears adds](#part-b--why-just-rust-is-not-enough-what-gears-adds)
+  - [B.1 Tenant isolation that you can't forget](#b1-tenant-isolation-that-you-cant-forget)
+  - [B.2 Authentication & authorization, built in (NIST SP 800-162 PDP/PEP)](#b2-authentication--authorization-built-in-nist-sp-800-162-pdppep)
+  - [B.3 One consistent API dialect: `OperationBuilder` + OpenAPI + OData](#b3-one-consistent-api-dialect-operationbuilder--openapi--odata)
+  - [B.4 Architecture enforced at compile time (`dylint`)](#b4-architecture-enforced-at-compile-time-dylint)
+  - [B.5 A pre-integrated XaaS backbone (and it's replaceable)](#b5-a-pre-integrated-xaas-backbone-and-its-replaceable)
+  - [B.6 Extensible domain model via the Global Type System (GTS)](#b6-extensible-domain-model-via-the-global-type-system-gts)
+  - [B.7 Composable gears: one codebase, many deployment shapes](#b7-composable-gears-one-codebase-many-deployment-shapes)
+  - [B.8 Canonical errors](#b8-canonical-errors)
+  - [B.9 Observability and operational defaults](#b9-observability-and-operational-defaults)
+  - [B.10 FIPS 140-3 support](#b10-fips-140-3-support)
+  - [B.11 Other useful Gears runtime patterns](#b11-other-useful-gears-runtime-patterns)
+  - [B.12 Local-first, shift-left development](#b12-local-first-shift-left-development)
+- [When Gears is (and isn't) the right choice](#when-gears-is-and-isnt-the-right-choice)
+- [Get started](#get-started)
+
+<!-- /toc -->
+
 > A guide for **Go developers** (and C# developers) evaluating [Constructor Fabric Gears](https://github.com/constructorfabric/gears-rust) — a secure, modular **XaaS development framework & middleware** written in Rust.
 
 **Public links**
