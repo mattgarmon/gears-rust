@@ -68,10 +68,6 @@ reason = "Ignore module 'simple-user-settings' (not SDLC-documented yet: missing
 patterns = ["gears/simple-user-settings/*"]
 
 [[ignore]]
-reason = "Ignore module 'file-storage' (not SDLC-documented yet: missing required PRD/DESIGN)."
-patterns = ["gears/file-storage/*"]
-
-[[ignore]]
 reason = "Ignore module 'types-registry' (not SDLC-documented yet: missing required PRD/DESIGN)."
 patterns = ["gears/types-registry/*"]
 
@@ -81,6 +77,12 @@ patterns = [
   "gears/serverless-runtime/docs/DESIGN_GTS_SCHEMAS.md",
   "gears/serverless-runtime/docs/DESIGN_RUST_TYPES.md",
   "gears/serverless-runtime/docs/NEXT_ADR_SCOPE.md",
+]
+
+[[ignore]]
+reason = "Ignore file-storage companion docs — api.md is a reference summary supplementary to DESIGN.md, not a standalone SDLC artifact."
+patterns = [
+  "gears/file-storage/docs/api.md",
 ]
 
 [[ignore]]
