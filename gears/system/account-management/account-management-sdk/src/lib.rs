@@ -1,14 +1,15 @@
 //! Account Management SDK — public contract surface.
 //!
 //! This crate publishes the inter-gear client trait
-//! ([`AccountManagementClient`]) and its data types. The public error
-//! envelope is [`AccountManagementError`] — a flat enum mirroring the
-//! AIP-193 categories AM raises; this SDK does **not** depend on
-//! `toolkit-canonical-errors`. The impl crate
-//! (`cf-gears-account-management`) owns the mapping between AM's
-//! internal `DomainError` vocabulary and [`AccountManagementError`]
-//! at this boundary, and the further lift to
-//! `toolkit_canonical_errors::CanonicalError` at the REST boundary.
+//! ([`AccountManagementClient`]) and its data types. Per
+//! [ADR 0005][adr] the trait boundary is
+//! [`toolkit_canonical_errors::CanonicalError`]; the SDK additionally
+//! ships [`AccountManagementError`] as an **opt-in** typed projection
+//! (`From<CanonicalError>`) for consumers that want flat dispatch on
+//! AM's emission set. The single authoritative AIP-193 ladder
+//! (`From<DomainError> for CanonicalError`) lives in the impl crate
+//! (`cf-gears-account-management`); this SDK never re-derives that
+//! classification — it only projects the finished `CanonicalError`.
 //!
 //! External consumers — plugin authors, dashboards, integration tests,
 //! sibling gears calling AM via `ClientHub` — depend on **this**
@@ -16,44 +17,34 @@
 //! migrations, axum wiring, tokio runtime) does not propagate as a
 //! contract break.
 //!
-//! # Mapping summary (AIP-193)
+//! # Error surface
 //!
-//! Every AM domain failure surfaces in one of the
-//! [`AccountManagementError`] variants below; the HTTP status column
-//! is the AIP-193 mapping the REST handler applies through the
-//! impl-side `account_management_error_to_canonical` lift.
+//! Trait methods return `Result<_, CanonicalError>`. Consumers may
+//! propagate the canonical error, or project it into the typed
+//! [`AccountManagementError`] view via
+//! `.map_err(AccountManagementError::from)` (or a
+//! `From<CanonicalError> for OwnError` chain). The projection models
+//! the ten canonical categories AM emits, plus a catch-all
+//! `Other { canonical }`; see [`error`] for the full dispatch table,
+//! the three consumer integration patterns, and the co-located wire
+//! vocabulary ([`field`], [`precondition`], [`reason`], [`quota`],
+//! [`gts`]).
 //!
-//! | Variant | AIP-193 category | HTTP |
-//! |---------|-----------------|------|
-//! | `Validation` | `InvalidArgument` | 400 |
-//! | `NotFound` | `NotFound` | 404 |
-//! | `AlreadyExists` | `AlreadyExists` | 409 |
-//! | `FailedPrecondition` | `FailedPrecondition` | 400 |
-//! | `Aborted` | `Aborted` | 409 |
-//! | `CrossTenantDenied` | `PermissionDenied` | 403 |
-//! | `IntegrityCheckInProgress` | `ResourceExhausted` | 429 |
-//! | `UnsupportedOperation` | `Unimplemented` | 501 |
-//! | `ServiceUnavailable` | `ServiceUnavailable` | 503 |
-//! | `Internal` | `Internal` | 500 |
-//!
-//! `ServiceUnavailable` carries `retry_after_seconds`; `Aborted`
-//! carries `reason = "SERIALIZATION_CONFLICT"` for retry-exhausted
-//! serializable conflicts; resource-scoped variants (`NotFound`,
-//! `FailedPrecondition`) carry the GTS resource type from [`gts`] —
-//! e.g. `gts.cf.core.am.{tenant|tenant_metadata|conversion_request}.v1~`.
-//! Those strings live in [`gts`] as `pub const` so consumers can
-//! match on them by typed reference instead of stringly-typed
-//! comparison.
+//! [adr]: https://github.com/constructorfabric/gears-rust/blob/main/docs/arch/errors/ADR/0005-cpt-cf-adr-sdk-canonical-projection.md
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![forbid(unsafe_code)]
 #![deny(rust_2018_idioms)]
 
 pub mod client;
 pub mod error;
+pub mod field;
 pub mod gts;
 pub mod idp;
 pub mod idp_user;
 pub mod metadata;
+pub mod precondition;
+pub mod quota;
+pub mod reason;
 pub mod tenant;
 
 pub use client::AccountManagementClient;

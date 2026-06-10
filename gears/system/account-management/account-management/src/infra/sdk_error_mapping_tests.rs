@@ -1,41 +1,22 @@
-//! Composition tests: `DomainError → AccountManagementError → CanonicalError`
-//! preserves the pre-migration AIP-193 envelope shape variant-by-variant.
+//! Regression tests for the single `From<DomainError> for CanonicalError`
+//! ladder in [`super::sdk_error_mapping`].
 //!
-//! The pre-migration regression line lived in `domain/error_tests.rs`
-//! and asserted directly on `From<DomainError> for CanonicalError`.
-//! That single-hop boundary is now replaced by the two-step pipeline
-//! [`From<DomainError> for AccountManagementError`] +
-//! [`From<AccountManagementError> for CanonicalError`] in
-//! [`super::sdk_error_mapping`]. These tests assert that the
-//! composition still produces the exact same `CanonicalError` envelope
-//! shape — same AIP-193 category, HTTP status, resource type, and key
-//! context fields — for every `DomainError` variant.
+//! Per ADR 0005 there is one classification ladder; these tests pin the
+//! exact `CanonicalError` envelope it produces — AIP-193 category, HTTP
+//! status, resource type, and key context fields (`field_violations`,
+//! `violations`, `reason`) — for every `DomainError` variant. They are
+//! the unit-level wire-invariant guard; the HTTP-level sweep lives in
+//! `tests/api_status_mapping_test.rs`.
 
 use std::time::Duration;
 
-use account_management_sdk::error::AccountManagementError;
 use toolkit_canonical_errors::{CanonicalError, InvalidArgument};
 
 use crate::domain::error::DomainError;
-use crate::infra::sdk_error_mapping::account_management_error_to_canonical;
 
-/// Run a `DomainError` through the production pipeline. For variants
-/// that travel via the SDK boundary this is the two-step
-/// `DomainError → AccountManagementError → CanonicalError`; for the
-/// `IntegrityCheckInProgress` bypass (not part of the inter-gear
-/// SDK contract) the `From<DomainError> for CanonicalError` impl
-/// short-circuits directly to the canonical envelope.
+/// Run a `DomainError` through the single canonical ladder.
 fn round_trip(d: DomainError) -> CanonicalError {
     CanonicalError::from(d)
-}
-
-/// Variants of [`round_trip`] for tests that want to pin the SDK shape
-/// before the canonical conversion. Unsuitable for
-/// `IntegrityCheckInProgress` (it bypasses the SDK boundary).
-#[allow(dead_code)]
-fn round_trip_via_sdk(d: DomainError) -> CanonicalError {
-    let sdk: AccountManagementError = d.into();
-    account_management_error_to_canonical(sdk)
 }
 
 // ---------------------------------------------------------------------------
@@ -568,26 +549,6 @@ fn integrity_check_in_progress_maps_to_429_with_quota_violation() {
     };
     assert_eq!(ctx.violations.len(), 1);
     assert_eq!(ctx.violations[0].subject, "integrity_check");
-}
-
-#[test]
-fn integrity_check_in_progress_via_sdk_boundary_does_not_panic() {
-    // Defensive coverage for the pre-fix `unreachable!()` on
-    // `From<DomainError> for AccountManagementError`. The canonical
-    // path short-circuits `IntegrityCheckInProgress` before the SDK
-    // hop, but a direct caller (tooling that bubbles typed SDK
-    // errors) used to crash the process. The mapping now produces
-    // an `Internal` SDK variant, and the SDK→canonical hop renders
-    // it as a generic 500 — distinct from the 429 quota envelope on
-    // the canonical bypass above, by design (the SDK boundary is
-    // not where `IntegrityCheckInProgress` is supposed to surface).
-    let sdk: AccountManagementError = DomainError::IntegrityCheckInProgress.into();
-    assert!(
-        matches!(sdk, AccountManagementError::Internal { .. }),
-        "SDK boundary must map IntegrityCheckInProgress defensively, got {sdk:?}",
-    );
-    let canonical = account_management_error_to_canonical(sdk);
-    assert_eq!(canonical.status_code(), 500);
 }
 
 // ---------------------------------------------------------------------------

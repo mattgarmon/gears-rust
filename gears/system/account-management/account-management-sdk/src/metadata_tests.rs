@@ -104,7 +104,7 @@ fn upsert_metadata_request_rejects_missing_value() {
 
 /// Sanity: a non-null `value` is accepted at the SDK boundary. The
 /// AM impl-side validation rejects `Value::Null` and surfaces it as
-/// `AccountManagementError::InvalidRequest` — the SDK type itself is
+/// `AccountManagementError::InvalidArgument` — the SDK type itself is
 /// content-agnostic.
 #[test]
 fn upsert_metadata_request_accepts_any_non_missing_value() {

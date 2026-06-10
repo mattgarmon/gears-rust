@@ -4,6 +4,7 @@
 use super::*;
 use account_management_sdk::error::AccountManagementError;
 use time::OffsetDateTime;
+use toolkit_canonical_errors::CanonicalError;
 
 #[test]
 fn entity_to_model_rejects_unknown_status() {
@@ -80,8 +81,11 @@ fn map_scope_err_preserves_tenant_not_in_scope_routing() {
     };
     let err = map_scope_err(scope_err);
     assert!(matches!(err, DomainError::CrossTenantDenied { .. }));
-    let ame: AccountManagementError = err.into();
-    assert!(ame.is_permission_denied());
+    let ame = AccountManagementError::from(CanonicalError::from(err));
+    assert!(matches!(
+        ame,
+        AccountManagementError::PermissionDenied { .. }
+    ));
 }
 
 #[test]

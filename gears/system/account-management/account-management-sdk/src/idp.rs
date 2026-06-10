@@ -236,10 +236,11 @@ pub enum IdpProvisionFailure {
     ///
     /// `field` carries the dotted-path reference (e.g.
     /// `"provisioning_metadata.realm_name"`) describing where in the
-    /// request body the violation lives. The AM-side boundary lifts
-    /// this into `AccountManagementError::IdpInvalidInput { field }`
-    /// and the canonical envelope surfaces it as
-    /// `field_violations[0].field` with `reason = "IDP_INVALID_INPUT"`.
+    /// request body the violation lives. The AM-side boundary maps
+    /// this to `CanonicalError::InvalidArgument` and the canonical
+    /// envelope surfaces it as `field_violations[0].field` with
+    /// `reason = "IDP_INVALID_INPUT"` (the SDK projection's
+    /// `AccountManagementError::InvalidArgument`).
     /// `None` means the plugin couldn't localise the violation to a
     /// specific key — the canonical mapping then falls back to the
     /// shared `"provisioning_metadata"` field key.

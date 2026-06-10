@@ -473,9 +473,8 @@ async fn suspend_tenant_is_idempotent_on_suspended_tenant() {
 
 #[tokio::test]
 async fn suspend_tenant_rejects_deleted_tenant_with_400() {
-    // `DomainError::Conflict` (target is `Deleted`) lifts to
-    // `AccountManagementError::PreconditionFailed` and the canonical
-    // mapping renders `failed_precondition` as HTTP 400 (see
+    // `DomainError::Conflict` (target is `Deleted`) maps to
+    // `CanonicalError::FailedPrecondition`, rendered as HTTP 400 (see
     // `infra::sdk_error_mapping` -- the only `409` paths on the AM
     // surface are `AlreadyExists` and `Aborted`/serialization-conflict).
     // The task brief named this "_409" but the wire reality matches the

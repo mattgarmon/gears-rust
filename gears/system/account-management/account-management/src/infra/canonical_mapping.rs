@@ -8,10 +8,11 @@
 //! imports, `#[domain_model]` enforced) while still routing DB
 //! failures onto the AIP-193 canonical categories.
 //!
-//! The boundary mapping between [`DomainError`] and the public
-//! [`AccountManagementError`](account_management_sdk::error::AccountManagementError)
-//! / [`CanonicalError`](toolkit_canonical_errors::CanonicalError) wire
-//! envelope lives in [`crate::infra::sdk_error_mapping`]. This gear
+//! The single boundary mapping from [`DomainError`] to the
+//! [`CanonicalError`](toolkit_canonical_errors::CanonicalError) wire
+//! envelope lives in [`crate::infra::sdk_error_mapping`] (ADR 0005); the
+//! SDK's [`AccountManagementError`](account_management_sdk::error::AccountManagementError)
+//! is an opt-in `From<CanonicalError>` projection over it. This gear
 //! is classifier-only.
 //!
 //! # Lift vs classify

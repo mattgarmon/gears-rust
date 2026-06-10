@@ -1,35 +1,47 @@
-//! Boundary mapping between AM's internal [`DomainError`] and the two
-//! public error envelopes AM emits:
+//! Boundary mapping from AM's internal [`DomainError`] to the AIP-193
+//! [`toolkit_canonical_errors::CanonicalError`] envelope.
 //!
-//! * [`AccountManagementError`] (`account-management-sdk`) — the
-//!   typed error surface inter-gear Rust callers see through
-//!   [`account_management_sdk::AccountManagementClient`] (resolved
-//!   via `ClientHub`). Variant-per-failure shape (mirrors `mini-chat`
-//!   convention) — each enum case names the failure semantically.
-//! * [`toolkit_canonical_errors::CanonicalError`] — the AIP-193
-//!   envelope REST handlers convert to RFC-9457 `Problem` responses.
+//! Per [ADR 0005] this is the **single** authoritative classification
+//! ladder for Account Management. Both surfaces consume it:
 //!
-//! Both targets share the same upstream `DomainError`; the SDK lift
-//! happens through the `From<DomainError> for AccountManagementError`
-//! impl below and the REST lift through
-//! [`account_management_error_to_canonical`] (free fn — both types
-//! foreign to this crate, orphan rule blocks an impl block). The
-//! `From<DomainError> for CanonicalError` at the bottom composes the
-//! two hops so REST handlers can write `service.foo().await?`.
+//! * REST handlers convert `DomainError` to `CanonicalError` via `?`
+//!   (and then to an RFC-9457 `Problem` via the platform-wide
+//!   `From<CanonicalError> for Problem`).
+//! * The in-process [`account_management_sdk::AccountManagementClient`]
+//!   facade calls `.map_err(CanonicalError::from)`; consumers may opt
+//!   into the typed `AccountManagementError` projection
+//!   (`From<CanonicalError>`) at their call site.
+//!
+//! There is no parallel `From<DomainError> for AccountManagementError`
+//! ladder — the projection is driven from `CanonicalError`, so this file
+//! is the only place a domain variant is assigned a canonical category.
+//!
+//! # Wire vocabulary
+//!
+//! Every wire-string discriminator this ladder emits
+//! (`field_violations[].field`/`.reason`, `violations[].subject`/`.type`,
+//! `Aborted`/`PermissionDenied` `reason`, the quota `subject`) is
+//! referenced from the SDK constant gears
+//! ([`account_management_sdk::field`], [`account_management_sdk::precondition`],
+//! [`account_management_sdk::reason`], [`account_management_sdk::quota`])
+//! so the impl and the SDK projection cannot drift; the SDK's round-trip
+//! `Problem` tests pin each constant to its JSON path. The
+//! `#[resource_error("…")]` literals below are the one exception (proc
+//! macros cannot resolve constants) and stay literals, pinned by the
+//! `sdk_error_mapping_tests` canonical-envelope assertions.
 //!
 //! # Resource markers
 //!
-//! [`TenantResource`], [`TenantMetadataResource`], and
+//! [`TenantResource`], [`UserResource`], [`TenantMetadataResource`], and
 //! [`ConversionRequestResource`] are unit structs whose
 //! `#[resource_error]`-generated impls produce
 //! [`toolkit_canonical_errors::ResourceErrorBuilder`]s tagged with the
 //! AM GTS resource types. The literal strings below MUST match the
-//! corresponding constants in `account_management_sdk::gts`; the
-//! `domain::error_tests::resource_error_strings_match_sdk_constants`
-//! test asserts equality at test time so a divergence trips there, not
-//! in production.
+//! corresponding `account_management_sdk::gts` constants.
+//!
+//! [ADR 0005]: ../../../../../../docs/arch/errors/ADR/0005-cpt-cf-adr-sdk-canonical-projection.md
 
-use account_management_sdk::error::AccountManagementError;
+use account_management_sdk::{field, precondition, quota, reason};
 use toolkit_canonical_errors::{CanonicalError, resource_error};
 use tracing::warn;
 
@@ -37,8 +49,7 @@ use crate::domain::error::DomainError;
 use crate::domain::metrics::{AM_CROSS_TENANT_DENIAL, MetricKind, emit_metric};
 
 // ---------------------------------------------------------------------------
-// Resource markers — kept in sync with account_management_sdk::gts via
-// `domain::error_tests::resource_error_strings_match_sdk_constants`.
+// Resource markers — kept in sync with account_management_sdk::gts.
 // ---------------------------------------------------------------------------
 
 #[resource_error("gts.cf.core.am.tenant.v1~")]
@@ -50,9 +61,9 @@ pub(crate) struct UserResource;
 // `TenantMetadataResource` carries the unified 404 for the metadata
 // surface — both "schema unknown to the registry" and "entry missing
 // for this tenant" resolve to this `resource_type`. The chained
-// `type_id` the caller supplied is surfaced through
-// `resource_name`, so consumers still see *which* schema was
-// involved without a separate type-level discriminator.
+// `type_id` the caller supplied is surfaced through `resource_name`,
+// so consumers still see *which* schema was involved without a separate
+// type-level discriminator.
 #[resource_error("gts.cf.core.am.tenant_metadata.v1~")]
 pub(crate) struct TenantMetadataResource;
 
@@ -60,119 +71,243 @@ pub(crate) struct TenantMetadataResource;
 pub(crate) struct ConversionRequestResource;
 
 // ---------------------------------------------------------------------------
-// DomainError → AccountManagementError (SDK boundary).
+// DomainError → CanonicalError (the single AIP-193 ladder).
 // ---------------------------------------------------------------------------
 //
-// Direct semantic mapping — each `DomainError` variant lifts to a
-// uniquely-named `AccountManagementError` variant. The provider-detail
-// redaction for `IdpUnavailable` / `UnsupportedOperation` happens here
-// so the public detail that reaches the SDK never carries vendor SDK
-// text; raw detail is logged via the `am.domain` `tracing` target with
-// a digest + length only (mirrors
+// One arm per `DomainError` variant, each assigned exactly one of the
+// 16 canonical categories. Provider-detail redaction for `IdpUnavailable`
+// / `UnsupportedOperation` happens here so the public envelope never
+// carries vendor SDK text; the raw detail is logged via the `am.domain`
+// `tracing` target with a digest + length only (mirrors
 // [`crate::domain::idp::redact_provider_detail`]).
 
-// @cpt-begin:cpt-cf-account-management-algo-errors-observability-error-to-problem-mapping:p1:inst-algo-etp-domain-to-sdk
-impl From<DomainError> for AccountManagementError {
+// @cpt-begin:cpt-cf-account-management-algo-errors-observability-error-to-problem-mapping:p1:inst-algo-etp-domain-to-canonical
+impl From<DomainError> for CanonicalError {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "flat one-arm-per-variant AIP-193 ladder; splitting it would obscure the 1:1 mapping reviewers eyeball-check against the DomainError enum"
+    )]
     fn from(err: DomainError) -> Self {
         match err {
-            // ---- Tenant CRUD ----
-            DomainError::InvalidTenantType { detail } => Self::InvalidTenantType { detail },
-            DomainError::Validation { detail } => Self::InvalidRequest { detail },
+            // ---- InvalidArgument (HTTP 400) ----
+            DomainError::InvalidTenantType { detail } => TenantResource::invalid_argument()
+                .with_field_violation(field::TENANT_TYPE_FIELD, detail, field::INVALID_TENANT_TYPE)
+                .create(),
+            DomainError::Validation { detail } => TenantResource::invalid_argument()
+                .with_field_violation(field::REQUEST_FIELD, detail, field::VALIDATION)
+                .create(),
             // Metadata-payload validation rejects (malformed chained
-            // schema id, GTS body validation failure, etc.) route to
-            // the dedicated `MetadataInvalidRequest` so the canonical
-            // envelope can carry `TENANT_METADATA_RESOURCE_TYPE`
-            // instead of the tenant default. Both map to HTTP 400
-            // `invalid_argument` at the AIP-193 layer.
-            DomainError::MetadataValidation { detail } => Self::MetadataInvalidRequest { detail },
-            DomainError::RootTenantCannotDelete => Self::RootTenantCannotDelete,
-            DomainError::RootTenantCannotConvert => Self::RootTenantCannotConvert,
-            DomainError::RootTenantCannotChangeStatus => Self::RootTenantCannotChangeStatus,
-            DomainError::IdpInvalidInput { detail, field } => {
-                Self::IdpInvalidInput { detail, field }
+            // schema id, GTS body validation failure, etc.) carry the
+            // metadata resource type instead of the tenant default; both
+            // are HTTP 400 `invalid_argument`.
+            DomainError::MetadataValidation { detail } => {
+                TenantMetadataResource::invalid_argument()
+                    .with_field_violation(field::METADATA_FIELD, detail, field::VALIDATION)
+                    .create()
             }
-
-            DomainError::NotFound { detail, resource } => Self::TenantNotFound {
-                tenant_id: resource,
-                detail,
-            },
-            DomainError::UserNotFound { detail, resource } => Self::UserNotFound {
-                user_id: resource,
-                detail,
-            },
-            DomainError::ConversionRequestNotFound { detail, resource } => {
-                Self::ConversionRequestNotFound {
-                    request_id: resource,
+            DomainError::RootTenantCannotDelete => TenantResource::invalid_argument()
+                .with_field_violation(
+                    field::TENANT_ID_FIELD,
+                    "root tenant cannot be deleted",
+                    field::ROOT_TENANT_CANNOT_DELETE,
+                )
+                .create(),
+            DomainError::RootTenantCannotConvert => TenantResource::invalid_argument()
+                .with_field_violation(
+                    field::TENANT_ID_FIELD,
+                    "root tenant cannot be converted",
+                    field::ROOT_TENANT_CANNOT_CONVERT,
+                )
+                .create(),
+            DomainError::RootTenantCannotChangeStatus => TenantResource::invalid_argument()
+                .with_field_violation(
+                    field::TENANT_ID_FIELD,
+                    "root tenant status cannot be changed",
+                    field::ROOT_TENANT_CANNOT_CHANGE_STATUS,
+                )
+                .create(),
+            // `field` is the dotted-path the IdP plugin localised the
+            // violation to (e.g. `provisioning_metadata.realm_name`).
+            // When the plugin can't localise (`None`) we fall back to the
+            // shared `provisioning_metadata` field key — the public
+            // surface every IdP plugin shares. Stays on `TenantResource`
+            // (the operation being rejected is tenant provisioning).
+            DomainError::IdpInvalidInput { detail, field } => TenantResource::invalid_argument()
+                .with_field_violation(
+                    field.unwrap_or_else(|| {
+                        account_management_sdk::field::PROVISIONING_METADATA_FIELD.to_owned()
+                    }),
                     detail,
-                }
+                    account_management_sdk::field::IDP_INVALID_INPUT,
+                )
+                .create(),
+
+            // ---- NotFound (HTTP 404) — one resource per variant ----
+            DomainError::NotFound { detail, resource } => TenantResource::not_found(detail)
+                .with_resource(resource)
+                .create(),
+            DomainError::UserNotFound { detail, resource } => UserResource::not_found(detail)
+                .with_resource(resource)
+                .create(),
+            DomainError::ConversionRequestNotFound { detail, resource } => {
+                ConversionRequestResource::not_found(detail)
+                    .with_resource(resource)
+                    .create()
             }
-
-            DomainError::AlreadyExists { detail } => Self::TenantAlreadyExists { detail },
-
-            DomainError::TypeNotAllowed { detail } => Self::TenantTypeNotAllowed { detail },
-            DomainError::TenantDepthExceeded { detail } => Self::TenantDepthExceeded { detail },
-            DomainError::TenantHasChildren => Self::TenantHasChildren,
-            DomainError::TenantHasResources => Self::TenantHasResources,
-
-            // ---- Conversion request ----
-            DomainError::PendingExists { request_id } => {
-                Self::PendingConversionExists { request_id }
-            }
-            DomainError::InvalidActorForTransition {
-                attempted_status,
-                caller_side,
-            } => Self::InvalidActorForConversionTransition {
-                attempted_status,
-                caller_side,
-            },
-            DomainError::AlreadyResolved => Self::ConversionAlreadyResolved,
-
-            // ---- Tenant metadata ----
+            // Both "schema unknown to registry" and "entry missing for
+            // tenant" resolve to the same `TenantMetadataResource` 404;
+            // `entry` carries the chained `schema_id` the caller supplied.
             DomainError::MetadataEntryNotFound { detail, entry } => {
-                Self::MetadataEntryNotFound { entry, detail }
+                TenantMetadataResource::not_found(detail)
+                    .with_resource(entry)
+                    .create()
             }
+
+            // ---- Aborted (HTTP 409 with reason) ----
             DomainError::MetadataVersionMismatch {
                 entry,
                 expected,
                 current,
-            } => Self::MetadataVersionMismatch {
-                entry,
-                expected,
-                current,
-            },
+            } => TenantMetadataResource::aborted(format!(
+                "metadata version mismatch for {entry}: expected v{expected}, stored v{current}"
+            ))
+            .with_resource(entry)
+            .with_reason(reason::aborted::METADATA_VERSION_MISMATCH)
+            .create(),
+            // The domain `reason` is curated upstream but the wire token
+            // is the fixed `SERIALIZATION_CONFLICT` discriminator.
+            DomainError::Aborted { reason: _, detail } => TenantResource::aborted(detail)
+                .with_reason(reason::aborted::SERIALIZATION_CONFLICT)
+                .create(),
 
-            // ---- Generic precondition fallbacks ----
-            DomainError::Conflict { detail } => Self::PreconditionFailed { detail },
-            DomainError::FeatureDisabled { detail } => Self::FeatureDisabled { detail },
+            // ---- AlreadyExists (HTTP 409) ----
+            DomainError::AlreadyExists { detail } => TenantResource::already_exists(detail)
+                .with_resource("tenant")
+                .create(),
+            // Duplicate-on-create per AIP-193: the at-most-one-pending
+            // invariant surfaces as HTTP 409 with the existing
+            // `request_id` as the structural resource identifier.
+            DomainError::PendingExists { request_id } => ConversionRequestResource::already_exists(
+                format!("a pending conversion request already exists: {request_id}"),
+            )
+            .with_resource(request_id)
+            .create(),
 
-            // ---- Authorization ----
-            // Single funnel for every cross-tenant denial (PDP enforcer + storage
-            // scope-clamp); also reached on the REST path via the composed
-            // From<DomainError> for CanonicalError. The metadata visibility probe
-            // that swallows this into Ok(false) bypasses this mapping, so it is
-            // correctly not counted.
+            // ---- FailedPrecondition (HTTP 400) ----
+            DomainError::TypeNotAllowed { detail } => TenantResource::failed_precondition()
+                .with_precondition_violation(
+                    precondition::TENANT_TYPE_SUBJECT,
+                    detail,
+                    precondition::TYPE_NOT_ALLOWED_TYPE,
+                )
+                .create(),
+            DomainError::TenantDepthExceeded { detail } => TenantResource::failed_precondition()
+                .with_precondition_violation(
+                    precondition::DEPTH_SUBJECT,
+                    detail,
+                    precondition::TENANT_DEPTH_EXCEEDED_TYPE,
+                )
+                .create(),
+            DomainError::TenantHasChildren => TenantResource::failed_precondition()
+                .with_precondition_violation(
+                    precondition::TENANT_SUBJECT,
+                    "tenant has child tenants",
+                    precondition::TENANT_HAS_CHILDREN_TYPE,
+                )
+                .create(),
+            DomainError::TenantHasResources => TenantResource::failed_precondition()
+                .with_precondition_violation(
+                    precondition::TENANT_SUBJECT,
+                    "tenant still owns resources",
+                    precondition::TENANT_HAS_RESOURCES_TYPE,
+                )
+                .create(),
+            DomainError::InvalidActorForTransition {
+                attempted_status,
+                caller_side,
+            } => ConversionRequestResource::failed_precondition()
+                .with_precondition_violation(
+                    precondition::CONVERSION_REQUEST_SUBJECT,
+                    format!(
+                        "invalid actor for conversion transition: \
+                         attempted={attempted_status} caller_side={caller_side}"
+                    ),
+                    precondition::INVALID_ACTOR_FOR_TRANSITION_TYPE,
+                )
+                .create(),
+            DomainError::AlreadyResolved => ConversionRequestResource::failed_precondition()
+                .with_precondition_violation(
+                    precondition::CONVERSION_REQUEST_SUBJECT,
+                    "conversion request already resolved",
+                    precondition::ALREADY_RESOLVED_TYPE,
+                )
+                .create(),
+            DomainError::Conflict { detail } => TenantResource::failed_precondition()
+                .with_precondition_violation(
+                    precondition::REQUEST_SUBJECT,
+                    detail,
+                    precondition::PRECONDITION_FAILED_TYPE,
+                )
+                .create(),
+            DomainError::FeatureDisabled { detail } => TenantResource::failed_precondition()
+                .with_precondition_violation(
+                    precondition::CONFIGURATION_SUBJECT,
+                    detail,
+                    precondition::FEATURE_DISABLED_TYPE,
+                )
+                .create(),
+
+            // ---- PermissionDenied (HTTP 403) ----
+            //
+            // Single funnel for every cross-tenant denial (PDP enforcer +
+            // storage scope-clamp). The metadata visibility probe that
+            // swallows this into `Ok(false)` bypasses this mapping, so it
+            // is correctly not counted. Macro-supplied default detail
+            // ("You do not have permission to perform this operation")
+            // matches the pre-migration wire shape.
             DomainError::CrossTenantDenied { cause: _ } => {
                 emit_metric(AM_CROSS_TENANT_DENIAL, MetricKind::Counter, &[]);
-                Self::CrossTenantDenied
+                TenantResource::permission_denied()
+                    .with_reason(reason::permission::CROSS_TENANT_DENIED)
+                    .create()
             }
 
-            // ---- Transactional ----
-            DomainError::Aborted { reason: _, detail } => Self::SerializationConflict { detail },
-
-            // Not reachable via REST (canonical impl short-circuits to 429);
-            // defensive fallback on `Internal` for tooling that lifts
-            // `DomainError` directly.
-            DomainError::IntegrityCheckInProgress => Self::Internal {
-                detail: "integrity check already in progress".to_owned(),
-            },
-
-            // ---- IdP plugin (with detail redaction) ----
+            // ---- ResourceExhausted (HTTP 429) ----
             //
-            // `IdpUnavailable` reuses the AIP-193 `ServiceUnavailable`
-            // envelope at the canonical layer. Provider-supplied
-            // `detail` can carry vendor SDK strings / endpoint names:
-            // log a digest through `am.domain` and emit the variant
-            // with no public detail string.
+            // Not part of the inter-gear SDK contract (no
+            // `AccountManagementClient` method surfaces it); routed
+            // directly to the canonical 429 quota envelope.
+            DomainError::IntegrityCheckInProgress => {
+                TenantResource::resource_exhausted("integrity check already in progress")
+                    .with_quota_violation(
+                        quota::INTEGRITY_CHECK,
+                        "another integrity check is already in progress",
+                    )
+                    .create()
+            }
+            // `IntegrityCheckLeaseLost` shares the public retry contract
+            // with `IntegrityCheckInProgress` — both surface as the same
+            // canonical 429 envelope. The metric-label split
+            // (`AbortedLeaseLost` vs `SkippedInProgress`) is observed at
+            // the loop-driver layer, not the REST boundary, so collapsing
+            // them here keeps the public contract stable.
+            DomainError::IntegrityCheckLeaseLost => {
+                TenantResource::resource_exhausted("integrity repair aborted: lease lost to a peer")
+                    .with_quota_violation(
+                        quota::INTEGRITY_CHECK,
+                        "integrity repair aborted; another worker took the lease",
+                    )
+                    .create()
+            }
+
+            // ---- ServiceUnavailable (HTTP 503) ----
+            //
+            // `IdpUnavailable` collapses to the same 503 shape as generic
+            // `ServiceUnavailable` (no `retry_after_seconds` — IdP retry
+            // budgets are governed by the bootstrap saga, not the wire
+            // hint). Provider `detail` can carry vendor SDK strings:
+            // log a digest through `am.domain` and emit a fixed envelope
+            // detail.
             DomainError::IdpUnavailable { detail } => {
                 let (digest, len) = crate::domain::idp::redact_provider_detail(&detail);
                 warn!(
@@ -181,8 +316,27 @@ impl From<DomainError> for AccountManagementError {
                     detail_len_chars = len,
                     "IdpUnavailable surfaced; provider detail redacted for log/envelope safety"
                 );
-                Self::IdpUnavailable
+                CanonicalError::service_unavailable()
+                    .with_detail("IdP plugin unavailable")
+                    .create()
             }
+            // `detail` is curated upstream by the adapter that produced
+            // the variant (DB classifier redaction, PDP wrapper, …) and
+            // is forwarded so callers see the specific outage cause.
+            DomainError::ServiceUnavailable {
+                detail,
+                retry_after,
+                cause: _,
+            } => {
+                let mut builder = CanonicalError::service_unavailable().with_detail(detail);
+                if let Some(after) = retry_after {
+                    let secs = u32::try_from(after.as_secs()).unwrap_or(u32::MAX);
+                    builder = builder.with_retry_after_seconds(u64::from(secs));
+                }
+                builder.create()
+            }
+
+            // ---- Unimplemented (HTTP 501) ----
             DomainError::UnsupportedOperation { detail } => {
                 let (digest, len) = crate::domain::idp::redact_provider_detail(&detail);
                 warn!(
@@ -191,302 +345,15 @@ impl From<DomainError> for AccountManagementError {
                     detail_len_chars = len,
                     "UnsupportedOperation surfaced; provider detail redacted for log/envelope safety"
                 );
-                Self::UnsupportedOperation
+                TenantResource::unimplemented("operation not supported by the IdP provider")
+                    .create()
             }
 
-            // ---- Generic infra ----
-            //
-            // `detail` is curated upstream by the adapter that
-            // produced the variant — `From<EnforcerError::EvaluationFailed>`
-            // emits `"authorization evaluation failed"`, the DB
-            // classifier runs `redacted_db_diagnostic`, etc. Forward
-            // it through so callers see the specific outage cause.
-            DomainError::ServiceUnavailable {
-                detail,
-                retry_after,
-                cause: _,
-            } => Self::ServiceUnavailable {
-                detail,
-                retry_after_seconds: retry_after
-                    .map(|d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX)),
-            },
-
-            // Not reachable via REST (canonical impl short-circuits to 429);
-            // mirrors `IntegrityCheckInProgress` — both bypass through
-            // `From<DomainError> for CanonicalError` below and only
-            // hit this arm via tooling that lifts `DomainError`
-            // directly.
-            DomainError::IntegrityCheckLeaseLost => Self::Internal {
-                detail: "integrity repair aborted: lease lost to a peer".to_owned(),
-            },
-
-            // ---- Internal ----
+            // ---- Internal (HTTP 500) ----
             DomainError::Internal {
                 diagnostic,
                 cause: _,
-            } => Self::Internal { detail: diagnostic },
-        }
-    }
-}
-// @cpt-end:cpt-cf-account-management-algo-errors-observability-error-to-problem-mapping:p1:inst-algo-etp-domain-to-sdk
-
-// ---------------------------------------------------------------------------
-// AccountManagementError → CanonicalError (REST boundary).
-// ---------------------------------------------------------------------------
-//
-// Hosted as a free `pub(crate) fn` because both `AccountManagementError`
-// and `CanonicalError` are foreign to this crate — an `impl` block
-// here would violate the orphan rule. Callers go through the
-// `From<DomainError> for CanonicalError` impl below (REST `?`
-// shorthand); direct callers (e.g. SDK clients bubbling typed errors
-// to a REST adapter) call this function.
-
-// @cpt-begin:cpt-cf-account-management-algo-errors-observability-error-to-problem-mapping:p1:inst-algo-etp-sdk-to-canonical
-/// Lift the public SDK error envelope onto the AIP-193 canonical
-/// shape — same category, status, resource type, field-violation /
-/// precondition-violation / reason context.
-#[must_use]
-pub(crate) fn account_management_error_to_canonical(err: AccountManagementError) -> CanonicalError {
-    use AccountManagementError as A;
-    match err {
-        // ---- NotFound — one resource per variant ----
-        A::TenantNotFound { tenant_id, detail } => TenantResource::not_found(detail)
-            .with_resource(tenant_id)
-            .create(),
-        A::UserNotFound { user_id, detail } => UserResource::not_found(detail)
-            .with_resource(user_id)
-            .create(),
-        A::ConversionRequestNotFound { request_id, detail } => {
-            ConversionRequestResource::not_found(detail)
-                .with_resource(request_id)
-                .create()
-        }
-        // Both "schema unknown to registry" and "entry missing for
-        // tenant" resolve to the same `TenantMetadataResource` 404 —
-        // AM no longer distinguishes them on the wire. `entry`
-        // carries the chained `type_id` the caller supplied (or a
-        // bare `schema_uuid` on the rare orphan-row paths handled
-        // via `Internal` rather than this 404).
-        A::MetadataEntryNotFound { entry, detail } => TenantMetadataResource::not_found(detail)
-            .with_resource(entry)
-            .create(),
-        A::MetadataVersionMismatch {
-            entry,
-            expected,
-            current,
-        } => TenantMetadataResource::aborted(format!(
-            "metadata version mismatch for {entry}: expected v{expected}, stored v{current}"
-        ))
-        .with_resource(entry)
-        .with_reason("METADATA_VERSION_MISMATCH")
-        .create(),
-
-        // ---- InvalidArgument ----
-        A::InvalidTenantType { detail } => TenantResource::invalid_argument()
-            .with_field_violation("tenant_type", detail, "INVALID_TENANT_TYPE")
-            .create(),
-        A::InvalidRequest { detail } => TenantResource::invalid_argument()
-            .with_field_violation("request", detail, "VALIDATION")
-            .create(),
-        A::MetadataInvalidRequest { detail } => TenantMetadataResource::invalid_argument()
-            .with_field_violation("metadata", detail, "VALIDATION")
-            .create(),
-        A::RootTenantCannotDelete => TenantResource::invalid_argument()
-            .with_field_violation(
-                "tenant_id",
-                "root tenant cannot be deleted",
-                "ROOT_TENANT_CANNOT_DELETE",
-            )
-            .create(),
-        A::RootTenantCannotConvert => TenantResource::invalid_argument()
-            .with_field_violation(
-                "tenant_id",
-                "root tenant cannot be converted",
-                "ROOT_TENANT_CANNOT_CONVERT",
-            )
-            .create(),
-        A::RootTenantCannotChangeStatus => TenantResource::invalid_argument()
-            .with_field_violation(
-                "tenant_id",
-                "root tenant status cannot be changed",
-                "ROOT_TENANT_CANNOT_CHANGE_STATUS",
-            )
-            .create(),
-        // `field` is the dotted-path the IdP plugin localised the
-        // violation to (e.g. `provisioning_metadata.realm_name`). When
-        // the plugin can't localise (`None`) we fall back to the
-        // shared `"provisioning_metadata"` field key — the public
-        // surface every IdP plugin shares — so callers see a
-        // consistent attribution shape rather than a missing field.
-        // Stays on `TenantResource` (the operation being rejected is
-        // tenant provisioning).
-        A::IdpInvalidInput { detail, field } => TenantResource::invalid_argument()
-            .with_field_violation(
-                field.unwrap_or_else(|| "provisioning_metadata".to_owned()),
-                detail,
-                "IDP_INVALID_INPUT",
-            )
-            .create(),
-
-        // ---- AlreadyExists ----
-        A::TenantAlreadyExists { detail } => TenantResource::already_exists(detail)
-            .with_resource("tenant")
-            .create(),
-
-        // ---- FailedPrecondition (tenant) ----
-        A::TenantTypeNotAllowed { detail } => TenantResource::failed_precondition()
-            .with_precondition_violation("tenant_type", detail, "TYPE_NOT_ALLOWED")
-            .create(),
-        A::TenantDepthExceeded { detail } => TenantResource::failed_precondition()
-            .with_precondition_violation("depth", detail, "TENANT_DEPTH_EXCEEDED")
-            .create(),
-        A::TenantHasChildren => TenantResource::failed_precondition()
-            .with_precondition_violation(
-                "tenant",
-                "tenant has child tenants",
-                "TENANT_HAS_CHILDREN",
-            )
-            .create(),
-        A::TenantHasResources => TenantResource::failed_precondition()
-            .with_precondition_violation(
-                "tenant",
-                "tenant still owns resources",
-                "TENANT_HAS_RESOURCES",
-            )
-            .create(),
-        A::PreconditionFailed { detail } => TenantResource::failed_precondition()
-            .with_precondition_violation("request", detail, "PRECONDITION_FAILED")
-            .create(),
-        A::FeatureDisabled { detail } => TenantResource::failed_precondition()
-            .with_precondition_violation("configuration", detail, "FEATURE_DISABLED")
-            .create(),
-
-        // ---- AlreadyExists (conversion request) ----
-        // Duplicate-on-create per AIP-193: at-most-one-pending invariant
-        // surfaces as `code=pending_exists` (HTTP 409). The OpenAPI
-        // contract (`docs/account-management-v1.yaml`) and the handler
-        // docstrings document the 409 wire shape; the existing
-        // `request_id` is the structural resource identifier so the
-        // canonical `with_resource(...)` carries it.
-        A::PendingConversionExists { request_id } => ConversionRequestResource::already_exists(
-            format!("a pending conversion request already exists: {request_id}"),
-        )
-        .with_resource(request_id)
-        .create(),
-
-        // ---- FailedPrecondition (conversion request) ----
-        A::InvalidActorForConversionTransition {
-            attempted_status,
-            caller_side,
-        } => ConversionRequestResource::failed_precondition()
-            .with_precondition_violation(
-                "conversion_request",
-                format!(
-                    "invalid actor for conversion transition: \
-                     attempted={attempted_status} caller_side={caller_side}"
-                ),
-                "INVALID_ACTOR_FOR_TRANSITION",
-            )
-            .create(),
-        A::ConversionAlreadyResolved => ConversionRequestResource::failed_precondition()
-            .with_precondition_violation(
-                "conversion_request",
-                "conversion request already resolved",
-                "ALREADY_RESOLVED",
-            )
-            .create(),
-
-        // ---- Aborted (HTTP 409 with reason) ----
-        A::SerializationConflict { detail } => TenantResource::aborted(detail)
-            .with_reason("SERIALIZATION_CONFLICT")
-            .create(),
-
-        // ---- PermissionDenied ----
-        //
-        // Macro-supplied default detail: "You do not have permission
-        // to perform this operation". Match the pre-migration wire
-        // shape — no caller-supplied detail override.
-        A::CrossTenantDenied => TenantResource::permission_denied()
-            .with_reason("CROSS_TENANT_DENIED")
-            .create(),
-
-        // ---- Unimplemented ----
-        A::UnsupportedOperation => {
-            TenantResource::unimplemented("operation not supported by the IdP provider").create()
-        }
-
-        // ---- ServiceUnavailable ----
-        //
-        // `IdpUnavailable` is a tagged subset of canonical
-        // `ServiceUnavailable` — the SDK enum distinguishes it for
-        // typed retry logic, but the wire envelope collapses to the
-        // same 503 shape (no `retry_after_seconds` because IdP retry
-        // budgets are governed by the bootstrap saga, not the wire
-        // hint).
-        A::IdpUnavailable => CanonicalError::service_unavailable()
-            .with_detail("IdP plugin unavailable")
-            .create(),
-        A::ServiceUnavailable {
-            detail,
-            retry_after_seconds,
-        } => {
-            let mut builder = CanonicalError::service_unavailable().with_detail(detail);
-            if let Some(after) = retry_after_seconds {
-                builder = builder.with_retry_after_seconds(u64::from(after));
-            }
-            builder.create()
-        }
-
-        // ---- Internal ----
-        A::Internal { detail } => CanonicalError::internal(detail).create(),
-
-        // `AccountManagementError` is `#[non_exhaustive]`; this
-        // fallback maps any unmapped variant to a 500 with a generic
-        // diagnostic.
-        #[allow(unreachable_patterns)]
-        _ => CanonicalError::internal("unmapped AccountManagementError variant").create(),
-    }
-}
-// @cpt-end:cpt-cf-account-management-algo-errors-observability-error-to-problem-mapping:p1:inst-algo-etp-sdk-to-canonical
-
-// ---------------------------------------------------------------------------
-// DomainError → CanonicalError (REST `?` shorthand).
-// ---------------------------------------------------------------------------
-
-// @cpt-begin:cpt-cf-account-management-algo-errors-observability-error-to-problem-mapping:p1:inst-algo-etp-domain-to-canonical
-impl From<DomainError> for CanonicalError {
-    fn from(err: DomainError) -> Self {
-        match err {
-            // Bypass: `IntegrityCheckInProgress` is not exposed via
-            // the public SDK contract (no `AccountManagementClient`
-            // method surfaces it) — route directly to the canonical
-            // 429 envelope without instantiating an
-            // `AccountManagementError`. Wire-shape identical to the
-            // pre-migration two-hop output.
-            DomainError::IntegrityCheckInProgress => {
-                TenantResource::resource_exhausted("integrity check already in progress")
-                    .with_quota_violation(
-                        "integrity_check",
-                        "another integrity check is already in progress",
-                    )
-                    .create()
-            }
-            // `IntegrityCheckLeaseLost` shares the public retry
-            // contract with `IntegrityCheckInProgress` — both surface
-            // as the same canonical 429 envelope. The metric-label
-            // split (`AbortedLeaseLost` vs `SkippedInProgress`) is
-            // observed at the loop-driver layer, not at the REST
-            // boundary, so collapsing them here keeps the public
-            // contract stable.
-            DomainError::IntegrityCheckLeaseLost => {
-                TenantResource::resource_exhausted("integrity repair aborted: lease lost to a peer")
-                    .with_quota_violation(
-                        "integrity_check",
-                        "integrity repair aborted; another worker took the lease",
-                    )
-                    .create()
-            }
-            other => account_management_error_to_canonical(AccountManagementError::from(other)),
+            } => CanonicalError::internal(diagnostic).create(),
         }
     }
 }

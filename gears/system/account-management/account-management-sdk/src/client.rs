@@ -58,7 +58,8 @@ use toolkit_odata::{ODataQuery, Page};
 use toolkit_security::SecurityContext;
 use uuid::Uuid;
 
-use crate::error::AccountManagementError;
+use toolkit_canonical_errors::CanonicalError;
+
 use crate::idp_user::{IdpNewUser, IdpUser, ListUsersQuery};
 use crate::metadata::{MetadataEntry, UpsertMetadataRequest};
 use crate::tenant::{CreateTenantRequest, Tenant, UpdateTenantRequest};
@@ -70,15 +71,16 @@ use crate::tenant::{CreateTenantRequest, Tenant, UpdateTenantRequest};
 ///
 /// # Error envelope
 ///
-/// All methods return [`AccountManagementError`] — a flat enum
-/// mirroring the AIP-193 categories AM raises. AM's impl crate maps
-/// `DomainError → AccountManagementError` at this boundary
-/// (`infra::sdk_error_mapping::From<DomainError> for AccountManagementError`);
-/// the REST handler (when it lands) lifts to
-/// `toolkit_canonical_errors::CanonicalError` via the
-/// `account_management_error_to_canonical` helper in the same gear.
-/// Consumers match on [`AccountManagementError`] variants directly
-/// and never depend on `toolkit-canonical-errors`.
+/// Per [ADR 0005][adr] every fallible method returns
+/// `Result<_, CanonicalError>`. The single authoritative AIP-193 ladder
+/// (`From<DomainError> for CanonicalError`) lives in the impl crate's
+/// `infra::sdk_error_mapping`; this trait surfaces that envelope
+/// unchanged. Consumers may propagate it, or opt into the typed
+/// [`AccountManagementError`](crate::AccountManagementError) projection
+/// (`From<CanonicalError>`) for flat dispatch — see its gear docs for
+/// the dispatch table and the three integration patterns.
+///
+/// [adr]: https://github.com/constructorfabric/gears-rust/blob/main/docs/arch/errors/ADR/0005-cpt-cf-adr-sdk-canonical-projection.md
 #[async_trait]
 pub trait AccountManagementClient: Send + Sync + 'static {
     // -----------------------------------------------------------------
@@ -104,7 +106,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         &self,
         ctx: &SecurityContext,
         input: CreateTenantRequest,
-    ) -> Result<Tenant, AccountManagementError>;
+    ) -> Result<Tenant, CanonicalError>;
 
     /// Read a tenant by id. Returns the live tenant row projected to
     /// [`Tenant`]. AM-internal `Provisioning` rows surface as
@@ -121,11 +123,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
     /// * `NotFound` (HTTP 404) -- tenant does not exist, is
     ///   `Provisioning`, or sits outside the caller's PDP-compiled
     ///   subtree.
-    async fn get_tenant(
-        &self,
-        ctx: &SecurityContext,
-        id: Uuid,
-    ) -> Result<Tenant, AccountManagementError>;
+    async fn get_tenant(&self, ctx: &SecurityContext, id: Uuid) -> Result<Tenant, CanonicalError>;
 
     /// List direct children of `parent_id`. The listing is
     /// **direct-only** (`WHERE tenants.parent_id = :parent_id`) — full
@@ -163,7 +161,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         ctx: &SecurityContext,
         parent_id: Uuid,
         query: &ODataQuery,
-    ) -> Result<Page<Tenant>, AccountManagementError>;
+    ) -> Result<Page<Tenant>, CanonicalError>;
 
     /// PATCH-style update on the mutable tenant fields. An empty
     /// patch is rejected as `InvalidArgument`.
@@ -187,7 +185,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         ctx: &SecurityContext,
         id: Uuid,
         patch: UpdateTenantRequest,
-    ) -> Result<Tenant, AccountManagementError>;
+    ) -> Result<Tenant, CanonicalError>;
 
     /// Transition `id` from `Active` to `Suspended`. Calling on an
     /// already-`Suspended` tenant is an idempotent no-op and returns
@@ -203,7 +201,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         &self,
         ctx: &SecurityContext,
         id: Uuid,
-    ) -> Result<Tenant, AccountManagementError>;
+    ) -> Result<Tenant, CanonicalError>;
 
     /// Transition `id` from `Suspended` back to `Active`. Calling on
     /// an already-`Active` tenant is an idempotent no-op. `Deleted`
@@ -218,7 +216,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         &self,
         ctx: &SecurityContext,
         id: Uuid,
-    ) -> Result<Tenant, AccountManagementError>;
+    ) -> Result<Tenant, CanonicalError>;
 
     /// Schedule a soft-delete of `tenant_id`. The tenant transitions
     /// to `Deleted` with `deleted_at` stamped to the current wall-clock
@@ -244,7 +242,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         &self,
         ctx: &SecurityContext,
         tenant_id: Uuid,
-    ) -> Result<Tenant, AccountManagementError>;
+    ) -> Result<Tenant, CanonicalError>;
 
     // -----------------------------------------------------------------
     // IdpUser CRUD — PEP-gated inside the impl by `UserService::authorize`
@@ -275,7 +273,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         ctx: &SecurityContext,
         tenant_id: Uuid,
         payload: IdpNewUser,
-    ) -> Result<IdpUser, AccountManagementError>;
+    ) -> Result<IdpUser, CanonicalError>;
 
     /// Fetch a single user by id from `tenant_id` via the configured
     /// `IdP` plugin. Thin wrapper over [`Self::list_users`] with the
@@ -301,7 +299,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         ctx: &SecurityContext,
         tenant_id: Uuid,
         user_id: Uuid,
-    ) -> Result<IdpUser, AccountManagementError>;
+    ) -> Result<IdpUser, CanonicalError>;
 
     /// List users in `tenant_id` via the configured `IdP` plugin.
     /// `$filter = id eq <uuid>` (via [`crate::ListUsersQuery::with_id`])
@@ -327,7 +325,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         ctx: &SecurityContext,
         tenant_id: Uuid,
         query: ListUsersQuery,
-    ) -> Result<Page<IdpUser>, AccountManagementError>;
+    ) -> Result<Page<IdpUser>, CanonicalError>;
 
     /// Deprovision a user from `tenant_id` via the configured `IdP`
     /// plugin. AM's deprovision saga additionally cleans up
@@ -349,7 +347,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         ctx: &SecurityContext,
         tenant_id: Uuid,
         user_id: Uuid,
-    ) -> Result<(), AccountManagementError>;
+    ) -> Result<(), CanonicalError>;
 
     // -----------------------------------------------------------------
     // Tenant metadata — PEP-gated inside the impl by `MetadataService::authorize`
@@ -377,7 +375,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         ctx: &SecurityContext,
         tenant_id: Uuid,
         type_id: GtsTypeId,
-    ) -> Result<MetadataEntry, AccountManagementError>;
+    ) -> Result<MetadataEntry, CanonicalError>;
 
     /// Resolve the **effective** metadata for `tenant_id` at
     /// `type_id`, walking up the ancestor chain per the FEATURE
@@ -405,7 +403,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         ctx: &SecurityContext,
         tenant_id: Uuid,
         type_id: GtsTypeId,
-    ) -> Result<Option<MetadataEntry>, AccountManagementError>;
+    ) -> Result<Option<MetadataEntry>, CanonicalError>;
 
     /// List metadata entries attached directly to `tenant_id`,
     /// filtered + paginated via the supplied [`ODataQuery`]. The
@@ -427,7 +425,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         ctx: &SecurityContext,
         tenant_id: Uuid,
         query: &ODataQuery,
-    ) -> Result<Page<MetadataEntry>, AccountManagementError>;
+    ) -> Result<Page<MetadataEntry>, CanonicalError>;
 
     /// Upsert the metadata row at `(tenant_id, input.type_id)`.
     /// Returns the post-write [`MetadataEntry`] — REST handlers
@@ -457,7 +455,7 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         ctx: &SecurityContext,
         tenant_id: Uuid,
         input: UpsertMetadataRequest,
-    ) -> Result<MetadataEntry, AccountManagementError>;
+    ) -> Result<MetadataEntry, CanonicalError>;
 
     /// Delete the metadata row attached **directly** to `tenant_id`
     /// for `type_id`. Inherited entries (resolved through an
@@ -483,5 +481,5 @@ pub trait AccountManagementClient: Send + Sync + 'static {
         ctx: &SecurityContext,
         tenant_id: Uuid,
         type_id: GtsTypeId,
-    ) -> Result<(), AccountManagementError>;
+    ) -> Result<(), CanonicalError>;
 }

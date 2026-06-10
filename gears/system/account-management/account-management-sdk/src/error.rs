@@ -1,350 +1,301 @@
-//! Account Management SDK public error type.
+//! Account Management SDK error surface — typed projection of
+//! [`CanonicalError`].
 //!
-//! Variant-per-failure shape: each enum case identifies what went wrong
-//! semantically (mirrors the `mini-chat::DomainError` convention).
-//! SDK consumers pattern-match on variants directly; AIP-193 / HTTP
-//! mapping is performed at the canonical boundary in the impl crate
-//! (`account-management::infra::sdk_error_mapping`).
+//! # Opt-in convenience, not the contract
 //!
-//! # Group-membership helpers
+//! Per [ADR 0005][adr] the [`AccountManagementClient`] trait boundary is
+//! `Result<_, CanonicalError>`. [`AccountManagementError`] is an
+//! **opt-in** typed view over that envelope, shipped for consumers that
+//! want flat dispatch on the categories AM emits. It is *not* part of
+//! the trait contract: adding a variant is non-breaking, and the single
+//! authoritative AIP-193 classification lives in the impl crate's one
+//! `From<DomainError> for CanonicalError` ladder — this projection only
+//! reads the finished `CanonicalError`.
 //!
-//! Per-variant matching is precise but category-level handling (retry
-//! on transient outages, surface as 404 regardless of which resource
-//! was missing) is a recurring need. The `is_*` helpers below collapse
-//! related variants into a single predicate so consumers do not need
-//! to enumerate every variant — adding a new transient variant means
-//! extending `is_unavailable()` in one place, not patching every
-//! call site.
+//! The conversion is infallible (`From<CanonicalError>`). Canonical
+//! categories AM does not emit fall through to [`AccountManagementError::Other`],
+//! which preserves the full [`CanonicalError`] for inspection /
+//! forward-compatible dispatch on the inner variant.
+//!
+//! # What AM emits — consumer dispatch reference
+//!
+//! | Disposition | Match arm | HTTP |
+//! |---|---|---|
+//! | resource missing (tenant / user / conversion / metadata) | [`AccountManagementError::NotFound`] | 404 |
+//! | duplicate-on-create | [`AccountManagementError::AlreadyExists`] | 409 |
+//! | request-shape validation — inspect [`field::ValidationReason`] | [`AccountManagementError::InvalidArgument`] | 400 |
+//! | state precondition — inspect [`precondition::Subject`] | [`AccountManagementError::FailedPrecondition`] | 400 |
+//! | concurrency / version conflict — inspect `reason` ([`reason::aborted`]) | [`AccountManagementError::Aborted`] | 409 |
+//! | cross-tenant denied — inspect `reason` ([`reason::permission`]) | [`AccountManagementError::PermissionDenied`] | 403 |
+//! | `IdP` operation unsupported | [`AccountManagementError::Unimplemented`] | 501 |
+//! | transient outage (infra / `IdP` transport), retry hint | [`AccountManagementError::Unavailable`] | 503 |
+//! | integrity-check single-flight gate held — inspect `subject` ([`quota`]) | [`AccountManagementError::ResourceExhausted`] | 429 |
+//! | internal error | [`AccountManagementError::Internal`] | 500 |
+//! | anything else (forward-compat) | [`AccountManagementError::Other`] | — |
+//!
+//! Resource-scoped variants ([`AccountManagementError::NotFound`] /
+//! [`AccountManagementError::AlreadyExists`]) carry the raw
+//! `resource_type`; match it against the [`gts`] constants
+//! (`gts.cf.core.am.{tenant|user|tenant_metadata|conversion_request}.v1~`).
+//!
+//! # Consumer integration — three patterns
+//!
+//! **Pattern 1 — pure propagation (no projection):**
+//!
+//! ```ignore
+//! let tenant = am_client.get_tenant(&ctx, id).await?; // ? propagates CanonicalError
+//! ```
+//!
+//! **Pattern 2 — explicit projection at the call site:**
+//!
+//! ```ignore
+//! use account_management_sdk::{AccountManagementError, precondition::Subject};
+//!
+//! let res = am_client.delete_tenant(&ctx, id).await
+//!     .map_err(AccountManagementError::from);
+//! match res {
+//!     Err(AccountManagementError::FailedPrecondition { subject: Subject::Tenant, .. }) =>
+//!         /* has children / owns resources — surface a conflict to the user */,
+//!     Err(AccountManagementError::NotFound { .. }) => /* already gone */,
+//!     _ => /* … */,
+//! }
+//! ```
+//!
+//! **Pattern 3 — transparent chaining via `From<CanonicalError> for OwnError`:**
+//!
+//! ```ignore
+//! impl From<CanonicalError> for OwnConsumerError {
+//!     fn from(err: CanonicalError) -> Self {
+//!         AccountManagementError::from(err).into() // route through the typed view
+//!     }
+//! }
+//! // then every call site stays plain `?`.
+//! ```
+//!
+//! Out-of-process consumers reconstruct the canonical error from the
+//! wire via `TryFrom<Problem> for CanonicalError` first, then project:
+//! `Problem JSON → Problem → CanonicalError → AccountManagementError`.
+//!
+//! [`AccountManagementClient`]: crate::AccountManagementClient
+//! [adr]: https://github.com/constructorfabric/gears-rust/blob/main/docs/arch/errors/ADR/0005-cpt-cf-adr-sdk-canonical-projection.md
 
 use thiserror::Error;
+use toolkit_canonical_errors::{CanonicalError, InvalidArgument};
 
-/// AM public error envelope.
-#[derive(Error, Debug, Clone)]
+use crate::field::ValidationReason;
+use crate::precondition::Subject;
+
+/// Typed projection of [`CanonicalError`] for Account Management
+/// consumers.
+///
+/// The impl crate's `From<DomainError> for CanonicalError` is the single
+/// authoritative AIP-193 mapping; this enum is a forward-compatible,
+/// flat view over the ten categories AM emits, plus the mandatory
+/// catch-all [`Self::Other`]. See the [gear docs](self) for the
+/// dispatch table and consumer patterns.
+#[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum AccountManagementError {
-    // ===================================================================
-    // Tenant CRUD
-    // ===================================================================
-    /// Tenant with `tenant_id` does not exist (or is soft-deleted /
-    /// provisioning — both surface as `NotFound` per AM contract).
-    #[error("tenant {tenant_id} not found: {detail}")]
-    TenantNotFound { tenant_id: String, detail: String },
-
-    /// `IdP` user not found within the requested tenant scope. The
-    /// `tenant_id` carried here is informational (the lookup scope);
-    /// the discriminator for "the missing thing" is `user_id`.
-    #[error("user {user_id} not found: {detail}")]
-    UserNotFound { user_id: String, detail: String },
-
-    /// Conversion request with `request_id` does not exist (or has
-    /// been soft-deleted, or the caller's scope cannot reach it —
-    /// existence-leak protection collapses all three into `NotFound`).
-    #[error("conversion request {request_id} not found: {detail}")]
-    ConversionRequestNotFound { request_id: String, detail: String },
-
-    /// Unique-constraint violation when creating a tenant.
-    #[error("tenant already exists: {detail}")]
-    TenantAlreadyExists { detail: String },
-
-    /// `tenant_type` reference is malformed or unknown.
-    #[error("invalid tenant type: {detail}")]
-    InvalidTenantType { detail: String },
-
-    /// `tenant_type` is registered but not permitted for the requested
-    /// placement (parent / depth / root constraint).
-    #[error("tenant type not allowed for this placement: {detail}")]
-    TenantTypeNotAllowed { detail: String },
-
-    /// Hierarchy depth budget exceeded.
-    #[error("tenant depth exceeded: {detail}")]
-    TenantDepthExceeded { detail: String },
-
-    /// Tenant still has child tenants; cannot be deleted/converted.
-    #[error("tenant has child tenants")]
-    TenantHasChildren,
-
-    /// Tenant still owns active RG memberships; cannot be deleted.
-    #[error("tenant still owns resources")]
-    TenantHasResources,
-
-    /// Root tenant cannot be deleted (delete operation refused).
-    #[error("root tenant cannot be deleted")]
-    RootTenantCannotDelete,
-
-    /// Root tenant cannot be converted (conversion operation refused).
-    #[error("root tenant cannot be converted")]
-    RootTenantCannotConvert,
-
-    /// Root tenant status is immutable — `suspend` / `unsuspend` refused.
-    /// Symmetric with [`Self::RootTenantCannotDelete`]: the platform
-    /// root is a singleton whose lifecycle state must not flip from
-    /// the public API. Downstream gears that branch on
-    /// `root.status` may take unexpected paths (read-only mode,
-    /// refuse provisioning, etc.) without a documented recovery
-    /// runbook.
-    #[error("root tenant status cannot be changed")]
-    RootTenantCannotChangeStatus,
-
-    /// `IdP` plugin rejected the provisioning request shape BEFORE
-    /// making any external call. Permanent client error — the
-    /// `provisioning` row was compensated by the saga; nothing on
-    /// the provider side to undo. Distinct from
-    /// [`Self::InvalidRequest`] so the canonical envelope can carry
-    /// the dotted-path `field` (e.g. `provisioning_metadata.realm_name`)
-    /// the plugin localised the violation to, surfaced as
-    /// `field_violations[0].field` with reason `IDP_INVALID_INPUT`.
-    /// `field` is `None` when the plugin couldn't localise to a
-    /// specific key; the canonical mapping then uses
-    /// `"provisioning_metadata"` as the field key (the surface
-    /// every `IdP` plugin shares).
-    #[error("IdP provider rejected request shape: {detail}")]
-    IdpInvalidInput {
+    /// Resource not found (tenant, user, conversion request, or metadata
+    /// entry). `resource_type` is the canonical GTS type — match it
+    /// against the [`crate::gts`] constants; `name` is the raw
+    /// identifier the caller supplied.
+    #[error("not found [{resource_type}]: {name}")]
+    NotFound {
+        resource_type: String,
+        name: String,
         detail: String,
-        field: Option<String>,
     },
 
-    // ===================================================================
-    // Conversion request
-    // ===================================================================
-    /// Another conversion request for the same tenant is still pending.
-    #[error("a pending conversion request already exists: {request_id}")]
-    PendingConversionExists { request_id: String },
-
-    /// Approver/rejecter side does not match the conversion's target
-    /// transition.
-    #[error(
-        "invalid actor for conversion transition: attempted={attempted_status} caller_side={caller_side}"
-    )]
-    InvalidActorForConversionTransition {
-        attempted_status: String,
-        caller_side: String,
+    /// Duplicate-on-create conflict (tenant slug clash, pending
+    /// conversion already exists).
+    #[error("already exists [{resource_type}]: {name}")]
+    AlreadyExists {
+        resource_type: String,
+        name: String,
+        detail: String,
     },
 
-    /// Conversion request is already in a terminal state (approved or
-    /// rejected); cannot be transitioned again.
-    #[error("conversion request already resolved")]
-    ConversionAlreadyResolved,
-
-    // ===================================================================
-    // Tenant Metadata
-    // ===================================================================
-    /// Metadata entry not found. Surfaces uniformly for both
-    /// "`type_id` is unknown to the types-registry" and "schema is
-    /// registered but no row exists at `(tenant_id, schema_uuid)`" —
-    /// AM intentionally does not distinguish the two on the wire so
-    /// clients see a single `not_found` shape for every metadata
-    /// lookup miss. `entry` carries the chained `type_id` string
-    /// the caller supplied (or, on rare orphan-row paths, the bare
-    /// `schema_uuid`).
-    #[error("metadata entry {entry} not found: {detail}")]
-    MetadataEntryNotFound { entry: String, detail: String },
-
-    /// Optimistic-lock precondition on
-    /// [`crate::UpsertMetadataRequest::expected_version`] did not
-    /// match the stored row's [`crate::MetadataEntry::version`]. The
-    /// caller MUST re-read the entry, decide how to merge with the
-    /// concurrent change, and re-issue the upsert with the updated
-    /// `expected_version`. HTTP 409 (AIP-193 `Aborted`).
-    #[error("metadata version mismatch for {entry}: expected v{expected}, stored v{current}")]
-    MetadataVersionMismatch {
-        entry: String,
-        expected: i64,
-        current: i64,
+    /// Request-shape validation failure. `reason` is the typed
+    /// [`field::ValidationReason`](crate::field::ValidationReason);
+    /// `field` is the attributed request field.
+    #[error("invalid argument [{field}/{reason}]: {detail}")]
+    InvalidArgument {
+        field: String,
+        reason: ValidationReason,
+        detail: String,
     },
 
-    // ===================================================================
-    // Generic validation / precondition (fallbacks)
-    // ===================================================================
-    /// Request shape rejected by validator (no typed variant).
-    #[error("invalid request: {detail}")]
-    InvalidRequest { detail: String },
+    /// State precondition violation. `subject` is the typed
+    /// [`precondition::Subject`](crate::precondition::Subject) consumers
+    /// dispatch on (e.g. `Subject::Tenant` ⇒ has children / owns
+    /// resources); `type_` is the finer wire token.
+    #[error("failed precondition [{subject}/{type_}]: {detail}")]
+    FailedPrecondition {
+        subject: Subject,
+        type_: String,
+        detail: String,
+    },
 
-    /// Metadata-payload validation rejected. Distinct from
-    /// [`Self::InvalidRequest`] so the canonical envelope can route
-    /// to `gts.cf.core.am.tenant_metadata.v1~` instead of the tenant
-    /// default — both still map to AIP-193 `InvalidArgument` (HTTP
-    /// 400). Producers raise this when the metadata payload itself or
-    /// its `type_id` is malformed (chain-shape, null body, GTS body
-    /// validation), keeping [`Self::InvalidRequest`] for tenant-state
-    /// guards.
-    #[error("metadata validation failed: {detail}")]
-    MetadataInvalidRequest { detail: String },
+    /// Concurrency / version conflict (HTTP 409). `reason` is one of the
+    /// [`reason::aborted`](crate::reason::aborted) constants
+    /// (`METADATA_VERSION_MISMATCH`, `SERIALIZATION_CONFLICT`).
+    #[error("aborted [{reason}]: {detail}")]
+    Aborted { reason: String, detail: String },
 
-    /// State precondition violation not covered by a more specific
-    /// variant (tenant deleted, type immutable, etc.).
-    #[error("precondition failed: {detail}")]
-    PreconditionFailed { detail: String },
+    /// Authorization denial (HTTP 403). `reason` is one of the
+    /// [`reason::permission`](crate::reason::permission) constants
+    /// (`CROSS_TENANT_DENIED`).
+    #[error("permission denied [{reason}]: {detail}")]
+    PermissionDenied { reason: String, detail: String },
 
-    /// Deployment-level feature gate refused the operation. Distinct
-    /// from [`Self::UnsupportedOperation`] (`IdP` capability gap) so
-    /// callers can distinguish a configuration switch from a vendor
-    /// gap without string matching.
-    #[error("feature disabled: {detail}")]
-    FeatureDisabled { detail: String },
+    /// The configured `IdP` plugin declared the operation unsupported in
+    /// its current profile (HTTP 501).
+    #[error("unimplemented: {detail}")]
+    Unimplemented { detail: String },
 
-    // ===================================================================
-    // Authorization
-    // ===================================================================
-    /// PEP denied cross-tenant access (or AM-side ancestry walk
-    /// rejected the call). HTTP 403.
-    #[error("cross-tenant access denied")]
-    CrossTenantDenied,
-
-    // ===================================================================
-    // Transactional
-    // ===================================================================
-    /// Storage retry budget exhausted for a serializable transaction.
-    /// Treated as 409 per AIP-193 `Aborted`.
-    #[error("serialization conflict: {detail}")]
-    SerializationConflict { detail: String },
-
-    // ===================================================================
-    // IdP plugin contract
-    // ===================================================================
-    /// `IdP` plugin transport / availability failure. Surfaces as 503;
-    /// distinct from generic [`Self::ServiceUnavailable`] so the
-    /// bootstrap saga retry loop can pattern-match this specifically
-    /// without losing the AIP-193 status mapping.
-    #[error("IdP plugin unavailable")]
-    IdpUnavailable,
-
-    /// `IdP` plugin declared the operation unsupported in its current
-    /// profile. HTTP 501.
-    #[error("operation not supported by IdP provider")]
-    UnsupportedOperation,
-
-    // ===================================================================
-    // Generic infra / fallback
-    // ===================================================================
-    /// Non-IdP transient infrastructure failure (DB transport, PDP
-    /// evaluation, types-registry). HTTP 503 with optional
-    /// `retry_after_seconds` hint.
+    /// Transient infrastructure / `IdP` transport outage (HTTP 503).
+    /// `retry_after_seconds` carries the backoff hint when one is
+    /// available.
     #[error("service unavailable: {detail}")]
-    ServiceUnavailable {
+    Unavailable {
+        retry_after_seconds: Option<u64>,
         detail: String,
-        retry_after_seconds: Option<u32>,
     },
 
-    /// Unclassified internal failure. `detail` MUST be redacted at the
-    /// construction site — the impl crate's classifier produces only
-    /// DSN-free strings.
+    /// A bounded resource is exhausted (HTTP 429) — today only the
+    /// hierarchy-integrity single-flight gate. `subject` is one of the
+    /// [`quota`](crate::quota) constants (`integrity_check`).
+    #[error("resource exhausted [{subject}]: {detail}")]
+    ResourceExhausted { subject: String, detail: String },
+
+    /// Unclassified internal failure (HTTP 500). `detail` is already
+    /// redacted at the canonical boundary — it never carries the
+    /// server-side diagnostic.
     #[error("internal error: {detail}")]
     Internal { detail: String },
+
+    /// Catch-all for canonical categories AM does not model — preserves
+    /// the full [`CanonicalError`] so consumers stay forward-compatible
+    /// if the impl crate ever emits a new category. Reaching `Other`
+    /// indicates a category outside AM's documented emission set.
+    #[error("[{}] {}", canonical.gts_type(), canonical.detail())]
+    Other { canonical: CanonicalError },
 }
 
-impl AccountManagementError {
-    // -------------------------------------------------------------------
-    // Group-membership helpers
-    //
-    // These collapse related variants into a single predicate so
-    // callers do not have to enumerate every variant for
-    // category-level handling (backoff, retry, surface-as-404). Adding
-    // a new variant to one of these categories means extending the
-    // helper here in one place — call sites stay untouched.
-    // -------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────
+// CanonicalError → AccountManagementError projection.
+//
+// The typed sub-enums (`field::ValidationReason`, `precondition::Subject`)
+// live next to their wire-string constants in `crate::field` /
+// `crate::precondition`; the single-valued reasons stay plain consts in
+// `crate::reason` / `crate::quota`. This file owns only the top-level
+// enum and the dispatch from `CanonicalError`.
+// ─────────────────────────────────────────────────────────────────────
 
-    /// `true` for any not-found shape (tenant, user, conversion
-    /// request, metadata entry, metadata schema, …). Use when the
-    /// caller wants to treat any missing resource uniformly (cache
-    /// invalidation, "go back to list").
-    #[must_use]
-    pub fn is_not_found(&self) -> bool {
-        matches!(
-            self,
-            Self::TenantNotFound { .. }
-                | Self::UserNotFound { .. }
-                | Self::ConversionRequestNotFound { .. }
-                | Self::MetadataEntryNotFound { .. }
-        )
-    }
-
-    /// `true` for any transient infrastructure outage where retry is
-    /// the appropriate response. Covers `ServiceUnavailable` (generic
-    /// infra) and `IdpUnavailable` (vendor plugin transport).
-    #[must_use]
-    pub fn is_unavailable(&self) -> bool {
-        matches!(self, Self::ServiceUnavailable { .. } | Self::IdpUnavailable)
-    }
-
-    /// `true` if the operation MAY succeed on a future retry: any
-    /// transient outage plus serializable-retry exhaustion.
-    /// `IntegrityCheckInProgress` is NOT included — caller is expected
-    /// to back off until the in-flight check completes, not retry
-    /// immediately.
-    #[must_use]
-    pub fn is_retryable(&self) -> bool {
-        self.is_unavailable() || matches!(self, Self::SerializationConflict { .. })
-    }
-
-    /// `true` for request-shape rejections (HTTP 400 `InvalidArgument`).
-    #[must_use]
-    pub fn is_validation_error(&self) -> bool {
-        matches!(
-            self,
-            Self::InvalidTenantType { .. }
-                | Self::InvalidRequest { .. }
-                | Self::MetadataInvalidRequest { .. }
-                | Self::RootTenantCannotDelete
-                | Self::RootTenantCannotConvert
-                | Self::RootTenantCannotChangeStatus
-                | Self::IdpInvalidInput { .. }
-        )
-    }
-
-    /// `true` for state-precondition failures (HTTP 400
-    /// `FailedPrecondition` per AIP-193).
-    #[must_use]
-    pub fn is_precondition_failed(&self) -> bool {
-        matches!(
-            self,
-            Self::TenantTypeNotAllowed { .. }
-                | Self::TenantDepthExceeded { .. }
-                | Self::TenantHasChildren
-                | Self::TenantHasResources
-                | Self::InvalidActorForConversionTransition { .. }
-                | Self::ConversionAlreadyResolved
-                | Self::PreconditionFailed { .. }
-                | Self::FeatureDisabled { .. }
-        )
-    }
-
-    /// `true` for duplicate-on-create failures (HTTP 409
-    /// `AlreadyExists` per AIP-193). Distinct from
-    /// [`Self::is_precondition_failed`] because the duplicate-resource
-    /// category carries the existing resource id as part of its
-    /// envelope and is retryable only after the caller resolves the
-    /// existing row.
-    #[must_use]
-    pub fn is_already_exists(&self) -> bool {
-        matches!(
-            self,
-            Self::TenantAlreadyExists { .. } | Self::PendingConversionExists { .. }
-        )
-    }
-
-    /// `true` for authorization denials (HTTP 403).
-    #[must_use]
-    pub fn is_permission_denied(&self) -> bool {
-        matches!(self, Self::CrossTenantDenied)
-    }
-
-    // -------------------------------------------------------------------
-    // Field accessors
-    // -------------------------------------------------------------------
-
-    /// Retry-after hint (seconds) for transient outages that carry
-    /// one. Currently only [`Self::ServiceUnavailable`] populates it;
-    /// other variants return `None`.
-    #[must_use]
-    pub fn retry_after_seconds(&self) -> Option<u32> {
-        match self {
-            Self::ServiceUnavailable {
-                retry_after_seconds,
+impl From<CanonicalError> for AccountManagementError {
+    fn from(err: CanonicalError) -> Self {
+        // Borrow the canonical detail before consuming `err`; the borrow
+        // ends here so each arm below can move its fields out (no clones).
+        let detail = err.detail().to_owned();
+        match err {
+            CanonicalError::NotFound {
+                resource_type,
+                resource_name,
                 ..
-            } => *retry_after_seconds,
-            _ => None,
+            } => Self::NotFound {
+                resource_type: resource_type.unwrap_or_default(),
+                name: resource_name.unwrap_or_default(),
+                detail,
+            },
+
+            CanonicalError::AlreadyExists {
+                resource_type,
+                resource_name,
+                ..
+            } => Self::AlreadyExists {
+                resource_type: resource_type.unwrap_or_default(),
+                name: resource_name.unwrap_or_default(),
+                detail,
+            },
+
+            CanonicalError::InvalidArgument { ctx, .. } => project_invalid_argument(ctx, detail),
+
+            // AM emits exactly one PreconditionViolation per
+            // FailedPrecondition error; the meaningful message lives in
+            // the violation `description`, so surface it as `detail`.
+            CanonicalError::FailedPrecondition { ctx, .. } => {
+                ctx.violations.into_iter().next().map_or_else(
+                    || Self::FailedPrecondition {
+                        subject: Subject::Unknown(String::new()),
+                        type_: String::new(),
+                        detail,
+                    },
+                    |v| Self::FailedPrecondition {
+                        subject: Subject::from_wire(&v.subject),
+                        type_: v.type_,
+                        detail: v.description,
+                    },
+                )
+            }
+
+            CanonicalError::Aborted { ctx, .. } => Self::Aborted {
+                reason: ctx.reason,
+                detail,
+            },
+
+            CanonicalError::PermissionDenied { ctx, .. } => Self::PermissionDenied {
+                reason: ctx.reason,
+                detail,
+            },
+
+            CanonicalError::Unimplemented { .. } => Self::Unimplemented { detail },
+
+            CanonicalError::ServiceUnavailable { ctx, .. } => Self::Unavailable {
+                retry_after_seconds: ctx.retry_after_seconds,
+                detail,
+            },
+
+            CanonicalError::ResourceExhausted { ctx, .. } => Self::ResourceExhausted {
+                subject: ctx
+                    .violations
+                    .into_iter()
+                    .next()
+                    .map(|v| v.subject)
+                    .unwrap_or_default(),
+                detail,
+            },
+
+            CanonicalError::Internal { .. } => Self::Internal { detail },
+
+            other => Self::Other { canonical: other },
         }
     }
+}
+
+fn project_invalid_argument(ctx: InvalidArgument, detail: String) -> AccountManagementError {
+    // AM only ever emits the `FieldViolations` shape with a single
+    // violation; the `Format` / `Constraint` shapes and the empty case
+    // fall back to the canonical detail with an unknown reason.
+    let first_violation = match ctx {
+        InvalidArgument::FieldViolations { field_violations } => {
+            field_violations.into_iter().next()
+        }
+        InvalidArgument::Format { .. } | InvalidArgument::Constraint { .. } => None,
+    };
+
+    first_violation.map_or(
+        AccountManagementError::InvalidArgument {
+            field: String::new(),
+            reason: ValidationReason::Unknown(String::new()),
+            detail,
+        },
+        |v| AccountManagementError::InvalidArgument {
+            field: v.field,
+            reason: ValidationReason::from_wire(&v.reason),
+            detail: v.description,
+        },
+    )
 }
 
 #[cfg(test)]

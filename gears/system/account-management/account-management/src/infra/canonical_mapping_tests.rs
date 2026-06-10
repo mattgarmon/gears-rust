@@ -11,15 +11,12 @@ use toolkit_canonical_errors::{CanonicalError, Problem};
 
 use super::classify_db_err_to_domain;
 use crate::domain::error::DomainError;
-use crate::infra::sdk_error_mapping::account_management_error_to_canonical;
 
-/// Route a `DomainError` through the two-hop pipeline
-/// (`DomainError → AccountManagementError → CanonicalError`). The
-/// temporary `From<DomainError> for CanonicalError` bridge has been
-/// retired; tests that pin the wire-envelope shape must drive both
-/// hops explicitly.
+/// Route a `DomainError` through the single canonical ladder
+/// (`From<DomainError> for CanonicalError`, ADR 0005) to pin the
+/// wire-envelope shape these classifier outputs produce.
 fn canonical_of(domain: DomainError) -> CanonicalError {
-    account_management_error_to_canonical(domain.into())
+    CanonicalError::from(domain)
 }
 
 #[test]

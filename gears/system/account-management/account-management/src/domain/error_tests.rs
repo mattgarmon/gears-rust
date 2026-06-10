@@ -1,27 +1,27 @@
-//! Tests for the [`DomainError`] → [`AccountManagementError`] boundary mapping.
+//! Tests for the [`DomainError`] → [`CanonicalError`] boundary and the
+//! [`AccountManagementError`] projection over it.
 //!
-//! Validates the AIP-193 category, HTTP status code, and key context
-//! fields (`resource_type`, `resource`, `retry_after_seconds`, `reason`)
-//! produced by `From<DomainError> for AccountManagementError`. Renaming
-//! any of these mappings is a public-contract break — the tests below
-//! are the regression line for the SDK enum shape.
-//!
-//! Boundary mapping lives in [`crate::infra::sdk_error_mapping`] (kept
-//! out of `domain/` so the DB-aware classification ladder can reach
-//! `sea_orm`/`toolkit_db` without violating Dylint domain-layer rules).
-//! The tests still live alongside `domain/error` because they pin the
-//! shape of the public contract.
-//!
-//! The companion `infra::sdk_error_mapping_tests` exercise the second
-//! hop (`AccountManagementError → CanonicalError`) and the full
-//! composition end-to-end; this file covers the SDK enum shape that
-//! consumers pattern-match on directly.
+//! Per ADR 0005 the single ladder is `From<DomainError> for CanonicalError`
+//! in [`crate::infra::sdk_error_mapping`]; the SDK's typed
+//! [`AccountManagementError`] is a `From<CanonicalError>` view. These
+//! tests pin the projected shape consumers pattern-match on (variant,
+//! carried identifiers, retry hint). The companion
+//! `infra::sdk_error_mapping_tests` pin the full `CanonicalError`
+//! envelope (category, status, resource type, context tokens).
 
 use std::time::Duration;
 
 use account_management_sdk::error::AccountManagementError;
+use toolkit_canonical_errors::CanonicalError;
 
 use super::DomainError;
+
+/// Drive a `DomainError` through the production path consumers see:
+/// the single canonical ladder, then the opt-in SDK projection.
+#[allow(clippy::needless_pass_by_value)]
+fn project(d: DomainError) -> AccountManagementError {
+    AccountManagementError::from(CanonicalError::from(d))
+}
 
 /// Convenience: read the test-only `DomainError::http_status()`
 /// helper. Pinned to the canonical AIP-193 table — the production
@@ -125,16 +125,17 @@ fn already_exists_maps_to_409() {
 
 #[test]
 fn aborted_maps_to_409_with_reason() {
-    let ame: AccountManagementError = DomainError::Aborted {
+    let ame = project(DomainError::Aborted {
         reason: "SERIALIZATION_CONFLICT".into(),
         detail: "serialization conflict; retry budget exhausted".into(),
-    }
-    .into();
-    assert!(matches!(
-        ame,
-        AccountManagementError::SerializationConflict { .. }
-    ));
-    assert!(ame.is_retryable());
+    });
+    let AccountManagementError::Aborted { reason, .. } = ame else {
+        panic!("expected Aborted projection, got {ame:?}");
+    };
+    assert_eq!(
+        reason,
+        account_management_sdk::reason::aborted::SERIALIZATION_CONFLICT
+    );
 }
 
 #[test]
@@ -197,36 +198,50 @@ fn internal_maps_to_500() {
 
 #[test]
 fn not_found_carries_resource_id() {
-    let ame: AccountManagementError = DomainError::NotFound {
+    let ame = project(DomainError::NotFound {
         detail: "tenant 7 not found".into(),
         resource: "7".into(),
-    }
-    .into();
-    let AccountManagementError::TenantNotFound { tenant_id, .. } = &ame else {
-        panic!("expected TenantNotFound variant");
+    });
+    let AccountManagementError::NotFound {
+        resource_type,
+        name,
+        ..
+    } = &ame
+    else {
+        panic!("expected NotFound projection, got {ame:?}");
     };
-    assert_eq!(tenant_id, "7");
-    assert!(ame.is_not_found());
+    assert_eq!(name, "7");
+    assert_eq!(
+        resource_type,
+        account_management_sdk::gts::TENANT_RESOURCE_TYPE
+    );
 }
 
 #[test]
 fn metadata_entry_not_found_carries_chained_type_id() {
-    // `MetadataEntryNotFound` carries the chained `type_id` the
-    // caller supplied so the canonical envelope surfaces it as
-    // `resource_name`.
-    let ame: AccountManagementError = DomainError::MetadataEntryNotFound {
+    // The chained `type_id` the caller supplied surfaces as the
+    // canonical `resource_name`, projected onto `NotFound.name`, under
+    // the metadata resource type.
+    let ame = project(DomainError::MetadataEntryNotFound {
         detail: "schema billing.v1 missing".into(),
         entry: "gts.cf.core.am.tenant_metadata.v1~cf.core.billing.usage.v1~".into(),
-    }
-    .into();
-    let AccountManagementError::MetadataEntryNotFound { entry, .. } = &ame else {
-        panic!("expected MetadataEntryNotFound variant");
+    });
+    let AccountManagementError::NotFound {
+        resource_type,
+        name,
+        ..
+    } = &ame
+    else {
+        panic!("expected NotFound projection, got {ame:?}");
     };
     assert_eq!(
-        entry,
+        name,
         "gts.cf.core.am.tenant_metadata.v1~cf.core.billing.usage.v1~"
     );
-    assert!(ame.is_not_found());
+    assert_eq!(
+        resource_type,
+        account_management_sdk::gts::TENANT_METADATA_RESOURCE_TYPE
+    );
 }
 
 // Drift between `#[resource_error("...")]` macro literals in
@@ -240,19 +255,32 @@ fn metadata_entry_not_found_carries_chained_type_id() {
 
 #[test]
 fn service_unavailable_propagates_retry_after_seconds() {
-    let ame: AccountManagementError = DomainError::ServiceUnavailable {
+    let ame = project(DomainError::ServiceUnavailable {
         detail: "idp warming up".into(),
         retry_after: Some(Duration::from_secs(15)),
         cause: None,
-    }
-    .into();
-    assert_eq!(ame.retry_after_seconds(), Some(15));
+    });
+    let AccountManagementError::Unavailable {
+        retry_after_seconds,
+        ..
+    } = ame
+    else {
+        panic!("expected Unavailable projection, got {ame:?}");
+    };
+    assert_eq!(retry_after_seconds, Some(15));
 }
 
 #[test]
 fn service_unavailable_without_hint_omits_retry_after() {
-    let ame: AccountManagementError = DomainError::service_unavailable("db down").into();
-    assert!(ame.retry_after_seconds().is_none());
+    let ame = project(DomainError::service_unavailable("db down"));
+    let AccountManagementError::Unavailable {
+        retry_after_seconds,
+        ..
+    } = ame
+    else {
+        panic!("expected Unavailable projection, got {ame:?}");
+    };
+    assert!(retry_after_seconds.is_none());
 }
 
 // ---------------------------------------------------------------------------

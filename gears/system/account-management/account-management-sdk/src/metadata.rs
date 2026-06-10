@@ -4,7 +4,7 @@
 //! [`crate::AccountManagementClient`] trait boundary; validation of
 //! the chained `type_id` string (root-segment check, schema-shape
 //! check, GTS-syntax validation) lives **inside** the AM impl crate
-//! and surfaces as [`AccountManagementError::InvalidRequest`](crate::AccountManagementError::InvalidRequest) at the boundary.
+//! and surfaces as [`AccountManagementError::InvalidArgument`](crate::AccountManagementError::InvalidArgument) at the boundary.
 //! The SDK does not expose a wrapper newtype, the deterministic
 //! `UUIDv5` derivation, or the per-schema validation error vocabulary —
 //! those are AM internal concerns hidden behind the trait surface.
@@ -111,14 +111,14 @@ impl MetadataEntry {
 /// The SDK side does **no** validation: `type_id` chain-shape is
 /// checked by AM impl on entry, and `value` non-null + GTS-schema
 /// validation runs there too. Failures surface as
-/// [`AccountManagementError::InvalidRequest`](crate::AccountManagementError::InvalidRequest).
+/// [`AccountManagementError::InvalidArgument`](crate::AccountManagementError::InvalidArgument).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct UpsertMetadataRequest {
     /// Chained `gts.cf.core.am.tenant_metadata.v1~vendor.app.foo.v1~`
     /// id. Typed via [`GtsTypeId`] (platform-standard marker); the
     /// chain-shape / namespace-root validation runs server-side and
-    /// surfaces as [`AccountManagementError::InvalidRequest`](crate::AccountManagementError::InvalidRequest) on failure. The
+    /// surfaces as [`AccountManagementError::InvalidArgument`](crate::AccountManagementError::InvalidArgument) on failure. The
     /// JSON wire shape stays a plain string.
     pub type_id: GtsTypeId,
     /// Payload to upsert. Must be non-null and conform to the
@@ -127,9 +127,9 @@ pub struct UpsertMetadataRequest {
     /// Optimistic-lock precondition. **Opt-in** — `None` retains the
     /// last-write-wins behaviour; `Some(v)` requires the
     /// stored row's [`MetadataEntry::version`] to equal `v`, and
-    /// surfaces [`AccountManagementError::MetadataVersionMismatch`](crate::AccountManagementError::MetadataVersionMismatch)
-    /// (HTTP 409) when the stored version drifted between the
-    /// caller's read and write.
+    /// surfaces [`AccountManagementError::Aborted`](crate::AccountManagementError::Aborted)
+    /// (HTTP 409, `reason = "METADATA_VERSION_MISMATCH"`) when the
+    /// stored version drifted between the caller's read and write.
     ///
     /// Convention for a new entry: the row doesn't exist yet, so the
     /// "current version" is conceptually `0` — passing
@@ -156,7 +156,8 @@ impl UpsertMetadataRequest {
     /// Builder: attach an optimistic-lock precondition. The write
     /// succeeds only if the stored row's `version` equals `v`; a
     /// drift surfaces as
-    /// [`AccountManagementError::MetadataVersionMismatch`](crate::AccountManagementError::MetadataVersionMismatch).
+    /// [`AccountManagementError::Aborted`](crate::AccountManagementError::Aborted)
+    /// (`reason = "METADATA_VERSION_MISMATCH"`).
     #[must_use]
     pub const fn with_expected_version(mut self, v: i64) -> Self {
         self.expected_version = Some(v);

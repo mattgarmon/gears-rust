@@ -17,12 +17,13 @@ name = "account_management_sdk"
 workspace = true
 
 [dependencies]
-# AM's public inter-module error surface is `AccountManagementError`
-# (see src/error.rs) — a flat thiserror enum mirroring the AIP-193
-# categories. The impl crate maps `DomainError → AccountManagementError`
-# at the trait boundary and lifts further to
-# `toolkit_canonical_errors::CanonicalError` at the REST boundary; the
-# SDK itself stays decoupled from the canonical-errors crate.
+# Per ADR 0005 the trait boundary is `CanonicalError`; the SDK ships
+# `AccountManagementError` as an opt-in `From<CanonicalError>`
+# projection (see src/error.rs). The single AIP-193 ladder
+# (`From<DomainError> for CanonicalError`) lives in the impl crate's
+# `infra::sdk_error_mapping`; this SDK depends on the canonical-errors
+# crate to project that envelope into the typed view.
+toolkit-canonical-errors = { workspace = true }
 thiserror = { workspace = true }
 
 # IdP provisioner contract (trait + DTO) consumed by AM and implemented
