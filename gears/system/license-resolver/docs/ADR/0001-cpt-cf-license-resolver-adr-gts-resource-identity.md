@@ -1,9 +1,9 @@
 ---
 status: accepted
-date: 2026-06-08
+date: 2026-06-11
 ---
 
-# ADR-0001: Resource Identity as a Single GTS Instance ID
+# ADR-0001: Subject and Resource Identity as GTS Type plus Optional Instance ID
 
 <!-- toc -->
 
@@ -14,8 +14,8 @@ date: 2026-06-08
   - [Consequences](#consequences)
   - [Confirmation](#confirmation)
 - [Pros and Cons of the Options](#pros-and-cons-of-the-options)
-  - [(a) Single `GtsInstanceId`](#a-single-gtsinstanceid)
-  - [(b) Split `ResourceRef`](#b-split-resourceref)
+  - [(a) GTS type (required) + optional instance id](#a-gts-type-required--optional-instance-id)
+  - [(b) Single `GtsInstanceId`](#b-single-gtsinstanceid)
   - [(c) Free-form / opaque string](#c-free-form--opaque-string)
 - [More Information](#more-information)
 - [Traceability](#traceability)
@@ -27,98 +27,88 @@ date: 2026-06-08
 ## Context and Problem Statement
 
 License resolver answers "is THIS resource granted to THIS subject?", so every check must carry a stable, unambiguous
-identity for the resource being licensed. A licensable resource comes in two kinds: a **named** resource — a stable,
-human-meaningful instance such as a specific feature — and an **opaque** resource — a runtime instance addressed by a
-UUID, for example a content item. Resources are heterogeneous and externally owned (a feature type is owned by the
-feature module, a content type by the content module, etc.). The contract must represent "resource type + id" so that
-both kinds are expressible. The Global Type System (GTS) already provides exactly this shape: an **instance identifier**
-joins a type chain and an instance segment with `~`, and supports both well-known/named instances (§2.3) and anonymous
-instances addressed by UUID (§2.4, combined notation). How should the cross-module contract represent resource identity?
+identity for both sides. Checks come in two kinds. A **specific-instance** check targets one concrete object — a
+**named** instance (a stable, human-meaningful name such as a specific feature) or an **opaque** instance (addressed by
+a UUID, e.g. a content item). A **whole-type** check targets an entire class before any instance id exists — e.g.
+gating a `POST` that creates a new resource of that type, where the id is not yet known. Subject and resource domain
+types are heterogeneous and externally owned (a feature type is owned by the feature module, a user type by its
+identity module, etc.). Within the licensing contract objects (`cpt-cf-license-resolver-adr-typed-licensing-contracts`),
+how should the Subject and Resource identity fields represent the domain type and id so that both check kinds are
+expressible?
 
 ## Decision Drivers
 
-* A GTS **instance identifier** already combines a type chain and an instance segment — i.e. it is exactly "resource
-  type + id" expressed as a single value — and both resource kinds (named, opaque) map onto it directly.
-* Both forms must be expressible: named/well-known (§2.3) and opaque/anonymous-by-UUID (§2.4 combined notation).
-* This is a contract consumed by other modules, so the identity should be **constrained to a valid GTS instance
-  identifier**, not an arbitrary string.
-* The `resource_type` must stay referenceable and derivable from the identity, so the backend can validate it and the
-  resolver can reference it.
-* Which resources can be licensed — the catalog of licensable resource types and the rules for validating them — is
-  determined by the backend licensing service (a license enforcement/management service) that implements the resolver
-  plugin, not by the resolver core, which only references resource types by GTS type path and never defines or validates
-  them.
-* There is no listing/enumeration in scope, so a separate discrete `resource_type` field (useful for wildcard list
-  filtering) is not needed.
+* Both check kinds must be expressible: a specific instance (named or UUID-addressed) and a whole type (no instance id
+  exists yet, e.g. on `POST`).
+* The domain type must always be present and referenceable — for both subject and resource — so telemetry can be
+  dimensioned by it and rules can target it.
+* This is a contract consumed by other modules, so identity components should be constrained to valid GTS concepts, not
+  arbitrary strings.
+* What a backend *answers* for an id-less (whole-type) check is the backend's policy, not the contract's: the engine
+  validates shape, the plugin decides the outcome.
+* There is no listing/enumeration in scope, so no wildcard/set expressions are needed in the identity.
 
 ## Considered Options
 
-* (a) A single `GtsInstanceId` resource identity (well-known/named §2.3, or UUID-based anonymous §2.4)
-* (b) A split `ResourceRef { resource_type: GtsTypeId, resource_id }` carrying type and id as separate fields
+* (a) **GTS type (required) + optional instance id** for both Subject and Resource: `type` is a GTS type id; `id` is an
+  optional stable well-known name or UUID
+* (b) A single GTS **instance** identifier (`GtsInstanceId`) always carrying type + id combined via `~`
 * (c) A free-form / opaque string with no GTS structure
 
 ## Decision Outcome
 
-Chosen option: **(a) a single `GtsInstanceId`** as the resource identity. The check contract identifies a resource by
-one GTS instance identifier whose instance segment is either a well-known name (§2.3, e.g.
-`…feature.v1~cf.<vendor>._.somename.v1`) or a UUID (§2.4 combined notation, e.g. `…content.v1~<uuid>`). This covers both
-resource kinds — named and opaque — in a single value, and constrains the contract to a valid GTS instance identifier
-rather than an arbitrary string. The resolver core does not validate the type or own the licensable-type catalog: the
-full instance id is propagated to the selected backend plugin (the licensing service), which owns those, validates the
-resource, and answers the check.
+Chosen option: **(a) GTS type (required) + optional instance id**. Inside the licensing Subject and Resource contract
+objects, identity is carried as two fields: `type` — the domain GTS type (e.g. `gts.cf.<pkg>.content.v1~`), always
+present — and an optional `id` — a stable well-known name (e.g. a named feature) or a UUID (e.g. a content item).
+Without the `id` the check asks about the whole type; with it, about a specific instance. The engine validates the
+shape (type present, id well-formed when present); how an id-less check is answered is the backend plugin's policy.
 
-Option (b) was rejected: once listing/enumeration is out of scope, a discrete `resource_type` field carries no advantage
-for a *concrete-instance* check and just splits one identity across two fields (the type is derivable from the instance
-id anyway). Note `authz-resolver` splits because its `resource_type` is a *set/wildcard expression* for permissions, not
-a concrete instance — a different problem. Option (c) was rejected because dropping GTS structure loses the typed
-identity (nothing can validate the type) and lets callers pass ambiguous identifiers across a shared contract.
+Option (b) was rejected because an instance identifier denotes exactly one concrete instance by definition (GTS rule:
+types end with `~`, instances never do) — it cannot express a whole-type entitlement, which the `POST`-style use case
+requires. Option (c) was rejected because dropping GTS structure loses the typed identity (nothing can validate the
+type) and lets callers pass ambiguous identifiers across a shared contract.
 
 ### Consequences
 
-* The SDK identifies a resource by a `GtsInstanceId` (named §2.3 or UUID-based §2.4). A helper may build one from a
-  separate type + id and parse one back.
-* The resolver core never declares, owns, or validates resource types; it forwards the resource identity
-  (`GtsInstanceId`) to the backend unchanged.
-* The backend licensing service (the plugin) determines which resource types are licensable and validates the resource;
-  the full `GtsInstanceId` is propagated to it unchanged and it answers the check.
-* Telemetry is dimensioned by the **derived type** (bounded cardinality); the full instance id is never used as a label.
-* For opaque resources, the `type~<uuid>` form is the GTS §2.4 *combined* notation (the spec's optional form, not the
-  storage-canonical split); this is an accepted trade-off for a single-value contract identifier.
+* The licensing base types carry identity as two fields — required `type`, optional `id` — for both Subject and
+  Resource. Code MAY provide helpers converting to/from a combined GTS instance identifier where convenient; that is an
+  implementation detail, not part of the contract.
+* The resolver references externally-owned domain types only; it validates their *presence and form* (per
+  `cpt-cf-license-resolver-adr-typed-licensing-contracts`), while which types are licensable — and how an id-less check
+  is answered — is owned by the backend licensing service.
+* Telemetry is dimensioned by the domain type and the contract type (bounded cardinality); the instance id is never
+  used as a label.
 
 ### Confirmation
 
-Confirmed by design and code review of the SDK contract (the resource identity is a `GtsInstanceId`; a helper
-builds/parses it), plus unit tests asserting that named (§2.3) and UUID (§2.4) forms both round-trip and that the full
-instance id is forwarded to the backend unchanged. (Resource-type licensability and validation are the backend's
-concern, tested there — not in the resolver core.)
+Confirmed by design and code review of the licensing base types (identity is a required GTS `type` plus an optional
+`id` on both Subject and Resource), plus unit tests asserting that the id-absent and id-present forms both pass
+validation and are forwarded to the backend unchanged, and that a missing `type` is rejected as a validation error.
 
 ## Pros and Cons of the Options
 
-### (a) Single `GtsInstanceId`
+### (a) GTS type (required) + optional instance id
 
-One GTS instance identifier carries type and id via `~`.
+Two contract fields: the domain GTS type, and an optional instance name/UUID.
 
-* Good, because it is the literal GTS expression of "resource type + id" and represents both named and opaque resources
-  in one value.
-* Good, because it constrains the contract to a valid GTS instance identifier — appropriate for a cross-module contract.
-* Good, because both named (§2.3) and UUID (§2.4) forms are expressible in one type, while the `resource_type` stays
-  derivable from it and its licensability and validation stay with the backend licensing service.
-* Neutral, because callers holding a separate type + id compose them into the instance id (a helper covers this).
-* Bad, because for opaque resources it uses the §2.4 *combined* notation rather than the storage-canonical
-  `{type, UUID}` split.
+* Good, because both check kinds are expressible — whole-type (id absent) and specific instance (id present) — without
+  sentinel values or flags.
+* Good, because the contract states intent directly: the type is always there to validate and dimension by; the id is
+  present exactly when a concrete instance is meant.
+* Good, because the type stays GTS-typed and registry-validatable, externally-owned types are referenced in a
+  structured way, and the id stays a simple natural key (name or UUID).
+* Neutral, because callers holding a combined GTS instance identifier split it into the two fields (a trivial helper).
+* Bad, because a caller could omit the id where a specific instance was intended; the backend must decide what an
+  id-less check means for it.
 
-### (b) Split `ResourceRef`
+### (b) Single `GtsInstanceId`
 
-Type and id as separate fields.
+One GTS instance identifier always carrying type and id via `~`.
 
-* Good, because the type is a discrete field, trivially validatable and usable as a telemetry dimension.
-* Good, because for opaque/UUID resources it is GTS's canonical shape (§2.4 keeps type and UUID separate), so it carries
-  no combined-notation trade-off.
-* Good, because it mirrors `authz-resolver`'s `Resource { resource_type, id }`, so it is familiar to callers and easy to
-  reuse.
-* Bad, because a concrete-instance check needs one identity, not two fields; the discrete type adds value mainly for
-  wildcard *list* filtering, which is out of scope.
-* Bad, because it diverges from the natural single-value `type~id` GTS instance-identifier notation.
+* Good, because one value carries the whole identity for concrete-instance checks.
+* Bad, because an instance identifier denotes one concrete instance by definition — a whole-type entitlement (id not
+  yet known, e.g. on `POST`) is not expressible without overloading the notation with sentinels or flags.
+* Bad, because callers and backends must parse the combined string to recover the type for validation and telemetry.
 
 ### (c) Free-form / opaque string
 
@@ -131,10 +121,10 @@ An unstructured string with no GTS typing.
 
 ## More Information
 
-GTS guidelines `guidelines/GTS.md` §2.3 (well-known instances) and §2.4 (anonymous instances, with optional combined
-`type~uuid` notation). Both a named resource and an opaque (UUID-addressed) resource are single GTS instance
-identifiers. The resolver references externally-owned resource types only; any types it owns (e.g. its plugin spec) live
-under `gts.cf.bss.licensing.*`.
+GTS guidelines `guidelines/GTS.md`: §2.1/§2.2 define the type identifiers (ending with `~`) used in the `type` field;
+§2.3/§2.4 describe GTS instance identifiers — the combined notation considered and rejected as option (b). The
+contract objects these fields live in are decided by
+`cpt-cf-license-resolver-adr-typed-licensing-contracts`; the resolver's own types live under `gts.cf.core.lic.*`.
 
 ## Traceability
 
@@ -143,9 +133,10 @@ under `gts.cf.bss.licensing.*`.
 
 This decision directly addresses the following requirements or design elements:
 
-* `cpt-cf-license-resolver-fr-resource-identity` — defines resource identity as a single `GtsInstanceId` (named or
-  UUID-based), which this ADR records as canonical.
-* `cpt-cf-license-resolver-fr-subject-identity` — the subject + resource pair of a check relies on this resource shape.
+* `cpt-cf-license-resolver-fr-resource-identity` — defines resource identity as the domain GTS type (required) plus an
+  optional instance id, which this ADR records as canonical.
+* `cpt-cf-license-resolver-fr-subject-identity` — subject identity follows the same shape inside the Subject contract
+  object.
 * `cpt-cf-license-resolver-principle-gts-typed-resource-identity` — this ADR is the rationale for that DESIGN principle.
-* `cpt-cf-license-resolver-constraint-gts-via-types-registry` — the type derived from the instance id is what gets
-  validated against the registry.
+* `cpt-cf-license-resolver-constraint-gts-via-types-registry` — the domain type is what gets validated against the
+  registry.

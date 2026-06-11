@@ -115,7 +115,7 @@ plugins).
 
 Mirrors `tenant-resolver` (`TenantResolverPluginSpecV1`) and `authz-resolver` (`AuthZResolverPluginSpecV1`) discovery
 and selection. The plugin spec `LicenseResolverPluginSpecV1` is registered under the toolkit plugin base /
-`gts.cf.bss.licensing.*`. See `guidelines/GTS.md` for the types-registry and plugin-spec model.
+`gts.cf.core.lic.*`. See `guidelines/GTS.md` for the types-registry and plugin-spec model.
 
 ## Traceability
 
