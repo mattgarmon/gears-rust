@@ -90,6 +90,8 @@ members = [
     "gears/system/oagw/oagw",
     "gears/system/oagw/oagw-sdk",
     "gears/system/usage-collector/usage-collector-sdk",
+    "gears/system/usage-collector/usage-collector",
+    "gears/system/usage-collector/plugins/noop-usage-collector-plugin",
     "gears/mini-chat/mini-chat-sdk",
     "gears/mini-chat/mini-chat",
 ]
@@ -272,6 +274,7 @@ tenant-resolver-sdk = { package = "cf-gears-tenant-resolver-sdk", version = "0.3
 authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", version = "0.3.8", path = "gears/system/authz-resolver/authz-resolver-sdk" }
 resource-group-sdk = { package = "cf-gears-resource-group-sdk", version = "0.1.5", path = "gears/system/resource-group/resource-group-sdk" }
 oagw-sdk = { package = "cf-gears-oagw-sdk", version = "0.5.2", path = "gears/system/oagw/oagw-sdk" }
+usage-collector-sdk = { package = "cf-gears-usage-collector-sdk", version = "0.1.0", path = "gears/system/usage-collector/usage-collector-sdk" }
 
 # credstore
 credstore-sdk = { package = "cf-gears-credstore-sdk", version = "0.1.25", path = "gears/credstore/credstore-sdk" }

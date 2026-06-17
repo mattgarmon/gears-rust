@@ -1,11 +1,4 @@
 //! Structural unit tests for the foundation SDK models.
-//!
-//! Scope is intentionally narrow: only the structural invariants that the SDK
-//! itself enforces — `gts_id` must derive from
-//! `gts.cf.core.uc.usage_record.v1~`, [`UsageKind`] is a closed serde enum
-//! plus a hand-rolled `FromStr`, [`UsageTypeGtsId`] routes its `Deserialize`
-//! through the same constructor used elsewhere, and the wire round-trip for
-//! [`UsageType`] / [`UsageRecord`] carries the documented field shape.
 
 use std::str::FromStr;
 
@@ -17,10 +10,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     AggregationBucket, AggregationDimension, AggregationOp, AggregationResult, AggregationSpec,
-    IdempotencyKey, MetadataFilter, MetadataKey, ResourceRef, SubjectRef, TimeWindow, UsageKind,
-    UsageRecord, UsageRecordStatus, UsageType, UsageTypeGtsId,
+    IdempotencyKey, MetadataFilter, MetadataKey, ResourceRef, SubjectRef, UsageKind, UsageRecord,
+    UsageRecordStatus, UsageType, UsageTypeGtsId,
 };
 use crate::error::UsageCollectorError;
+use crate::reason::ValidationReason;
 
 fn metadata_key(value: &str) -> MetadataKey {
     MetadataKey::new(value).expect("test fixture supplies a valid metadata key")
@@ -96,7 +90,13 @@ fn usage_type_gts_id_rejects_unknown_base() {
     let err = UsageTypeGtsId::new("gts.cf.core.metric.v1~z")
         .expect_err("non-usage_record base must be rejected");
     assert!(
-        matches!(err, UsageCollectorError::InvalidUsageTypeGtsId { .. }),
+        matches!(
+            err,
+            UsageCollectorError::InvalidArgument {
+                reason: ValidationReason::InvalidBaseGtsId,
+                ..
+            }
+        ),
         "expected InvalidUsageTypeGtsId, got {err:?}"
     );
 }
@@ -109,7 +109,10 @@ fn usage_type_gts_id_rejects_legacy_counter_base() {
         .expect_err("legacy counter base must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidUsageTypeGtsId { .. }
+        UsageCollectorError::InvalidArgument {
+            reason: ValidationReason::InvalidBaseGtsId,
+            ..
+        }
     ));
 }
 
@@ -118,7 +121,10 @@ fn usage_type_gts_id_rejects_empty_id() {
     let err = UsageTypeGtsId::new("").expect_err("empty id must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidUsageTypeGtsId { .. }
+        UsageCollectorError::InvalidArgument {
+            reason: ValidationReason::InvalidBaseGtsId,
+            ..
+        }
     ));
 }
 
@@ -132,7 +138,10 @@ fn usage_type_gts_id_rejects_bare_base() {
         .expect_err("bare base must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidUsageTypeGtsId { .. }
+        UsageCollectorError::InvalidArgument {
+            reason: ValidationReason::InvalidBaseGtsId,
+            ..
+        }
     ));
 }
 
@@ -146,7 +155,10 @@ fn usage_type_gts_id_rejects_derived_type_id_with_trailing_tilde() {
         .expect_err("trailing `~` (a type id, not an instance id) must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidUsageTypeGtsId { .. }
+        UsageCollectorError::InvalidArgument {
+            reason: ValidationReason::InvalidBaseGtsId,
+            ..
+        }
     ));
 }
 
@@ -159,7 +171,10 @@ fn usage_type_gts_id_rejects_whitespace_in_segment() {
         .expect_err("whitespace in segment must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidUsageTypeGtsId { .. }
+        UsageCollectorError::InvalidArgument {
+            reason: ValidationReason::InvalidBaseGtsId,
+            ..
+        }
     ));
 }
 
@@ -174,7 +189,10 @@ fn usage_type_gts_id_rejects_malformed_derivation_segment() {
         .expect_err("non-GTS-shaped derivation segment must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidUsageTypeGtsId { .. }
+        UsageCollectorError::InvalidArgument {
+            reason: ValidationReason::InvalidBaseGtsId,
+            ..
+        }
     ));
 }
 
@@ -188,7 +206,10 @@ fn usage_type_gts_id_rejects_consecutive_tildes() {
         .expect_err("consecutive tildes must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidUsageTypeGtsId { .. }
+        UsageCollectorError::InvalidArgument {
+            reason: ValidationReason::InvalidBaseGtsId,
+            ..
+        }
     ));
 }
 
@@ -205,7 +226,10 @@ fn usage_type_gts_id_rejects_deep_derivation_chain() {
     .expect_err("deep-derivation chain must be rejected - only direct base derivation is admitted");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidUsageTypeGtsId { .. }
+        UsageCollectorError::InvalidArgument {
+            reason: ValidationReason::InvalidBaseGtsId,
+            ..
+        }
     ));
 }
 
@@ -270,7 +294,7 @@ fn usage_kind_from_str_rejects_unknown_variant_as_validation_error() {
     let err =
         UsageKind::from_str("histogram").expect_err("unknown kind must be rejected by FromStr");
     assert!(
-        matches!(err, UsageCollectorError::InvalidUsageKind { ref raw } if raw == "histogram"),
+        matches!(err, UsageCollectorError::InvalidArgument { ref field, ref detail, .. } if field == "kind" && detail.contains("histogram")),
         "expected InvalidUsageKind, got {err:?}"
     );
 }
@@ -282,29 +306,18 @@ fn usage_kind_from_str_rejects_unknown_variant_as_validation_error() {
 #[test]
 fn usage_type_serde_round_trip_carries_kind_and_metadata_fields() {
     let usage_type = sample_usage_type();
-    let json_str = serde_json::to_string(&usage_type).expect("serialize UsageType");
-    let decoded: UsageType = serde_json::from_str(&json_str).expect("deserialize UsageType");
+    let value = serde_json::to_value(&usage_type).expect("serialize UsageType");
+    assert_eq!(
+        value,
+        json!({
+            "gts_id": SAMPLE_USAGE_TYPE_ID,
+            "kind": "counter",
+            "metadata_fields": ["region", "tier"],
+        }),
+        "wire shape MUST be exactly {{gts_id, kind, metadata_fields}} with `kind` lowercase",
+    );
+    let decoded: UsageType = serde_json::from_value(value).expect("deserialize UsageType");
     assert_eq!(usage_type, decoded);
-    assert!(
-        json_str.contains("\"gts_id\""),
-        "wire shape must carry 'gts_id'; got {json_str}"
-    );
-    assert!(
-        json_str.contains("\"kind\""),
-        "wire shape must carry 'kind'; got {json_str}"
-    );
-    assert!(
-        json_str.contains("\"counter\""),
-        "kind must serialize as 'counter'; got {json_str}"
-    );
-    assert!(
-        json_str.contains("\"metadata_fields\""),
-        "wire shape must carry 'metadata_fields'; got {json_str}"
-    );
-    assert!(
-        !json_str.contains("\"created_at\""),
-        "wire shape must NOT carry 'created_at'; got {json_str}"
-    );
 }
 
 #[test]
@@ -448,7 +461,7 @@ fn metadata_filter_new_accepts_non_empty_key_and_values() {
 fn metadata_filter_new_rejects_empty_key() {
     let err = MetadataFilter::new("", ["v"]).expect_err("empty key must be rejected");
     assert!(
-        matches!(err, UsageCollectorError::InvalidMetadataFilter { .. }),
+        matches!(err, UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "metadata_filter"),
         "expected InvalidMetadataFilter, got {err:?}"
     );
 }
@@ -459,7 +472,7 @@ fn metadata_filter_new_rejects_nul_byte_in_key() {
         .expect_err("NUL bytes in key must be rejected for jsonb compatibility");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidMetadataFilter { .. }
+        UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "metadata_filter"
     ));
 }
 
@@ -469,7 +482,7 @@ fn metadata_filter_new_rejects_empty_values() {
         .expect_err("empty values must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidMetadataFilter { .. }
+        UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "metadata_filter"
     ));
 }
 
@@ -508,69 +521,6 @@ fn metadata_filter_deserialize_rejects_unknown_fields() {
     let err = serde_json::from_value::<MetadataFilter>(
         json!({"key": "region", "values": ["v"], "op": "eq"}),
     )
-    .expect_err("unknown field must be rejected at the wire boundary");
-    assert!(err.to_string().contains("unknown field"));
-}
-
-// ---------------------------------------------------------------------------
-// TimeWindow — validated construction + wire shape
-// ---------------------------------------------------------------------------
-
-fn t(seconds: i64) -> time::OffsetDateTime {
-    time::OffsetDateTime::from_unix_timestamp(seconds).expect("valid unix timestamp")
-}
-
-#[test]
-fn time_window_new_accepts_strictly_ordered_bounds() {
-    let w = TimeWindow::new(t(0), t(1)).expect("from < to");
-    assert_eq!(w.from(), t(0));
-    assert_eq!(w.to(), t(1));
-}
-
-#[test]
-fn time_window_new_rejects_equal_bounds() {
-    let err = TimeWindow::new(t(0), t(0)).expect_err("from == to must be rejected");
-    assert!(matches!(err, UsageCollectorError::InvalidTimeRange { .. }));
-}
-
-#[test]
-fn time_window_new_rejects_inverted_bounds() {
-    let err = TimeWindow::new(t(1), t(0)).expect_err("from > to must be rejected");
-    assert!(matches!(err, UsageCollectorError::InvalidTimeRange { .. }));
-}
-
-#[test]
-fn time_window_serde_round_trips_rfc3339_bounds() {
-    let w = TimeWindow::new(t(0), t(3600)).expect("valid window");
-    let value = serde_json::to_value(w).expect("serialize TimeWindow");
-    assert_eq!(
-        value,
-        json!({"from": "1970-01-01T00:00:00Z", "to": "1970-01-01T01:00:00Z"}),
-        "wire shape must be {{from, to}} in RFC-3339 UTC; got {value}"
-    );
-    let decoded: TimeWindow = serde_json::from_value(value).expect("round-trip");
-    assert_eq!(decoded, w);
-}
-
-#[test]
-fn time_window_deserialize_routes_through_new() {
-    let err = serde_json::from_value::<TimeWindow>(
-        json!({"from": "1970-01-01T00:00:01Z", "to": "1970-01-01T00:00:00Z"}),
-    )
-    .expect_err("inverted bounds must surface as a serde error");
-    assert!(
-        err.to_string().contains("must be strictly less than"),
-        "serde error must carry the Validation detail; got {err}"
-    );
-}
-
-#[test]
-fn time_window_deserialize_rejects_unknown_fields() {
-    let err = serde_json::from_value::<TimeWindow>(json!({
-        "from": "1970-01-01T00:00:00Z",
-        "to": "1970-01-01T00:00:01Z",
-        "tz": "UTC",
-    }))
     .expect_err("unknown field must be rejected at the wire boundary");
     assert!(err.to_string().contains("unknown field"));
 }
@@ -763,7 +713,7 @@ fn metadata_key_new_rejects_empty_string() {
     let err = MetadataKey::new("").expect_err("empty key must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidMetadataKey { .. }
+        UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "metadata"
     ));
 }
 
@@ -772,7 +722,7 @@ fn metadata_key_new_rejects_nul_byte() {
     let err = MetadataKey::new("bad\0key").expect_err("NUL byte must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidMetadataKey { .. }
+        UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "metadata"
     ));
 }
 
@@ -812,7 +762,7 @@ fn usage_type_metadata_fields_deserialize_rejects_duplicate_member_keys() {
     // `Vec<MetadataKey>` so duplicate keys are rejected at the SDK wire
     // boundary instead of silently collapsing into the `BTreeSet`. The error
     // message carries the offending zero-based index. The REST DTO path
-    // additionally surfaces the typed `UsageCollectorError::DuplicateMetadataField`
+    // additionally surfaces the typed `UsageCollectorError::InvalidArgument`
     // via `metadata_fields_from_wire`.
     let payload = json!({
         "gts_id": SAMPLE_USAGE_TYPE_ID,
@@ -904,7 +854,7 @@ fn idempotency_key_new_accepts_non_empty_string() {
 fn idempotency_key_new_rejects_empty_string() {
     let err = IdempotencyKey::new("").expect_err("empty key must be rejected");
     assert!(
-        matches!(err, UsageCollectorError::InvalidIdempotencyKey { .. }),
+        matches!(err, UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "idempotency_key"),
         "expected InvalidIdempotencyKey, got {err:?}"
     );
 }
@@ -914,7 +864,7 @@ fn idempotency_key_new_rejects_nul_byte() {
     let err = IdempotencyKey::new("bad\0key").expect_err("NUL byte must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidIdempotencyKey { .. }
+        UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "idempotency_key"
     ));
 }
 
@@ -942,7 +892,7 @@ fn idempotency_key_from_str_routes_through_new() {
     let err = IdempotencyKey::from_str("").expect_err("empty key must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidIdempotencyKey { .. }
+        UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "idempotency_key"
     ));
 }
 
@@ -961,7 +911,7 @@ fn resource_ref_new_accepts_non_empty_components() {
 fn resource_ref_new_rejects_empty_resource_id() {
     let err = ResourceRef::new("", "compute.vm").expect_err("empty resource_id must be rejected");
     assert!(
-        matches!(err, UsageCollectorError::InvalidResourceRef { .. }),
+        matches!(err, UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "resource_ref"),
         "expected InvalidResourceRef, got {err:?}"
     );
 }
@@ -971,7 +921,7 @@ fn resource_ref_new_rejects_empty_resource_type() {
     let err = ResourceRef::new("vm-1", "").expect_err("empty resource_type must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidResourceRef { .. }
+        UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "resource_ref"
     ));
 }
 
@@ -981,7 +931,7 @@ fn resource_ref_new_rejects_nul_byte_in_resource_id() {
         .expect_err("NUL byte in resource_id must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidResourceRef { .. }
+        UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "resource_ref"
     ));
 }
 
@@ -991,7 +941,7 @@ fn resource_ref_new_rejects_nul_byte_in_resource_type() {
         .expect_err("NUL byte in resource_type must be rejected");
     assert!(matches!(
         err,
-        UsageCollectorError::InvalidResourceRef { .. }
+        UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "resource_ref"
     ));
 }
 
@@ -1060,28 +1010,36 @@ fn subject_ref_new_accepts_subject_id_and_subject_type() {
 #[test]
 fn subject_ref_new_rejects_empty_subject_id() {
     let err = SubjectRef::new("", Some("user")).expect_err("empty subject_id must be rejected");
-    assert!(matches!(err, UsageCollectorError::InvalidSubjectRef { .. }));
+    assert!(
+        matches!(err, UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "subject_ref")
+    );
 }
 
 #[test]
 fn subject_ref_new_rejects_explicit_empty_subject_type() {
     let err = SubjectRef::new("principal-1", Some(""))
         .expect_err("Some(\"\") subject_type must be rejected");
-    assert!(matches!(err, UsageCollectorError::InvalidSubjectRef { .. }));
+    assert!(
+        matches!(err, UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "subject_ref")
+    );
 }
 
 #[test]
 fn subject_ref_new_rejects_nul_byte_in_subject_id() {
     let err = SubjectRef::new("principal\0bad", Some("user"))
         .expect_err("NUL byte in subject_id must be rejected");
-    assert!(matches!(err, UsageCollectorError::InvalidSubjectRef { .. }));
+    assert!(
+        matches!(err, UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "subject_ref")
+    );
 }
 
 #[test]
 fn subject_ref_new_rejects_nul_byte_in_subject_type() {
     let err = SubjectRef::new("principal-1", Some("user\0bad"))
         .expect_err("NUL byte in subject_type must be rejected");
-    assert!(matches!(err, UsageCollectorError::InvalidSubjectRef { .. }));
+    assert!(
+        matches!(err, UsageCollectorError::InvalidArgument { ref field, .. } if field.as_str() == "subject_ref")
+    );
 }
 
 #[test]

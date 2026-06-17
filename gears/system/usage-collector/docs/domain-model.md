@@ -132,8 +132,8 @@ Invariants:
   gears authorized for the same tenant and UsageType must coordinate key
   allocation. On a collision the outcome is decided by exact equality of the
   caller-supplied canonical fields (`value`, `created_at`, `resource_ref`,
-  `subject_ref`, `metadata`; the match-key tuple and the server-owned
-  `status` are excluded): an exact-equality retry is silently deduplicated,
+  `subject_ref`, `corrects_id`, `metadata`; the match-key tuple and the
+  server-owned `status` are excluded): an exact-equality retry is silently deduplicated,
   and any differing canonical field — including a metadata-only difference —
   is a Conflict that is rejected, not absorbed.
 - The idempotency window is unbounded: the key never expires, has no TTL, and
@@ -247,12 +247,12 @@ UsageType **semantics** — counter or gauge — is carried by the closed
 2026-06-08 amendment. `UsageType` exposes `.is_counter()` / `.is_gauge()`
 predicates that read `self.kind`. `gts_id` derives from the reserved
 abstract base `gts.cf.core.uc.usage_record.v1~` and is independent of
-kind; the two fields are validated separately at the SDK boundary.
+kind; the two fields are validated separately at the handler boundary.
 
 | Field             | Required | Type             | Description                                                                                                                                                                                                                                                                                   |
 | ----------------- | -------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `gts_id`          | Yes      | `UsageTypeGtsId` | Deployment-unique UsageType **type** identifier; the last segment MUST end `~` (GTS type id) and the identifier MUST derive from the reserved abstract base `gts.cf.core.uc.usage_record.v1~` with at least one further `~`-separated segment. Catalog primary key; FK target on usage records. |
-| `kind`            | Yes      | `UsageKind`      | Closed enum (`Counter` / `Gauge`) carrying the row's counter / gauge classification. Wire shape is lowercase (`"counter"` / `"gauge"`); unknown values are rejected by closed-enum serde rejection at the deserialize boundary. Independent of `gts_id`.                                       |
+| `kind`            | Yes      | `UsageKind`      | Closed enum (`Counter` / `Gauge`) carrying the row's counter / gauge classification. Wire shape is lowercase (`"counter"` / `"gauge"`); on the REST surface, unknown values are rejected at the `UsageKind::from_str` handler-boundary parse on the permissive `CreateUsageTypeRequest::kind` DTO field, surfacing the canonical `InvalidArgument` `Problem` envelope. Independent of `gts_id`.                                       |
 | `metadata_fields` | Yes      | array\<string\>  | set of allowed metadata keys; closed shape — record metadata keys MUST be a subset, all values typed as String                                                                                                                                                                                  |
 
 The per-UsageType declared-key set is owned by the usage type's own
@@ -262,7 +262,7 @@ inheritable trait. The gateway extracts the keys named in
 for backend-side `group_by` and `$filter` (see §2.9 and §3). UsageType
 semantics (counter vs gauge) is carried by the closed `UsageKind` enum
 stored on the catalog row's `kind` field; it is independent of `gts_id`
-and validated separately at the SDK boundary.
+and validated separately at the handler boundary.
 
 The usage-record reference to a usage type is the `gts_id` string itself. The
 catalog primary key on the `usage_type_catalog` table is `gts_id`, and the FK
@@ -308,8 +308,9 @@ from the reserved abstract base `USAGE_RECORD_BASE = "gts.cf.core.uc.usage_recor
 further `~`-separated derivation segment. The newtype is the validation
 point on REST `Json<UsageType>` deserialization at
 `POST /usage-collector/v1/usage-types`. The `kind` field is validated
-independently as a closed `UsageKind` enum at the serde deserialize
-boundary.
+independently by parsing the permissive `CreateUsageTypeRequest::kind`
+string through `UsageKind::from_str` at the handler boundary (unknown
+values rejected).
 
 Invariants:
 
@@ -318,12 +319,13 @@ Invariants:
   `gts.cf.core.uc.usage_record.v1~` with at least one further `~`-separated
   segment. Identifiers that do not satisfy that derivation (or are
   non-type identifiers) are rejected at the `UsageTypeGtsId::deserialize`
-  boundary and surface on the REST path as a structured `400` `Problem`
-  envelope (`context.reason="invalid_base_gts_id"`).
+  boundary and surface on the REST path as a structured `400` `InvalidArgument`
+  `Problem` (`field_violations[0].field="gts_id"`, `.reason="INVALID_BASE_GTS_ID"`).
 - UsageType semantics (counter / gauge) is carried by the closed
   `UsageKind` enum on the catalog row's `kind` field per ADR 0012's
-  2026-06-08 amendment; registration validates `kind` as a closed enum
-  at the serde deserialize boundary (unknown values rejected). `gts_id`
+  2026-06-08 amendment; registration validates `kind` via the
+  `UsageKind::from_str` handler-boundary parse on the permissive
+  `CreateUsageTypeRequest::kind` field (unknown values rejected). `gts_id`
   and `kind` are independent — there is no "wrong kind for this gts_id"
   failure mode. Compensation is counter-only: a gauge UsageType paired
   with a record carrying `corrects_id` is rejected before persistence
@@ -371,8 +373,8 @@ Invariants:
 - A same-key submission with the same `(tenant_id, gts_id,
 idempotency_key)` is resolved by exact equality of the caller-supplied
   canonical fields (`value`, `created_at`, `resource_ref`, `subject_ref`,
-  `metadata`; the match-key tuple and the server-owned `id` and `status`
-  are excluded). An exact-equality retry is silently deduplicated; any
+  `corrects_id`, `metadata`; the match-key tuple and the server-owned `uuid`
+  and `status` are excluded). An exact-equality retry is silently deduplicated; any
   differing canonical field — including a metadata-only difference — is a
   Conflict that is rejected fail-closed (surfaced on the wire as the
   `idempotency_conflict` reason), never silently dropped.

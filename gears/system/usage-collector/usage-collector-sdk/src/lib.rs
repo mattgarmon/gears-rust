@@ -4,9 +4,9 @@
 //! - [`UsageCollectorPluginV1`] — storage plugin SPI trait.
 //! - [`UsageCollectorPluginSpecV1`] — GTS plugin spec for discovery/binding.
 //! - Domain models: [`UsageType`], [`UsageTypeGtsId`], [`UsageRecord`],
-//!   [`AggregationResult`], [`ResourceRef`], [`SubjectRef`], [`TimeWindow`]
-//!   (validated `[from, to)`), and the aggregation surface ([`AggregationOp`],
-//!   [`AggregationDimension`], [`AggregationSpec`], [`AggregationBucket`]).
+//!   [`AggregationResult`], [`ResourceRef`], [`SubjectRef`], and the
+//!   aggregation surface ([`AggregationOp`], [`AggregationDimension`],
+//!   [`AggregationSpec`], [`AggregationBucket`]).
 //!   List pagination uses [`toolkit_odata::ODataQuery`]
 //!   / [`toolkit_odata::Page`]. The filterable-field schema for
 //!   `list_usage_records` is declared by [`UsageRecordQuery`] (macro-derived
@@ -23,14 +23,16 @@ pub mod error;
 pub mod gts;
 pub mod models;
 pub mod plugin_api;
+pub mod reason;
 
 pub use api::UsageCollectorClientV1;
 pub use error::{UsageCollectorError, UsageCollectorPluginError};
-pub use gts::UsageCollectorPluginSpecV1;
+pub use gts::{USAGE_RECORD_RESOURCE, USAGE_TYPE_RESOURCE, UsageCollectorPluginSpecV1};
 pub use models::{
     AggregationBucket, AggregationDimension, AggregationOp, AggregationResult, AggregationSpec,
-    IdempotencyKey, MetadataFilter, MetadataKey, ResourceRef, SubjectRef, TimeWindow, UsageKind,
-    UsageRecord, UsageRecordFilterField, UsageRecordQuery, UsageRecordStatus, UsageType,
-    UsageTypeGtsId,
+    IdempotencyKey, MetadataFilter, MetadataKey, ResourceRef, SubjectRef, UsageKind, UsageRecord,
+    UsageRecordFilterField, UsageRecordQuery, UsageRecordStatus, UsageType, UsageTypeFilterField,
+    UsageTypeGtsId, UsageTypeQuery,
 };
 pub use plugin_api::UsageCollectorPluginV1;
+pub use reason::{ConflictReason, ValidationReason};

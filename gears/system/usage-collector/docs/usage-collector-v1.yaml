@@ -19,13 +19,11 @@ servers:
     description: Platform API gateway (deployment-specific).
 
 tags:
-  - name: Ingestion
-    description: Attributed usage-record ingestion.
-  - name: Query
-    description: Raw (OData) and aggregated (body-shaped) read surfaces.
-  - name: Deactivation
-    description: One-way `active → inactive` lifecycle transition on individual records.
-  - name: UsageTypes
+  - name: Usage Records
+    description: |
+      Usage-record ingestion, raw (OData) and aggregated read surfaces,
+      individual-record reads, and one-way `active → inactive` deactivation.
+  - name: Usage Types
     description: Platform-global usage-type catalog lifecycle and read surfaces.
 
 security:
@@ -34,8 +32,8 @@ security:
 paths:
   /usage-collector/v1/records:
     post:
-      operationId: usage_collector.ingest_usage_records
-      tags: [Ingestion]
+      operationId: usage_collector.create_usage_records
+      tags: [Usage Records]
       summary: Ingest a batch of usage records
       description: |
         Submit up to 100 usage records for persistence. Every record
@@ -98,8 +96,8 @@ paths:
           $ref: "#/components/responses/Problem"
 
     get:
-      operationId: usage_collector.query_raw_records
-      tags: [Query]
+      operationId: usage_collector.list_usage_records
+      tags: [Usage Records]
       summary: Query raw usage records (OData, cursor-paginated)
       description: |
         Read a cursor-paginated page of raw `UsageRecord`s for a single
@@ -158,8 +156,8 @@ paths:
 
   /usage-collector/v1/records/aggregate:
     post:
-      operationId: usage_collector.query_aggregated_records
-      tags: [Query]
+      operationId: usage_collector.query_aggregated_usage_records
+      tags: [Usage Records]
       summary: Query server-side aggregated usage
       description: |
         Compute a server-side aggregation (`sum`, `count`, `min`, `max`,
@@ -183,12 +181,36 @@ paths:
         default:
           $ref: "#/components/responses/Problem"
 
+  /usage-collector/v1/records/{id}:
+    parameters:
+      - $ref: "#/components/parameters/RecordId"
+    get:
+      operationId: usage_collector.get_usage_record
+      tags: [Usage Records]
+      summary: Read a single usage record by id
+      description: Read a single persisted usage record by its `uuid`.
+      responses:
+        "200":
+          description: The persisted usage record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageRecord"
+        "404":
+          description: Usage record not found.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        default:
+          $ref: "#/components/responses/Problem"
+
   /usage-collector/v1/records/{id}/deactivate:
     parameters:
       - $ref: "#/components/parameters/RecordId"
     post:
       operationId: usage_collector.deactivate_usage_record
-      tags: [Deactivation]
+      tags: [Usage Records]
       summary: Deactivate an individual usage record
       description: |
         Flip the targeted record's `status` from `active` to `inactive`
@@ -204,8 +226,8 @@ paths:
 
   /usage-collector/v1/usage-types:
     get:
-      operationId: listUsageTypes
-      tags: [UsageTypes]
+      operationId: usage_collector.list_usage_types
+      tags: [Usage Types]
       summary: List usage types
       description: Cursor-paginated list of usage-type catalog rows in the caller's authorized scope.
       parameters:
@@ -221,8 +243,8 @@ paths:
         default:
           $ref: "#/components/responses/Problem"
     post:
-      operationId: registerUsageType
-      tags: [UsageTypes]
+      operationId: usage_collector.create_usage_type
+      tags: [Usage Types]
       summary: Register a new UsageType
       description: |
         Create a usage type in the catalog. `gts_id` MUST end with `~`
@@ -249,13 +271,21 @@ paths:
                 format: uri-reference
               description: URI of the newly registered usage type.
         "400":
-          description: Validation failure (e.g. `invalid_base_gts_id`, `invalid_metadata_fields`).
+          description: |
+            Canonical `InvalidArgument` envelope. Discrimination via
+            `context.field_violations[].field` and `.reason` (e.g.
+            `INVALID_BASE_GTS_ID`,
+            `INVALID_METADATA_FIELDS_EMPTY_STRING`,
+            `INVALID_METADATA_FIELDS_DUPLICATE`).
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
         "409":
-          description: '`gts_id` already registered.'
+          description: |
+            Canonical `AlreadyExists` envelope — `gts_id` already
+            registered. Discrimination via `context.resource_type` +
+            `context.resource.name`.
           content:
             application/problem+json:
               schema:
@@ -267,8 +297,8 @@ paths:
     parameters:
       - $ref: "#/components/parameters/UsageTypeGtsId"
     get:
-      operationId: readUsageType
-      tags: [UsageTypes]
+      operationId: usage_collector.get_usage_type
+      tags: [Usage Types]
       summary: Look up a UsageType by gts_id
       description: Read a single catalog entry.
       responses:
@@ -287,8 +317,8 @@ paths:
         default:
           $ref: "#/components/responses/Problem"
     delete:
-      operationId: deleteUsageType
-      tags: [UsageTypes]
+      operationId: usage_collector.delete_usage_type
+      tags: [Usage Types]
       summary: Delete a UsageType (referentially safe)
       description: |
         Delete a catalog row. The storage plugin rejects deletion if any
@@ -876,9 +906,13 @@ components:
       required: [type, title, status, detail]
       description: |
         RFC 9457 problem+json envelope. `type` is a canonical-error
-        category URI; `status` is the HTTP status; `context.reason`
-        carries a gear-specific cause discriminator and
-        `context.retryable` is a retry-safety hint.
+        category URI; `status` is the HTTP status; `context` is a
+        per-category structured object. Discrimination layers (in order
+        of granularity): `type` (broad category), `context.resource_type`
+        (which entity), `context.field_violations[N].field`/`.reason`
+        (per-field for `InvalidArgument`), or `context.reason` (carried
+        natively only on `Aborted`, `PermissionDenied`,
+        `Unauthenticated`). `context.retryable` is a retry-safety hint.
       properties:
         type:
           type: string

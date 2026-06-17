@@ -280,8 +280,9 @@ by position from the caller-supplied `group_by`. SDK-specific aspects:
   decoded, and validated by the toolkit gateway. SDK callers pass `limit` and the
   next-page `CursorV1` they read from `page_info.next_cursor`; they never
   observe `page_after` or `Keyset` in raw form. Decode failure, order mismatch,
-  and filter mismatch surface as canonical Problem responses (`cursor_decode`,
-  `order_mismatch`, `filter_mismatch`).
+  and filter mismatch surface (via `toolkit-odata`) as canonical `InvalidArgument`
+  `Problem` responses with a `field_violations[0]` on `cursor`
+  (`INVALID_CURSOR` / `ORDER_MISMATCH` / `FILTER_MISMATCH`).
 - Raw-query results are returned as `toolkit_odata::Page<UsageRecord>` with
   `items: Vec<UsageRecord>` and `page_info: PageInfo { next_cursor, prev_cursor,
   limit }`.
@@ -295,7 +296,10 @@ query gateway, deactivation handler, and usage-type catalog). They are
 not declared on the public SDK trait surface
 and do not appear in SDK method signatures or return shapes. The SDK
 trait callers see only the post-authorization outcome (permit produces
-a result; deny produces an `Authorization` error variant).
+a result; deny produces a `PermissionDenied` error variant — except on
+the by-id surfaces `get_usage_record` and `deactivate_usage_record`,
+where a denial is collapsed to `NotFound` so they never act as an
+existence oracle).
 
 ### Method-specific output types
 
@@ -308,8 +312,8 @@ a result; deny produces an `Authorization` error variant).
   silently absorbed and returns the previously persisted row as
   `Ok(UsageRecord)`. A same-key resubmission whose canonical fields
   differ from the stored record is NOT an acknowledgement — it
-  surfaces as the `UsageCollectorError::IdempotencyConflict` error
-  variant (see §"Error Taxonomy"), so a divergent same-key re-emission
+  surfaces as `UsageCollectorError::Conflict` carrying `ConflictReason::IdempotencyConflict`
+  (see §"Error Taxonomy"), so a divergent same-key re-emission
   is rejected fail-closed and never silently dropped. There is no
   separate `UsageRecordAck` envelope and no `DedupOutcome` indicator on
   the `Ok` arm — callers that need to distinguish "newly inserted" from
@@ -420,12 +424,12 @@ The trait carries nine methods, one per SDK-exposed capability (ADR 0012 removed
 
 | Method (logical)             | Realizes                                                                                                        | Inputs (beyond `&SecurityContext`)                                                                                                                                                                                                                                                                                                                                                             | Output (Ok variant)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Create single usage record   | `fr-ingestion`, `fr-idempotency`, `fr-usage-compensation`, `seq-emit-usage`                                     | One `UsageRecord` value (per-record fields described in §"Method Contracts", including the optional `corrects_id` discriminator and a signed `value`).                                                                                                                                                                                                                                         | The persisted `UsageRecord` (newly written on a fresh insert; the previously stored row on an exact-equality idempotency retry — silent absorb). Same-key canonical-field mismatch surfaces as the `IdempotencyConflict` error variant.                                                                                                                                                                                                                                                                            |
+| Create single usage record   | `fr-ingestion`, `fr-idempotency`, `fr-usage-compensation`, `seq-emit-usage`                                     | One `UsageRecord` value (per-record fields described in §"Method Contracts", including the optional `corrects_id` discriminator and a signed `value`).                                                                                                                                                                                                                                         | The persisted `UsageRecord` (newly written on a fresh insert; the previously stored row on an exact-equality idempotency retry — silent absorb). Same-key canonical-field mismatch surfaces as `Conflict` (`ConflictReason::IdempotencyConflict`).                                                                                                                                                                                                                                                                            |
 | Create batched usage records | `fr-ingestion`, `fr-idempotency`, `fr-usage-compensation`, `nfr-throughput`, `nfr-batch-and-report-timing`      | Non-empty list of `UsageRecord` (each carrying an optional `corrects_id`).                                                                                                                                                                                                                                                                                                                     | List of per-record `Result` aligned with the input order; each `Ok` arm carries the persisted `UsageRecord`.                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Aggregated query             | `fr-query-aggregation`, `seq-query-aggregated`                                                                  | `gts_id: UsageTypeGtsId` (typed usage-type key — required; the gateway rejects any `gts_id`-touching predicate in `query` as a typed validation error), `TimeWindow` (`[from, to)` UTC), `&ODataQuery` (filter only — pagination/order ignored), `&[MetadataFilter]` (typed JSON-key side channel), and `AggregationSpec` (`op` ∈ SUM / COUNT / MIN / MAX / AVG, plus ordered `group_by`).                                                                                                                          | `AggregationResult` — `Vec<AggregationBucket>`. Each bucket carries a `key: Vec<String>` (in `group_by` order; empty when `group_by` was empty) and `value: Option<Decimal>`. Dimension values are emitted as their canonical string form (TenantId → `Uuid::to_string()`, lowercase hyphenated; all others verbatim from the record).                                                                                                                                                                                                                                                                                                                                  |
 | Raw keyset-paginated query   | `fr-query-raw`, `seq-query-raw`                                                                                 | `gts_id: UsageTypeGtsId` (typed usage-type key — required; the gateway rejects any `gts_id`-touching predicate in `query` as a typed validation error), `TimeWindow` (`[from, to)` UTC; replaces any `created_at` filter clause), `&ODataQuery` (parsed `$filter` over `UsageRecordFilterField`, `order`, optional `page_after`, `limit`), and `&[MetadataFilter]` (typed side channel for dynamic JSON-key filtering; AND across entries, OR within `values`).                                                                                                                                                                | `toolkit_odata::Page<UsageRecord>` (`items` + `page_info` with opaque `CursorV1`).                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Deactivate usage event       | `fr-event-deactivation`, `seq-deactivate-event`                                                                 | The target `UsageRecord.uuid` (either an ordinary usage row or a compensation row).                                                                                                                                                                                                                                                                                                              | `()`. The targeted row and every currently-active compensation row whose `corrects_id` equals the targeted id are flipped to `inactive` atomically in one plugin backend transaction; the SDK / REST surface returns no body (HTTP 204 No Content). Rejections for already-inactive or unknown records are surfaced as error variants.                                                                                                                                                                            |
-| Create usage type          | `fr-usage-type-registration`, `seq-register-usage-type`, `adr-0012-unified-plugin-catalog-and-gts-id-reference` | One `UsageType` (`gts_id: UsageTypeGtsId`, `kind: UsageKind`, `metadata_fields: Vec<String>`). The `gts_id` base-derivation check runs at the `UsageTypeGtsId::new` boundary (`UsageTypeGtsId::new` / `Deserialize`) upstream of this trait call; the `kind` field is validated as a closed `UsageKind` enum at the serde deserialize boundary; the trait implementation then performs PDP authorization and `metadata_fields` well-formedness (unique non-empty strings) before plugin SPI dispatch. | `UsageType` — the durable catalog row produced by the plugin's `create_usage_type` SPI call against the plugin-owned `usage_type_catalog`, carrying the registered `gts_id`, `kind`, and `metadata_fields` per ADR 0012. A `gts_id` that does not derive from the reserved abstract base `gts.cf.core.uc.usage_record.v1~` is rejected at the `UsageTypeGtsId::new` boundary as `UsageCollectorError::Validation` (REST: handler synthesises the canonical `invalid_base_gts_id` `Problem` envelope at HTTP `400` from the failed conversion on `CreateUsageTypeRequest::gts_id`); unknown `kind` values are rejected by closed-enum serde rejection at the deserialize boundary. Duplicate `gts_id` surfaces `UsageTypeAlreadyExists`. |
+| Create usage type          | `fr-usage-type-registration`, `seq-register-usage-type`, `adr-0012-unified-plugin-catalog-and-gts-id-reference` | One `UsageType` (`gts_id: UsageTypeGtsId`, `kind: UsageKind`, `metadata_fields: Vec<String>`). The `gts_id` base-derivation check runs at the `UsageTypeGtsId::new` boundary (`UsageTypeGtsId::new` / `Deserialize`) upstream of this trait call; the `kind` field is validated as a closed `UsageKind` enum at the `UsageKind::from_str` REST handler-boundary parse (the typed `UsageKind` argument on the SDK trait carries the same guarantee); the trait implementation then performs PDP authorization and `metadata_fields` well-formedness (unique non-empty strings) before plugin SPI dispatch. | `UsageType` — the durable catalog row produced by the plugin's `create_usage_type` SPI call against the plugin-owned `usage_type_catalog`, carrying the registered `gts_id`, `kind`, and `metadata_fields` per ADR 0012. A `gts_id` that does not derive from the reserved abstract base `gts.cf.core.uc.usage_record.v1~` is rejected at the `UsageTypeGtsId::new` boundary as `UsageCollectorError::InvalidArgument` carrying `ValidationReason::InvalidBaseGtsId` (REST `400` `Problem` with `field_violations[0].field="gts_id"` and `.reason="INVALID_BASE_GTS_ID"`); unknown `kind` values are rejected at the `UsageKind::from_str` boundary as `UsageCollectorError::InvalidArgument` carrying `ValidationReason::Validation` (REST `400` `Problem` with `field_violations[0].field="kind"` and `.reason="VALIDATION"`). Duplicate `gts_id` surfaces `AlreadyExists`. |
 | Get usage type              | `fr-usage-type-existence-and-semantics`, `adr-0012-unified-plugin-catalog-and-gts-id-reference`                 | `gts_id: GtsId`.                                                                                                                                                                                                                                                                                                                                                                               | `UsageType` carrying `gts_id`, `kind`, and `metadata_fields` (counter / gauge classification is carried by the closed `UsageKind` enum on the row, read via `UsageType::is_counter()` / `UsageType::is_gauge()`). Missing identifier surfaces `UsageTypeNotFound`.                                                                                                                                                                                                                                                                                                                      |
 | List usage types             | `fr-usage-type-existence-and-semantics`, `adr-0012-unified-plugin-catalog-and-gts-id-reference`                 | One `&ODataQuery` (`toolkit_odata`) carrying the optional `limit` and `cursor` — the foundation surface declares no filterable usage-type fields and any filter expression is ignored.                                                                                                                                                                                                          | `toolkit_odata::Page<UsageType>` — keyset-paginated list of registered usage types, each row including `gts_id`, `kind`, and `metadata_fields` (counter / gauge classification is carried by `UsageType.kind` per ADR 0012).                                                                                                                                                                                                                                                                                                                               |
 | Delete usage type            | `fr-usage-type-deletion`, `seq-delete-usage-type`, `adr-0012-unified-plugin-catalog-and-gts-id-reference`       | `gts_id: GtsId`.                                                                                                                                                                                                                                                                                                                                                                               | `()`. Rejections: `UsageTypeNotFound`, and `UsageTypeReferenced { gts_id, sample_ref_count }` when the plugin's `ON DELETE RESTRICT` FK rejects the delete (lifts to HTTP 409 on the REST surface). Callers MUST expect 409 on referenced usage types.                                                                                                                                                                                                                                                             |
@@ -491,7 +495,7 @@ Concretely:
 - Inside each `UsageCollectorClientV1::<op>` method, the trait
   implementation performs (in order):
   1. PDP call against the resolved `SecurityContext` for the
-     operation under attempt; denial yields the `Authorization`
+     operation under attempt; denial yields the `PermissionDenied`
      error variant.
   2. `PdpConstraint` composition against the caller-supplied filters
      (intersection — user filters can only narrow PDP-authorized
@@ -605,18 +609,17 @@ Plugin SPI (no dedicated `compensate` SPI call).
   document the rule and MUST NOT re-validate it locally). When
   `corrects_id` is present on the emit call, the server enforces the
   following preconditions on the referenced row R:
-  1. R MUST exist. Violation surfaces the `CorrectsIdNotFound` error
-     variant.
+  1. R MUST exist. Violation surfaces `NotFound`.
   2. R MUST itself be an ordinary usage row (`R.corrects_id IS NULL`).
-     Violation surfaces the `CorrectsIdTargetsCompensation` error
-     variant (a `corrects_id` reference MUST NOT target a row that
+     Violation surfaces `Conflict` (`ConflictReason::CorrectsIdTargetsCompensation`)
+     (a `corrects_id` reference MUST NOT target a row that
      already carries `corrects_id IS NOT NULL`; this rule is what
      bounds the deactivation cascade at depth 1).
   3. R.`tenant_id` MUST equal the caller's `tenant_id` AND
      R.`gts_id` MUST equal the caller's `gts_id` per ADR 0012.
-     Violation surfaces the `CorrectsIdWrongScope` error variant.
+     Violation surfaces `Conflict` (`ConflictReason::CorrectsIdWrongScope`).
   4. R MUST be active (`status = Active`, not deactivated). Violation
-     surfaces the `CorrectsIdInactive` error variant; this rule also
+     surfaces `Conflict` (`ConflictReason::CorrectsIdInactive`); this rule also
      realizes the concurrency guard against a compensation arriving
      mid-deactivation.
 
@@ -627,8 +630,7 @@ Plugin SPI (no dedicated `compensate` SPI call).
   1. Missing or invalid `SecurityContext` is rejected upstream by the
      ToolKit gateway (the SDK surfaces no `Authentication` error variant)
      and no record reaches the trait implementation.
-  2. PDP denial yields the `Authorization` error variant and no record
-     is persisted.
+  2. PDP denial yields `PermissionDenied` and no record is persisted.
   3. Structural attribution validation (required fields present;
      `subject_id` present when `subject_ref` is supplied; `subject_type`
      only with `subject_id`) yields a typed validation error variant on
@@ -642,26 +644,24 @@ Plugin SPI (no dedicated `compensate` SPI call).
      `UnknownMetadataKey { gts_id, key }` variant per ADR 0012
      (closed shape, keyed by `gts_id`); there is no preserved
      free-form remainder.
-  6. Unknown `gts_id` (no row in `usage_type_catalog`) yields the
-     `UsageTypeNotFound` error variant per ADR 0012.
+  6. Unknown `gts_id` (no row in `usage_type_catalog`) yields `NotFound`
+     per ADR 0012.
   7. Per the four-cell value matrix: `counter` + `corrects_id IS NULL`
      with `value < 0`, and `counter` + `corrects_id SET` with
      `value >= 0`, each yield the typed validation error variant. `gauge`
      - `corrects_id SET` (any value) yields the
        `GaugeCompensationRejected` error variant. `gauge` +
        `corrects_id IS NULL` passes through unchanged.
-  8. Per the L1 `corrects_id` rule above: the four `corrects_id_*`
-     preconditions surface, respectively, `CorrectsIdNotFound`,
-     `CorrectsIdTargetsCompensation`, `CorrectsIdWrongScope`, and
-     `CorrectsIdInactive`.
+  8. Per the L1 `corrects_id` rule above: a missing referenced row
+     surfaces `NotFound`; the other three preconditions surface
+     `Conflict` carrying `ConflictReason::CorrectsIdTargetsCompensation`,
+     `CorrectsIdWrongScope`, and `CorrectsIdInactive` respectively.
   9. Structural plugin unavailability (the host's selector cache is
-     empty OR `ClientHub::try_get_scoped` returns `None`) yields the
-     `PluginUnavailable` error variant; types-registry lookup misses
-     during scoped-client binding yield `TypesRegistryUnavailable`;
-     retryable plugin failures (downstream timeouts, connection resets,
-     upstream 5xx) lift through plugin-side `Transient` to
-     `ServiceUnavailable`; other plugin errors lift to the unclassified
-     `Internal` envelope (no retryable-kind taxonomy exists yet — see
+     empty OR `ClientHub::try_get_scoped` returns `None`), types-registry
+     lookup misses during scoped-client binding, and retryable plugin
+     failures (downstream timeouts, connection resets, upstream 5xx via
+     plugin-side `Transient`) all yield `ServiceUnavailable`; other
+     plugin errors lift to the unclassified `Internal` envelope (see
      `plugin-spi.md` for the dispatch-boundary mapping).
   10. A same-key resubmission (same
       `(tenant_id, gts_id, idempotency_key)`) whose caller-supplied
@@ -675,15 +675,14 @@ Plugin SPI (no dedicated `compensate` SPI call).
   locally; per-tenant per-UsageType net is owned by the server-side
   un-policed-net posture (`cpt-cf-usage-collector-adr-usage-compensation`) and the SDK only relays the
   resulting state through `AggregationResult`. The SDK MUST surface the
-  server's validation error codes faithfully and MUST NOT collapse the
-  typed validation variants instead of a single generic `Validation` variant.
-- Declared error variants for this method (subset, full taxonomy below):
-  `Authorization`, `UsageTypeNotFound`,
-  `UnknownMetadataKey`, `GaugeCompensationRejected`,
-  `CorrectsIdNotFound`, `CorrectsIdTargetsCompensation`,
-  `CorrectsIdWrongScope`, `CorrectsIdInactive`,
-  `IdempotencyConflict`, `PluginUnavailable`,
-  `TypesRegistryUnavailable`, `ServiceUnavailable`, `Internal`.
+  server's typed `reason` discriminators faithfully.
+- Declared error categories for this method (subset, full taxonomy below):
+  `PermissionDenied`; `InvalidArgument` (`ValidationReason::UnknownMetadataKey`
+  / `GaugeCompensationRejected` / `SemanticsViolation` / `Validation` /
+  `MetadataValidation`); `NotFound`; `Conflict`
+  (`ConflictReason::CorrectsIdTargetsCompensation` / `CorrectsIdWrongScope`
+  / `CorrectsIdInactive` / `IdempotencyConflict`); `ServiceUnavailable`;
+  `Internal`.
 - Success output: the persisted `UsageRecord`. The return shape is
   identical for ordinary usage submissions (`corrects_id IS NULL`) and
   counter-compensation submissions (`corrects_id IS NOT NULL`) — there
@@ -691,7 +690,7 @@ Plugin SPI (no dedicated `compensate` SPI call).
   absorbs an exact-equality retry, the return value is the previously
   persisted record (whose `created_at` predates the call). A same-key
   submission with any differing canonical field is NOT a success — it
-  surfaces as the `IdempotencyConflict` error variant
+  surfaces as `Conflict` (`ConflictReason::IdempotencyConflict`)
   (`context.reason = idempotency_conflict`, AIP-193 AlreadyExists /
   409), distinct from the keyless `idempotency` rejection.
 - Latency budget: total p95 200 ms per the ingestion latency budget
@@ -716,20 +715,14 @@ Plugin SPI (no dedicated `compensate` SPI call).
   order; per-record `corrects_id` presence is independent across the
   list.
 - Validation behaviour: each record is validated independently using
-  the same rules as Method 1, including the four-cell value matrix and
-  the L1 `corrects_id` rule. Per-record outcomes are reported in the
-  return list in input order. The call as a whole is rejected only
-  when the `SecurityContext` is missing or the input list is empty;
-  each yields a typed validation error variant on the call. Per-record
-  validation failures, PDP denials, unknown UsageTypes, gauge-compensation
-  rejections (the `GaugeCompensationRejected` error variant), invalid
-  `corrects_id` references (the four `CorrectsId*` error variants),
-  same-key canonical-field-mismatch conflicts (the
-  `IdempotencyConflict` error variant, as in Method 1), and plugin
-  errors are reported as per-record `Err`-shaped entries within the
-  result list — never as a whole-call rejection — while the call
-  returns `Ok` on the list as a whole; this aligns with the
-  deterministic per-record acceptance promise of the Ingestion Gateway.
+  the same rules as Method 1; per-record outcomes are reported in the
+  return list in input order. Per-record failures — validation, PDP
+  denial, unknown UsageType, idempotency conflict, or a per-record
+  plugin error — are carried as `Err` entries within the result list,
+  not as a whole-call rejection. The call as a whole returns `Err` only
+  when no per-record verdict can be produced: a missing
+  `SecurityContext`, an empty input list, or an outer Plugin SPI
+  dispatch failure that would hit every dispatched record identically.
 - Success output: a list of per-record results, each carrying either
   the persisted `UsageRecord` or a `UsageCollectorError`, in the same
   length and order as the input list.
@@ -791,18 +784,18 @@ Plugin SPI (no dedicated `compensate` SPI call).
 - Validation behaviour:
   1. Missing/invalid `SecurityContext` is rejected upstream by the
      ToolKit gateway (the SDK surfaces no `Authentication` error
-     variant); PDP denial yields the `Authorization` error variant.
-  2. `TimeWindow::new` rejects `from >= to` as `InvalidTimeRange` at the SDK
-     boundary; the gateway also surfaces a typed validation error when `query`
+     variant); PDP denial yields `PermissionDenied`.
+  2. `TimeWindow::new` rejects `from >= to` as `InvalidArgument`
+     (`ValidationReason::Validation`) at the SDK boundary; the gateway
+     also surfaces `InvalidArgument` when `query`
      touches the reserved `gts_id` field (the typed `gts_id` parameter
      is the only admissible carrier), when a `Metadata(key)` dimension
      or `MetadataFilter::key()` is not in the resolved
      `metadata_fields`, or when a filter references an undeclared
      field.
-  3. An unregistered `gts_id` parameter yields the `UsageTypeNotFound`
-     error variant and is rejected before plugin dispatch.
-  4. Plugin-side failures map to `PluginUnavailable`,
-     `TypesRegistryUnavailable`, `ServiceUnavailable`, or `Internal` as
+  3. An unregistered `gts_id` parameter yields `NotFound` and is
+     rejected before plugin dispatch.
+  4. Plugin-side failures map to `ServiceUnavailable` or `Internal` as
      in Method 1.
 - Success output: `AggregationResult` (a `Vec<AggregationBucket>`; each
   bucket carries a `key: Vec<String>` of `group_by` values in caller
@@ -894,7 +887,7 @@ Plugin SPI (no dedicated `compensate` SPI call).
   1. Missing or invalid `SecurityContext` is rejected upstream by the
      ToolKit gateway (the SDK surfaces no `Authentication` error
      variant) and never reaches the trait implementation.
-  2. PDP denial yields the `Authorization` error variant. PDP
+  2. PDP denial yields the `PermissionDenied` error variant. PDP
      constraints are composed against `filter_ast` so the plugin
      receives a filter AST that is authoritatively narrowed.
   3. Typed validation variants are surfaced for structural failures the SDK can
@@ -907,11 +900,10 @@ Plugin SPI (no dedicated `compensate` SPI call).
      `metadata_fields`), an operator outside the per-field allowance
      (dimension filters accept `eq` / `in` only over `String`-typed
      values), or an `order` other than the canonical raw-query order.
-  4. An unregistered `gts_id` parameter yields the `UsageTypeNotFound`
-     error variant and is rejected before plugin dispatch (D11 —
-     UsageType-existence validation inside the trait implementation).
-  5. Plugin-side failures map to `PluginUnavailable`,
-     `TypesRegistryUnavailable`, `ServiceUnavailable`, or `Internal`.
+  4. An unregistered `gts_id` parameter yields `NotFound` and is
+     rejected before plugin dispatch (D11 — UsageType-existence
+     validation inside the trait implementation).
+  5. Plugin-side failures map to `ServiceUnavailable` or `Internal`.
 - Success output: `toolkit_odata::Page<UsageRecord>` with `items`
   (list of `UsageRecord`, each carrying its `status`) and
   `page_info: PageInfo { next_cursor, prev_cursor, limit }` whose
@@ -924,10 +916,10 @@ Plugin SPI (no dedicated `compensate` SPI call).
   implicitly by threading the `CursorV1` they read from
   `page_info.next_cursor` into the next call; they never observe
   `page_after` or `Keyset` directly. Cursor decode failure, order
-  mismatch, and filter mismatch are surfaced as canonical Problem
-  responses on the REST surface (`cursor_decode`, `order_mismatch`,
-  `filter_mismatch`) and as a typed validation error on the SDK surface — no
-  separate cursor-validity error variant exists.
+  mismatch, and filter mismatch all surface (via `toolkit-odata`) as
+  canonical `InvalidArgument` with a `field_violations[0]` on `cursor`
+  (`INVALID_CURSOR` / `ORDER_MISMATCH` / `FILTER_MISMATCH`) — no
+  separate cursor-validity category exists.
 
 ### Method 5 — Deactivate usage event
 
@@ -945,16 +937,18 @@ Plugin SPI (no dedicated `compensate` SPI call).
 - Validation behaviour:
   1. Missing/invalid `SecurityContext` is rejected upstream by the
      ToolKit gateway (the SDK surfaces no `Authentication` error
-     variant); PDP denial yields the `Authorization` error variant.
-  2. Plugin-side failures map to `PluginUnavailable`,
-     `TypesRegistryUnavailable`, `ServiceUnavailable`, or `Internal`.
+     variant); PDP denial collapses to `NotFound` (the by-id surface
+     never acts as an existence oracle, so an operator who cannot see
+     the targeted row is indistinguishable from one targeting a missing
+     row). Every non-denial error is preserved unchanged.
+  2. Plugin-side failures map to `ServiceUnavailable` or `Internal`.
 - Rejection behaviour (in addition to missing/invalid SecurityContext,
   PDP denial, and validation):
-  - An already-`Inactive` target record yields the `AlreadyInactive`
-    error variant; no state change occurs and no other field is
-    mutated. This realizes the monotonicity invariant on the SDK
-    boundary.
-  - An unknown `UsageRecord.uuid` yields the `UsageRecordNotFound` error variant.
+  - An already-`Inactive` target record yields `Conflict`
+    (`ConflictReason::AlreadyInactive`); no state change occurs and no
+    other field is mutated. This realizes the monotonicity invariant on
+    the SDK boundary.
+  - An unknown `UsageRecord.uuid` yields `NotFound`.
 - Success output: `()`. The SDK trait returns `Ok(())` and the REST
   surface returns HTTP 204 No Content. On a successful return:
   - The targeted `UsageRecord.uuid` (the explicitly-deactivated row,
@@ -1032,22 +1026,24 @@ Plugin SPI (no dedicated `compensate` SPI call).
   performed by the gateway or the plugin.
 - Validation behaviour (executed in order):
   1. Missing/invalid `SecurityContext` is rejected upstream by the ToolKit gateway (the SDK surfaces no `Authentication` error variant); PDP
-     denial yields `Authorization`.
+     denial yields `PermissionDenied`.
   2. Any `gts_id` defect — empty, missing `~`, or does not derive from
      the reserved abstract base `gts.cf.core.uc.usage_record.v1~` — is
      caught at the `UsageTypeGtsId::new` boundary upstream of this
      trait call. The SDK surfaces it as
-     `UsageCollectorError::Validation` (returned by
-     `UsageTypeGtsId::new`); the REST handler synthesises the
-     canonical `invalid_base_gts_id` `Problem` envelope (HTTP `400`,
-     `context.gts_id`, `context.instance_path="/gts_id"`) from the
-     same failure on the inbound `CreateUsageTypeRequest::gts_id`
+     `UsageCollectorError::InvalidArgument` carrying
+     `ValidationReason::InvalidBaseGtsId` (returned by
+     `UsageTypeGtsId::new`); the REST handler lifts the same failure to
+     a `400` `Problem` with `field_violations[0].field="gts_id"` and
+     `.reason="INVALID_BASE_GTS_ID"` on the inbound `CreateUsageTypeRequest::gts_id`
      (whose DTO field is the permissive `GtsInstanceId`). Any unknown
-     `kind` value is rejected by closed-enum serde rejection at the
-     deserialize boundary before reaching the trait call.
+     `kind` value is rejected at the `UsageKind::from_str` REST
+     handler-boundary parse on the permissive `CreateUsageTypeRequest::kind`
+     DTO field; the SDK trait's typed `UsageKind` argument carries the same
+     guarantee so unknown values cannot reach this trait call.
   3. Malformed `metadata_fields` (duplicate keys, empty strings)
-     yields `InvalidMetadataField` / `DuplicateMetadataField` carrying the offending
-     `/metadata_fields/{index}: {reason}` pointer.
+     yields `InvalidArgument` carrying `ValidationReason::MetadataFieldEmptyString`
+     / `MetadataFieldDuplicate` with a `field_violations[0].field="metadata_fields[{index}]"`.
   4. Collision with a previously registered usage type (plugin UNIQUE
      violation on `gts_id`) whose payload differs from the stored
      row yields `UsageTypeAlreadyExists`. An identical payload
@@ -1144,7 +1140,7 @@ Plugin SPI (no dedicated `compensate` SPI call).
 
 - Delete protocol (executed in order by the trait implementation per
   ADR 0012):
-  1. PDP authorize. Denial yields `Authorization`.
+  1. PDP authorize. Denial yields `PermissionDenied`.
   2. Dispatch to the plugin SPI's `delete_usage_type`
      (`plugin-spi.md` §"Method 9"). The plugin attempts the row
      delete inside a single backend transaction; the
@@ -1152,11 +1148,11 @@ Plugin SPI (no dedicated `compensate` SPI call).
      natively on a referenced usage type per ADR 0012.
   3. Translate plugin outcomes per the dispatch boundary:
      `UsageTypeNotFound { gts_id }` from the plugin lifts to
-     `UsageCollectorError::UsageTypeNotFound`;
+     `UsageCollectorError::NotFound`;
      `UsageTypeReferenced { gts_id, sample_ref_count }` from the plugin
-     lifts to `UsageCollectorError::UsageTypeReferenced` and is
-     surfaced to REST callers as HTTP 409 (callers MUST expect 409
-     on referenced usage types).
+     lifts to `UsageCollectorError::Conflict` carrying
+     `ConflictReason::UsageTypeReferenced` and is surfaced to REST callers
+     as HTTP 409 (callers MUST expect 409 on referenced usage types).
 - Success output: `()`.
 - Idempotency: a second `delete_usage_type` call for the same `gts_id`
   yields `UsageTypeNotFound` (the plugin row is gone after the first
@@ -1198,26 +1194,26 @@ Plugin SPI (no dedicated `compensate` SPI call).
   1. A missing `SecurityContext` (which would only occur from a
      direct in-process caller that bypasses the gateway) is rejected
      by the trait implementation with no plugin SPI dispatch.
-  2. PDP authorize over the resolved record. Existence-leak
-     trade-off: the trait fetches the row before PDP enforcement so
-     PDP can authorize over the full attribution tuple, which means
-     a `UsageRecordNotFound` is observable to any caller that can hit
-     the surface. The trade-off is accepted because the operator
-     surface is already strongly authenticated by the ToolKit
-     gateway, and the alternative (PDP over `uuid` alone) would break
-     the resource-attribute reasoning model used by the rest of the
-     gear.
+  2. PDP authorize over the resolved record. The trait fetches the
+     row before PDP enforcement so PDP can authorize over the full
+     attribution tuple; the alternative (PDP over `uuid` alone) would
+     break the resource-attribute reasoning model used by the rest of
+     the gear. To keep this fetch-before-PDP ordering from turning the
+     by-id surface into an existence oracle, a PDP denial is collapsed
+     to `NotFound` (via `collapse_deny_to_not_found`): an unauthorized
+     caller receives the same `NotFound` whether or not the row exists,
+     so a denied row is indistinguishable from a missing one. Every
+     other error (notably `ServiceUnavailable`) is preserved unchanged.
   3. Dispatch to the plugin SPI's `get_usage_record`
      (`plugin-spi.md` §"Method 10").
 - Success output: the persisted `UsageRecord` (every canonical field
   is present and byte-identical to the row originally persisted by
   Method 1 / Method 2, modulo any subsequent monotonic `status`
   transition through Method 5).
-- Declared SDK error variants for this method: PDP denial as
-  `Authorization`; an unknown `uuid` as the `UsageRecordNotFound`
-  error variant; transient plugin failures as `ServiceUnavailable`;
-  uncategorized plugin failures as `Internal`; structural plugin
-  unavailability as `PluginUnavailable`.
+- Declared SDK error categories for this method: PDP denial collapsed
+  to `NotFound` (see validation step 2); an unknown `uuid` as
+  `NotFound`; transient and structural plugin unavailability as
+  `ServiceUnavailable`; uncategorized plugin failures as `Internal`.
 - Idempotency: pure read; safe to retry.
 
 ## Error Taxonomy
@@ -1245,288 +1241,110 @@ HTTP status) is documented in DESIGN.md §3.3 Error Envelopes.
 
 Variant catalog:
 
-- `Authorization` — PDP denial on the requested operation. Reported
-  uniformly for read and write denials; the SDK does not surface the
-  PDP reason payload.
-- Typed validation variants — structural and semantic validation
-  failures are exposed as a family of typed-per-rule variants rather
-  than a single umbrella `Validation` variant. Each maps to the
-  specific failure mode it names:
-  - `InvalidBatchSize` — empty batch or batch exceeding the per-call cap.
-  - `MetadataSizeExceeded` — serialized metadata exceeded the per-record cap.
-  - `InvalidMetadataField` — entry in `CreateUsageType.metadata_fields`
-    was not a well-formed key.
-  - `DuplicateMetadataField` — duplicate entry in
-    `CreateUsageType.metadata_fields`.
-  - `InvalidUsageTypeGtsId` — `UsageTypeGtsId::new` rejected the input
-    (malformed GTS id, type id rather than instance id, wrong base, or
-    missing derivation segment).
-  - `InvalidMetadataKey` — `MetadataKey::new` rejected the input
-    (empty or contains a NUL byte).
-  - `InvalidMetadataFilter` — `MetadataFilter::new` rejected the input
-    (empty values set or invalid key).
-  - `InvalidResourceRef` — `ResourceRef::new` rejected the input
-    (empty / NUL `resource_id` or `resource_type`).
-  - `InvalidSubjectRef` — `SubjectRef::new` rejected the input
-    (empty / NUL `subject_id`; `subject_type = Some("")` or NUL).
-  - `InvalidIdempotencyKey` — `IdempotencyKey::new` rejected the input
-    (empty or NUL); also raised when the mandatory key is missing.
-  - `InvalidUsageRecordId` — the URL path `id` segment was not a valid UUID.
-  - `InvalidTimeRange` — `TimeWindow::new` rejected the bounds
-    (`from >= to`).
-  - `InvalidUsageKind` — `UsageKind::from_str` received a wire string
-    other than `"counter"` or `"gauge"`.
-  - `NegativeCounterValue` — counter ordinary record carried a
-    negative value (counter + `corrects_id IS NULL` + `value < 0`).
-  - `NonNegativeCounterCompensation` — counter compensation row
-    carried a non-negative value (counter + `corrects_id SET` +
-    `value >= 0`).
-- `UsageTypeNotFound` — see the consolidated entry below. The same
-  variant surfaces both ingestion-/query-path misses (the trait
-  implementation rejects the request before plugin dispatch when the
-  referenced `gts_id` is unknown) and catalog-admin misses
-  (`get_usage_type` / `list_usage_types` / `delete_usage_type` on a
-  missing target row); the wire shape is identical.
-- `UnknownMetadataKey` — Ingestion supplied a `metadata` map carrying
-  a key that is not a member of the referenced usage type's declared
-  `metadata_fields` list per ADR 0012 (closed shape, keyed by
-  `gts_id`). Carries the structured fields `{ gts_id, key }`:
-  `gts_id` identifies the usage type whose closed-shape contract
-  rejected the key; `key` is the offending undeclared key name.
-  Distinct from the typed structural-validation variants because the failure originates at the
-  gateway's L1 closed-shape check (not from a structural request
-  error) and from `UsageTypeNotFound` because the usage type is known but
-  the caller supplied a key outside its declared shape. Plugins do
-  NOT re-implement metadata validation. Lifts to AIP-193
-  `InvalidArgument` (HTTP 400) on the wire, surfaced as
-  `Problem.context.reason="unknown_metadata_key"` with `gts_id` and
-  `key` carried in `context`.
-- Bad `gts_id` base derivation (REST `POST /usage-collector/v1/usage-types`
-  or SDK `create_usage_type` with a manually-constructed
-  identifier): the `UsageTypeGtsId` newtype constructor
-  (`UsageTypeGtsId::new`) rejects any string that does not derive from
-  the reserved abstract base `gts.cf.core.uc.usage_record.v1~` (per
-  ADR 0012's 2026-06-08 amendment). The SDK surfaces this as
-  `UsageCollectorError::Validation` (the SDK exposes no dedicated
-  invalid-base error variant; the typed-newtype is the single
-  validation point). Unknown `kind` values are rejected by closed-enum
-  serde rejection at the deserialize boundary before this code runs;
-  the SDK exposes no dedicated invalid-kind variant either. The REST
-  handler synthesises the canonical `Problem` envelope from the same
-  failure: HTTP `400`, `context.reason="invalid_base_gts_id"`,
-  `context.gts_id` echoes the rejected identifier,
-  `context.instance_path="/gts_id"`. The inbound
-  `CreateUsageTypeRequest::gts_id` DTO field uses the permissive
-  `GtsInstanceId` so the raw string reaches the handler unchanged and
-  the structured envelope is built post-deserialize rather than at
-  serde time.
-- `GaugeCompensationRejected` — Ingestion submitted a record carrying
-  `corrects_id IS NOT NULL` against a UsageType whose semantics are
-  `gauge`; the four-cell value matrix forbids compensation on gauge
-  UsageTypes (gauges already express down-movement directly). Distinct
-  from the typed structural-validation variants because the request is
-  structurally well-formed and the rejection is the gauge-specific cell
-  of the value matrix.
-  Lifts to AIP-193 `FailedPrecondition` (HTTP 422) on the wire — the
-  request is well-formed but violates a UsageType-semantics precondition.
-  Surfaces on the wire as `Problem.context.reason="gauge_compensation_rejected"` per `usage-collector-v1.yaml`.
-- `CorrectsIdNotFound` — Ingestion submitted a record carrying
-  `corrects_id` that references a `UsageRecord.uuid` not present in the
-  caller-visible store (or visible-but-out-of-tenant-scope behind the
-  PDP narrowing). Distinct from `UsageRecordNotFound` (which is reserved for the
-  deactivation method's missing-target case) and from
-  `CorrectsIdWrongScope` (which is raised when the row exists but is
-  outside `(tenant_id, gts_id)` scope per ADR 0012). Lifts to AIP-193
-  `NotFound` (HTTP 404) on the wire.
-  Surfaces on the wire as `Problem.context.reason="corrects_id_not_found"` per `usage-collector-v1.yaml`.
-- `CorrectsIdTargetsCompensation` — Ingestion submitted a record carrying
-  `corrects_id` that references a row whose own `corrects_id IS NOT
-NULL` (i.e. the target row is itself a compensation row); a
-  `corrects_id` reference MUST target an ordinary usage row
-  (`corrects_id IS NULL`). Lifts to AIP-193
-  `FailedPrecondition` (HTTP 409) on the wire.
-  Surfaces on the wire as `Problem.context.reason="corrects_id_targets_compensation"` per `usage-collector-v1.yaml`.
-- `CorrectsIdWrongScope` — Ingestion submitted a record carrying
-  `corrects_id` that references a row whose `(tenant_id, gts_id)`
-  does not match the incoming compensation's `(tenant_id, gts_id)`
-  per ADR 0012. Cross-tenant or cross-UsageType compensation is
-  rejected. Lifts to AIP-193 `FailedPrecondition` (HTTP 409) on the
-  wire.
-  Surfaces on the wire as `Problem.context.reason="corrects_id_wrong_scope"` per `usage-collector-v1.yaml`.
-- `CorrectsIdInactive` — Ingestion submitted a record carrying
-  `corrects_id` that references a row whose `status` is `Inactive`
-  (already deactivated, including a row that is concurrently in the
-  process of being deactivated — the L1 "active" check serialises
-  against the cascade transition).
-  Distinct from `AlreadyInactive` (which is the deactivation method's
-  rejection for a re-deactivation attempt). Lifts to AIP-193
-  `FailedPrecondition` (HTTP 409) on the wire.
-  Surfaces on the wire as `Problem.context.reason="corrects_id_inactive"` per `usage-collector-v1.yaml`.
-- `UsageRecordNotFound` — Deactivation referenced a `UsageRecord.uuid` that does
-  not exist.
-- `AlreadyInactive` — Deactivation referenced a record whose `status`
-  is already `Inactive`; rejecting the second deactivation realizes the
-  monotonic-deactivation invariant on the SDK boundary
-  (`cpt-cf-usage-collector-principle-monotonic-deactivation`).
-- `UsageTypeAlreadyExists` — Catalog `create_usage_type` was called with
-  a `gts_id` already present in `usage_type_catalog` and whose request
-  payload differs from the stored row (plugin UNIQUE violation
-  surfaced as `UsageTypeAlreadyExists { gts_id }` per ADR 0012 and
-  `plugin-spi.md` §"Method 6"). An identical-payload resubmission
-  is idempotent and returns the stored row on `Ok` — it does NOT
-  raise this variant. Distinct from the typed structural-validation variants because the
-  duplicate is a domain-state conflict, not a structural
-  request error; lifts to AIP-193 `AlreadyExists` (HTTP 409) per
-  DESIGN.md §3.3, surfaced on the wire as
-  `Problem.context.reason="usage_type_already_exists"`. Name aligns with
-  the plugin SPI variant `UsageTypeAlreadyExists`.
-- `IdempotencyConflict` — Ingestion submitted a record whose
-  `(tenant_id, gts_id, idempotency_key)` collides with a stored
-  record **but** whose caller-supplied canonical fields (`value`,
-  `created_at`, `resource_ref`, `subject_ref`,
-  `corrects_id`, `metadata`) differ from that stored record (see
-  §"Method-specific output types"). The second write is rejected
-  fail-closed and never silently dropped. Distinct from the typed
-  structural-validation variants because the request is structurally
-  well-formed (it carries a valid idempotency key) — this is a
-  domain-state conflict,
-  not a missing-key or malformed-input error. Distinct, too, from the
-  keyless `idempotency` rejection: a record submitted WITHOUT the
-  mandatory idempotency key is an `InvalidIdempotencyKey` validation error lifting to AIP-193
-  `InvalidArgument` (HTTP 400, `context.reason="idempotency"`), whereas
-  `IdempotencyConflict` is a same-key divergent-content collision
-  lifting to AIP-193 `AlreadyExists` (HTTP 409), surfaced on the wire as
-  `Problem.context.reason="idempotency_conflict"` per DESIGN.md §3.3. An
-  exact-equality retry is NOT this error — it silently returns the
-  previously persisted `UsageRecord` on the `Ok` arm (silent absorb).
-- `UsageTypeNotFound` — The referenced `gts_id` is not present in
-  the plugin-owned catalog. The same variant surfaces both
-  catalog-admin misses (`get_usage_type` / `list_usage_types` /
-  `delete_usage_type`) and ingestion / aggregated-query references to
-  an unregistered usage type — the wire shape is identical per ADR
-  0012. Carries the structured field `{ gts_id }`. Distinct from
-  `UsageRecordNotFound` (which is reserved for `UsageRecord.uuid`
-  misses on deactivation / point-read). Lifts to AIP-193 `NotFound`
-  (HTTP 404) per DESIGN.md §3.3, surfaced on the wire as the canonical
-  `not_found` category with `context.resource_type="usage_type"` /
-  `context.resource_name=<gts_id>`. Name aligns with the plugin SPI
-  variant `UsageTypeNotFound { gts_id }`.
-- `UsageTypeReferenced` — Catalog `delete_usage_type` was rejected by the
-  plugin's `usage_records.gts_id` `ON DELETE RESTRICT` foreign key
-  per ADR 0012. Carries the structured fields
-  `{ gts_id, sample_ref_count }`: `sample_ref_count` is a bounded
-  sample sufficient to surface "this usage type still has rows" without
-  scanning the entire table (the exact bound is plugin-tunable but
-  MUST be at least `1`). Callers MUST expect HTTP 409 on referenced
-  usage types per the REST contract. Lifts to AIP-193
-  `FailedPrecondition` (HTTP 409) per DESIGN.md §3.3, surfaced on
-  the wire as `Problem.context.reason="usage_type_referenced"` with
-  `context.sample_ref_count`. Name aligns with the plugin SPI
-  variant `UsageTypeReferenced { gts_id, sample_ref_count }`.
+`UsageCollectorError` is a flat enum of **seven category variants**.
+Discrimination within a category is a typed `reason` sub-enum
+(`ValidationReason` / `ConflictReason`), not a dedicated variant per
+failure — consumers match the category, then the reason.
 
-> **Removed in ADR 0012.** Prior `DeclaredUsageTypeImmutable` variant
-> (raised against the gateway-local-from-config catalog) is no
-> longer reachable: ADR 0012 retired the local-from-config catalog,
-> leaving the plugin-DB catalog as the sole usage-type catalog. The
-> equivalent rejection no longer exists. Where the variant was
-> raised, the request now succeeds, surfaces `UsageTypeAlreadyExists`,
-> or surfaces `UsageTypeNotFound` per the unified semantics.
+- `PermissionDenied { detail }` — PDP denial (HTTP 403,
+  `context.reason="AUTHZ"`). Reported for collection-scoped read and
+  write denials (ingestion, batched ingestion, the query surfaces, and
+  usage-type catalog operations); the PDP reason is kept for operator
+  logs and dropped from the wire body. The by-id surfaces
+  (`get_usage_record` / `deactivate_usage_record`) are the exception:
+  their denials collapse to `NotFound` so the surface never acts as an
+  existence oracle.
+- `InvalidArgument { resource_type, resource_name, field, reason, detail }`
+  — request-shape / semantics validation failure (HTTP 400). The typed
+  `reason: ValidationReason` rides the wire `field_violations[0].reason`:
+  - `Validation` (`VALIDATION`) — generic request-shape failure: batch
+    size out of bounds, the validating-newtype rejects (`MetadataKey` /
+    `MetadataFilter` / `ResourceRef` / `SubjectRef` / `IdempotencyKey` /
+    `TimeWindow` / record-id UUID), and the unknown-`kind` closed-enum
+    parse.
+  - `SemanticsViolation` (`SEMANTICS_VIOLATION`) — counter value-matrix
+    violation (ordinary `value >= 0`, compensation `value < 0`).
+  - `MetadataValidation` (`METADATA_VALIDATION`) — serialized metadata
+    exceeded the per-record size cap.
+  - `UnknownMetadataKey` (`UNKNOWN_METADATA_KEY`) — ingestion supplied a
+    `metadata` key not in the usage type's declared `metadata_fields`
+    (closed shape per ADR 0012); `resource_name` carries the usage type
+    `gts_id`.
+  - `GaugeCompensationRejected` (`GAUGE_COMPENSATION_REJECTED`) — a
+    `corrects_id`-bearing record was submitted against a `gauge` usage
+    type (the value matrix forbids gauge compensation).
+  - `MissingTimeWindow` (`MISSING_TIME_WINDOW`) — a raw / aggregated
+    query omitted the mandatory bounded `created_at` window.
+  - `InvalidBaseGtsId` (`INVALID_BASE_GTS_ID`) — `UsageTypeGtsId::new`
+    rejected a `gts_id` that does not derive from the reserved abstract
+    base `gts.cf.core.uc.usage_record.v1~`. The REST handler lifts the
+    same failure post-deserialize from the permissive
+    `CreateUsageTypeRequest::gts_id` DTO field.
+  - `MetadataFieldEmptyString` / `MetadataFieldInvalidKey` /
+    `MetadataFieldDuplicate` (`INVALID_METADATA_FIELDS_*`) — a
+    `CreateUsageType.metadata_fields[i]` entry was empty, malformed, or
+    a duplicate.
+- `NotFound { resource_type, name, detail }` — referenced resource not
+  present (HTTP 404). Covers a missing usage type (`get_usage_type` /
+  `list_usage_types` / `delete_usage_type`, and ingestion / query
+  references to an unregistered `gts_id`), a missing `UsageRecord.uuid`
+  on deactivation / point-read (and, on those by-id surfaces, a PDP
+  denial collapsed to `NotFound` per `collapse_deny_to_not_found`), and
+  a compensation `corrects_id` that references no existing row (the
+  `detail` distinguishes the last case).
+  `resource_type` (`usage_type` / `usage_record`) plus `name` identify
+  the row.
+- `AlreadyExists { resource_type, name, detail }` — `create_usage_type`
+  collided with an existing row whose payload differs (HTTP 409
+  `AlreadyExists`). An identical-payload resubmission is idempotent and
+  returns the stored row on `Ok`.
+- `Conflict { resource_type, name, reason, detail }` — state /
+  concurrency / referential-integrity conflict (HTTP 409, AIP-193
+  `Aborted`). The typed `reason: ConflictReason` rides the wire
+  `context.reason`:
+  - `UsageTypeReferenced` (`USAGE_TYPE_REFERENCED`) — `delete_usage_type`
+    refused by the `usage_records.gts_id` `ON DELETE RESTRICT` FK; the
+    bounded `sample_ref_count` rides the `detail`.
+  - `AlreadyInactive` (`ALREADY_INACTIVE`) — deactivation targeted a
+    record already `inactive` (the monotonic-deactivation latch,
+    `cpt-cf-usage-collector-principle-monotonic-deactivation`).
+  - `IdempotencyConflict` (`IDEMPOTENCY_CONFLICT`) — a same-`(tenant_id,
+    gts_id, idempotency_key)` submission whose canonical fields differ
+    from the stored record; `name` carries the existing record UUID. An
+    exact-equality retry is NOT this error — it silently returns the
+    stored `UsageRecord` on `Ok`.
+  - `CorrectsIdTargetsCompensation` / `CorrectsIdWrongScope` /
+    `CorrectsIdInactive` (`CORRECTS_ID_*`) — a compensation's
+    `corrects_id` referenced another compensation row, a row in a
+    different `(tenant, usage type, resource, subject)` identity, or an
+    inactive row.
 
-- `PluginUnavailable` — Structural condition: the host had no scoped
-  `dyn UsageCollectorPluginV1` client under
-  `ClientScope::gts_id(&instance_id)` (the selector cache was empty OR
-  `ClientHub::try_get_scoped` returned `None`) at the time of the call.
-  Lifted by the host service from the structural fact; the SPI itself
-  exposes no `Unready` variant and no `ready()` probe.
-- `TypesRegistryUnavailable` — The `types-registry` lookup the plugin
-  host uses to bind the scoped client returned an unavailable result.
-  Distinct from `PluginUnavailable`: the selector cache resolution
-  itself failed (the registry could not be reached), not the scoped
-  client lookup against an already-resolved binding.
-- `ServiceUnavailable` — Transient infrastructure failure; carries an
-  optional `retry_after_seconds` hint exposed via
-  `context.retry_after_seconds` per the canonical envelope. Plugin-side
-  `Transient` failures (downstream timeouts, connection resets,
-  upstream 5xx) lift here at the dispatch boundary — the SPI does not
-  carve a separate `Timeout` variant, so host-side per-call deadline
-  expirations also surface as `ServiceUnavailable`. Wire-header
-  treatment (whether a corresponding `Retry-After` HTTP header is set)
-  is owned by `toolkit-canonical-errors`' `IntoResponse` and is not
-  asserted by this gear's contract.
-- `Internal` — Unclassified failure. The `detail` field **MUST** be
-  DSN-free and pre-redacted at the construction site; no internal
-  storage paths, credentials, or stack traces are surfaced through
-  this variant. Plugin-side `BackendError { kind, detail }` lifts here
-  too — there is no retryable-kind taxonomy at the dispatch boundary
-  yet, so backend errors collapse to `Internal` (HTTP 500). When real
-  plugins land with a classification scheme, retryable kinds will
-  route to dedicated `#[non_exhaustive]` variants.
+- `ServiceUnavailable { retry_after_seconds, detail }` — transient
+  infrastructure unavailability (HTTP 503): host-structural readiness
+  (no scoped plugin client under `ClientScope::gts_id(&instance_id)`,
+  `types-registry` unavailable), plugin-reported `Transient` failures
+  (downstream timeouts, connection resets, upstream 5xx), and
+  PDP-transport outages all lift here. The only retryable
+  classification. Carries an optional `retry_after_seconds` hint.
+- `Internal { detail }` — unclassified failure (HTTP 500). `detail`
+  MUST be DSN-free and pre-redacted at the construction site; no
+  storage paths, credentials, or stack traces are surfaced. Plugin-side
+  `Internal` lifts here.
 
-**Group-membership helpers** (mirroring the platform standard set by
-`account-management-sdk`): `UsageCollectorError` exposes category
-predicates as part of its public surface so consumers can do
-category-level handling without enumerating every variant.
-
-- `is_not_found()` — `UsageRecordNotFound`, `UsageTypeNotFound`,
-  `CorrectsIdNotFound`.
-- `is_unavailable()` — `PluginUnavailable`,
-  `TypesRegistryUnavailable`, `ServiceUnavailable`.
-- `is_retryable()` — `PluginUnavailable`,
-  `TypesRegistryUnavailable`, `ServiceUnavailable`.
-- `is_validation_error()` — `NegativeCounterValue`, `NonNegativeCounterCompensation`, `InvalidBatchSize`, `MetadataSizeExceeded`, `InvalidMetadataField`, `DuplicateMetadataField`, `InvalidUsageTypeGtsId`, `InvalidMetadataKey`, `InvalidMetadataFilter`, `InvalidResourceRef`, `InvalidSubjectRef`, `InvalidIdempotencyKey`, `InvalidUsageRecordId`, `InvalidTimeRange`, `InvalidUsageKind`,
-  `UnknownMetadataKey`.
-- `is_precondition_failed()` — `AlreadyInactive`,
-  `UsageTypeReferenced`, `GaugeCompensationRejected`,
-  `CorrectsIdTargetsCompensation`, `CorrectsIdWrongScope`,
-  `CorrectsIdInactive`. Deactivation against an already-inactive record
-  violates the monotonic-deactivation precondition on the SDK boundary
-  (`cpt-cf-usage-collector-principle-monotonic-deactivation`);
-  `UsageTypeReferenced` is the referential-delete rejection enforced
-  by the plugin's `usage_records.gts_id` `ON DELETE RESTRICT` FK per
-  ADR 0012; the four compensation-precondition variants violate the
-  compensation preconditions locked by
-  `cpt-cf-usage-collector-adr-usage-compensation` and
-  `cpt-cf-usage-collector-fr-usage-compensation`.
-  All lift to AIP-193 `FailedPrecondition` per DESIGN.md §3.3
-  (HTTP 400 for the deactivation case, HTTP 409 for the catalog,
-  `UsageTypeReferenced`, and `corrects_id` cases, HTTP 422 for the
-  `gauge + compensation` cell, mirroring the canonical mapping for
-  state conflicts).
-- `is_already_exists()` — Returns true for `UsageTypeAlreadyExists`
-  (raised by the catalog write path when `create_usage_type` collides
-  on `gts_id` with a divergent payload per ADR 0012) and
-  `IdempotencyConflict` (raised by the ingestion path on a same-key
-  submission whose canonical fields differ from the stored record);
-  reserved for already-exists state conflicts and lifts to AIP-193
-  `AlreadyExists` (HTTP 409) per DESIGN.md §3.3.
-- `is_permission_denied()` — `Authorization`.
-
-Variants without dedicated predicates (`Authorization`, `Internal`)
-are pattern-matched directly because they are either terminal
-classifications or carry caller-specific payload.
-
-Adding a new variant means extending the relevant helper in one place
-rather than patching every call site.
+The enum exposes one predicate, `is_retryable()`, returning `true`
+only for `ServiceUnavailable` — the principal semantic for retry-aware
+callers. All other handling is by matching the category and, within a
+category, the typed `reason`.
 
 Behavioural notes:
 
-- Deactivation success returns `Ok(())` on the `Ok` variant (HTTP 204
-  on the REST surface); the rejection cases for an already-inactive
-  record (`AlreadyInactive`) or an unknown record (`UsageRecordNotFound`) are
-  surfaced as error variants per domain-model.md §2.9 and DESIGN.md
+- Deactivation success returns `Ok(())` (HTTP 204); the already-inactive
+  and missing-record cases surface as `Conflict`
+  (`ConflictReason::AlreadyInactive`) and `NotFound` per
   `cpt-cf-usage-collector-principle-monotonic-deactivation`.
-- Exact-equality duplicate ingestion submissions are reported as a
-  silent-absorb success on the `Ok` variant — the call returns the
-  previously persisted `UsageRecord` rather than an error. A same-key
-  submission whose canonical fields differ from the stored record is
-  NOT reported on the `Ok` arm — it surfaces as the
-  `IdempotencyConflict` error variant (`context.reason =
-idempotency_conflict`, AIP-193 AlreadyExists / 409), distinct from the
-  keyless `idempotency` (`InvalidIdempotencyKey`) rejection.
-- Variant naming is canonical for this reference; the SDK crate may
-  add per-variant context fields (such as a stable error code or a
-  PDP reason category) as long as the public taxonomy preserves the
-  domain classification above.
+- Exact-equality duplicate ingestion is a silent-absorb success on `Ok`
+  (returns the stored `UsageRecord`); a same-key divergent submission
+  surfaces as `Conflict` carrying `ConflictReason::IdempotencyConflict`.
 
 ## Versioning/Compatibility
 
@@ -1587,8 +1405,9 @@ gateway-side `UsageTypeCatalogService` over the plugin-owned
 `usage_type_catalog`. The gateway owns PDP authorization, `gts_id`
 base-derivation validation (against the reserved abstract base
 `gts.cf.core.uc.usage_record.v1~` per ADR 0012's 2026-06-08 amendment),
-closed-enum `kind` validation at the serde deserialize boundary, and
-closed-shape `metadata_fields` validation; the plugin owns durable
+closed-enum `kind` validation at the `UsageKind::from_str` REST
+handler-boundary parse (or via the typed `UsageKind` argument on the SDK
+trait), and closed-shape `metadata_fields` validation; the plugin owns durable
 storage and the `usage_records.gts_id` `ON DELETE RESTRICT`
 foreign-key enforcement. Prior drafts of this section listed those
 operations as REST-only; that exclusion has been lifted.
@@ -1720,13 +1539,12 @@ the SDK trait:
   keyed by `gts_id`) with undeclared keys surfaced as
   `UnknownMetadataKey { gts_id, key }`. A `gts_id` that does not
   derive from the reserved abstract base is rejected at the
-  `UsageTypeGtsId::new` boundary on registration (SDK:
-  `UsageCollectorError::Validation`; REST: handler synthesises the
-  canonical `invalid_base_gts_id` `Problem` envelope at HTTP `400`
-  from the failed conversion on `CreateUsageTypeRequest::gts_id`);
-  unknown `kind` values are rejected by closed-enum serde rejection
-  at the deserialize boundary. The SDK exposes no dedicated
-  invalid-base or invalid-kind error variant.
+  `UsageTypeGtsId::new` boundary on registration as
+  `UsageCollectorError::InvalidArgument` carrying `ValidationReason::InvalidBaseGtsId`
+  (REST lifts to a `400` `Problem` with `field_violations[0].reason="INVALID_BASE_GTS_ID"`);
+  unknown `kind` values are rejected at the `UsageKind::from_str` parse
+  (SDK trait's typed `UsageKind` argument carries the same guarantee) as
+  `InvalidArgument` carrying `ValidationReason::Validation`.
 
 > **Removed in ADR 0012.** Prior drafts cited ADR-0007
 > (gateway-local-from-config catalog), ADR-0009 (catalog-plugin
@@ -1829,7 +1647,7 @@ default this reference adopts.
   see which scope was applied. This reference keeps `PdpDecision` and
   `PdpConstraint` internal to the gear and does not surface them on
   the trait; the SDK trait conveys only the post-authorization outcome
-  through `Ok` results or the `Authorization` error variant. The SDK
+  through `Ok` results or the `PermissionDenied` error variant. The SDK
   crate may add a non-required diagnostic field on query result types
   in a future minor version without breaking compatibility.
 - OQ-2 (phase-02 OQ-2, gap G-10): Whether `IdempotencyKey` is a

@@ -29,7 +29,6 @@ rust_decimal = { workspace = true, features = ["serde-with-str"] }
 
 # GTS types
 gts = { workspace = true }
-gts-macros = { workspace = true }
 toolkit-gts = { workspace = true }
 
 # Toolkit dependencies

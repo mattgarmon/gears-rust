@@ -777,7 +777,7 @@ sequenceDiagram
     Surface ->> MC: create_usage_type(&ctx, request)
     MC ->> PDP: authz_scope(&ctx, resource_type, "create_usage_type", …)
     PDP -->> MC: PdpDecision (permit | deny)
-    MC ->> MC: Validate gts_id (UsageTypeGtsId derivation from gts.cf.core.uc.usage_record.v1~) and metadata_fields (unique non-empty strings), kind already validated as closed UsageKind enum at the serde deserialize boundary
+    MC ->> MC: Validate gts_id (UsageTypeGtsId derivation from gts.cf.core.uc.usage_record.v1~) and metadata_fields (unique non-empty strings); kind already validated as closed UsageKind enum at the UsageKind::from_str handler-boundary parse
     MC ->> PH: create_usage_type(row { gts_id, kind, metadata_fields })
     PH ->> Hub: try_get_scoped::<dyn UsageCollectorPluginV1>(ClientScope::gts_id(instance_id))
     Hub -->> PH: bound plugin client
@@ -871,15 +871,15 @@ sequenceDiagram
     PDP -->> QG: PdpDecision + PdpConstraints
     QG ->> QG: CursorV1::decode(cursor) → Result<CursorV1, CursorDecodeError>
     alt cursor decode fails
-        QG -->> Surface: Problem (context.reason="cursor_decode")
+        QG -->> Surface: InvalidArgument (field_violations[0].field="cursor", reason="INVALID_CURSOR")
         Surface -->> Caller: Canonical Problem envelope
     end
     QG ->> QG: toolkit_odata::validate_cursor_against(decoded, $filter_ast, $orderby)
     alt OrderMismatch
-        QG -->> Surface: Problem (context.reason="order_mismatch")
+        QG -->> Surface: InvalidArgument (field_violations[0].field="cursor", reason="ORDER_MISMATCH")
         Surface -->> Caller: Canonical Problem envelope
     else FilterMismatch
-        QG -->> Surface: Problem (context.reason="filter_mismatch")
+        QG -->> Surface: InvalidArgument (field_violations[0].field="cursor", reason="FILTER_MISMATCH")
         Surface -->> Caller: Canonical Problem envelope
     else OK
         QG ->> QG: Extract page_after: Option<Keyset>
@@ -1045,7 +1045,7 @@ This section publishes the single plugin-agnostic consistency contract SDK, REST
 
 **Tie-back to the NFR.** This contract is the read-side consequence of `cpt-cf-usage-collector-nfr-workload-isolation`: the isolated-pool routing the NFR allocates is the structural source of the queryability lag the floor names. The NFR's load-test verification (ingestion p95 ≤ 200ms under concurrent query) verifies the workload-isolation posture; the floor here covers what the workload-isolation posture COSTS on the read side, and that cost is paid by consumers in the form of the rules above rather than by the gear in the form of cross-path synchronization.
 
-**`gts_id` and `kind` are independent.** Per the ADR-0012 2026-06-08 amendment, the `gts_id` does not encode kind; `gts_id` derives structurally from the reserved abstract base `gts.cf.core.uc.usage_record.v1~`, and the closed `kind: UsageKind` enum on the catalog row carries the counter / gauge classification. The two fields are independently validated (`UsageTypeGtsId::new` boundary for `gts_id`; closed-enum serde rejection at the deserialize boundary for `kind`); there is no "wrong kind for this gts_id" failure mode because the two are orthogonal.
+**`gts_id` and `kind` are independent.** Per the ADR-0012 2026-06-08 amendment, the `gts_id` does not encode kind; `gts_id` derives structurally from the reserved abstract base `gts.cf.core.uc.usage_record.v1~`, and the closed `kind: UsageKind` enum on the catalog row carries the counter / gauge classification. The two fields are independently validated (`UsageTypeGtsId::new` boundary for `gts_id`; `UsageKind::from_str` handler-boundary parse for `kind`); there is no "wrong kind for this gts_id" failure mode because the two are orthogonal.
 
 ### 3.11 Performance and Operations Architecture
 

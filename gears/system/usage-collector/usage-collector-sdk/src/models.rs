@@ -37,14 +37,18 @@ pub enum UsageKind {
 impl std::str::FromStr for UsageKind {
     type Err = UsageCollectorError;
 
-    /// Delegates to the serde deserializer so the wire-string → variant
-    /// mapping has a single source of truth (`#[serde(rename_all = ...)]`
-    /// on the enum). The serde error is rewrapped as
-    /// [`UsageCollectorError::InvalidUsageKind`] to preserve the canonical
-    /// `Problem` envelope at REST boundaries.
+    /// Mirrors the serde wire shape — `#[serde(rename_all = "lowercase")]`
+    /// on the enum — without paying the `serde_json::Value` allocation per
+    /// call. Both surfaces are pinned in `models_tests.rs` by
+    /// `usage_kind_serde_round_trips_lowercase` and
+    /// `usage_kind_from_str_accepts_counter_and_gauge`; the two
+    /// assertions catch any future `rename_all` drift between them.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_value(serde_json::Value::String(s.to_owned()))
-            .map_err(|_| UsageCollectorError::InvalidUsageKind { raw: s.to_owned() })
+        match s {
+            "counter" => Ok(Self::Counter),
+            "gauge" => Ok(Self::Gauge),
+            _ => Err(UsageCollectorError::invalid_usage_kind(s)),
+        }
     }
 }
 
@@ -84,19 +88,19 @@ impl MetadataKey {
     ///
     /// # Errors
     ///
-    /// Returns [`UsageCollectorError::InvalidMetadataKey`] when the input is
+    /// Returns [`UsageCollectorError::InvalidArgument`] when the input is
     /// empty or contains a NUL byte.
     pub fn new(value: impl Into<String>) -> Result<Self, UsageCollectorError> {
         let raw = value.into();
         if raw.is_empty() {
-            return Err(UsageCollectorError::InvalidMetadataKey {
-                reason: "metadata key must not be empty".into(),
-            });
+            return Err(UsageCollectorError::invalid_metadata_key(
+                "metadata key must not be empty",
+            ));
         }
         if raw.contains('\0') {
-            return Err(UsageCollectorError::InvalidMetadataKey {
-                reason: "metadata key must not contain NUL bytes".into(),
-            });
+            return Err(UsageCollectorError::invalid_metadata_key(
+                "metadata key must not contain NUL bytes",
+            ));
         }
         Ok(Self(raw))
     }
@@ -175,7 +179,7 @@ impl ResourceRef {
     ///
     /// # Errors
     ///
-    /// Returns [`UsageCollectorError::InvalidResourceRef`] when `resource_id`
+    /// Returns [`UsageCollectorError::InvalidArgument`] when `resource_id`
     /// or `resource_type` is empty or contains a NUL byte.
     pub fn new(
         resource_id: impl Into<String>,
@@ -183,25 +187,25 @@ impl ResourceRef {
     ) -> Result<Self, UsageCollectorError> {
         let resource_id = resource_id.into();
         if resource_id.is_empty() {
-            return Err(UsageCollectorError::InvalidResourceRef {
-                reason: "resource_id must not be empty".into(),
-            });
+            return Err(UsageCollectorError::invalid_resource_ref(
+                "resource_id must not be empty",
+            ));
         }
         if resource_id.contains('\0') {
-            return Err(UsageCollectorError::InvalidResourceRef {
-                reason: "resource_id must not contain NUL bytes".into(),
-            });
+            return Err(UsageCollectorError::invalid_resource_ref(
+                "resource_id must not contain NUL bytes",
+            ));
         }
         let resource_type = resource_type.into();
         if resource_type.is_empty() {
-            return Err(UsageCollectorError::InvalidResourceRef {
-                reason: "resource_type must not be empty".into(),
-            });
+            return Err(UsageCollectorError::invalid_resource_ref(
+                "resource_type must not be empty",
+            ));
         }
         if resource_type.contains('\0') {
-            return Err(UsageCollectorError::InvalidResourceRef {
-                reason: "resource_type must not contain NUL bytes".into(),
-            });
+            return Err(UsageCollectorError::invalid_resource_ref(
+                "resource_type must not contain NUL bytes",
+            ));
         }
         Ok(Self {
             resource_id,
@@ -265,7 +269,7 @@ impl SubjectRef {
     ///
     /// # Errors
     ///
-    /// Returns [`UsageCollectorError::InvalidSubjectRef`] when `subject_id`
+    /// Returns [`UsageCollectorError::InvalidArgument`] when `subject_id`
     /// is empty, `subject_type` is `Some("")`, or either component contains
     /// a NUL byte.
     pub fn new(
@@ -274,28 +278,28 @@ impl SubjectRef {
     ) -> Result<Self, UsageCollectorError> {
         let subject_id = subject_id.into();
         if subject_id.is_empty() {
-            return Err(UsageCollectorError::InvalidSubjectRef {
-                reason: "subject_id must not be empty".into(),
-            });
+            return Err(UsageCollectorError::invalid_subject_ref(
+                "subject_id must not be empty",
+            ));
         }
         if subject_id.contains('\0') {
-            return Err(UsageCollectorError::InvalidSubjectRef {
-                reason: "subject_id must not contain NUL bytes".into(),
-            });
+            return Err(UsageCollectorError::invalid_subject_ref(
+                "subject_id must not contain NUL bytes",
+            ));
         }
         let subject_type = match subject_type {
             None => None,
             Some(s) => {
                 let s = s.into();
                 if s.is_empty() {
-                    return Err(UsageCollectorError::InvalidSubjectRef {
-                        reason: "subject_type must not be empty when supplied".into(),
-                    });
+                    return Err(UsageCollectorError::invalid_subject_ref(
+                        "subject_type must not be empty when supplied",
+                    ));
                 }
                 if s.contains('\0') {
-                    return Err(UsageCollectorError::InvalidSubjectRef {
-                        reason: "subject_type must not contain NUL bytes".into(),
-                    });
+                    return Err(UsageCollectorError::invalid_subject_ref(
+                        "subject_type must not contain NUL bytes",
+                    ));
                 }
                 Some(s)
             }
@@ -366,19 +370,19 @@ impl IdempotencyKey {
     ///
     /// # Errors
     ///
-    /// Returns [`UsageCollectorError::InvalidIdempotencyKey`] when the input
+    /// Returns [`UsageCollectorError::InvalidArgument`] when the input
     /// is empty or contains a NUL byte.
     pub fn new(value: impl Into<String>) -> Result<Self, UsageCollectorError> {
         let raw = value.into();
         if raw.is_empty() {
-            return Err(UsageCollectorError::InvalidIdempotencyKey {
-                reason: "idempotency_key must not be empty".into(),
-            });
+            return Err(UsageCollectorError::invalid_idempotency_key(
+                "idempotency_key must not be empty",
+            ));
         }
         if raw.contains('\0') {
-            return Err(UsageCollectorError::InvalidIdempotencyKey {
-                reason: "idempotency_key must not contain NUL bytes".into(),
-            });
+            return Err(UsageCollectorError::invalid_idempotency_key(
+                "idempotency_key must not contain NUL bytes",
+            ));
         }
         Ok(Self(raw))
     }
@@ -455,31 +459,33 @@ impl UsageTypeGtsId {
     /// per-segment grammar (`vendor.package.namespace.type.v<major>[.<minor>]`),
     /// the allowed character set, terminator semantics, and the chained-id
     /// rules. That is the same validator other gears use for catalog-key
-    /// GTS strings (e.g. `account-management::create_tenant`), so a
+    /// GTS strings, so a
     /// malformed id surfaces with the canonical GTS error chain instead of a
     /// raw `strip_prefix` miss.
     ///
     /// # Errors
     ///
-    /// Returns [`UsageCollectorError::InvalidUsageTypeGtsId`] when the input
+    /// Returns [`UsageCollectorError::InvalidArgument`] when the input
     /// is not a syntactically valid GTS id, is a GTS *type* id (trailing
     /// `~`) rather than an instance id, or does not derive from
     /// [`Self::USAGE_RECORD_BASE`] (the base must appear as the first
     /// segment of the parsed chain).
     pub fn new(value: impl Into<String>) -> Result<Self, UsageCollectorError> {
         let raw = value.into();
-        let parsed = GtsID::new(&raw).map_err(|e| UsageCollectorError::InvalidUsageTypeGtsId {
-            raw: raw.clone(),
-            reason: format!("usage type gts_id `{raw}` is not a valid GTS id: {e}"),
+        let parsed = GtsID::new(&raw).map_err(|e| {
+            UsageCollectorError::invalid_usage_type_gts_id(
+                &raw,
+                &format!("usage type gts_id `{raw}` is not a valid GTS id: {e}"),
+            )
         })?;
         if parsed.is_type() {
-            return Err(UsageCollectorError::InvalidUsageTypeGtsId {
-                raw: raw.clone(),
-                reason: format!(
+            return Err(UsageCollectorError::invalid_usage_type_gts_id(
+                &raw,
+                &format!(
                     "usage type gts_id `{raw}` must be a GTS instance id (no trailing `~`), \
                      not a type id"
                 ),
-            });
+            ));
         }
         // Parent-chain match at GTS-segment granularity (not byte
         // granularity). `get_type_id()` returns the prefix up to and
@@ -489,13 +495,13 @@ impl UsageTypeGtsId {
         // usage-record base, fails this check — only direct derivation
         // from the reserved base is admitted into the catalog.
         if parsed.get_type_id().as_deref() != Some(Self::USAGE_RECORD_BASE) {
-            return Err(UsageCollectorError::InvalidUsageTypeGtsId {
-                raw: raw.clone(),
-                reason: format!(
+            return Err(UsageCollectorError::invalid_usage_type_gts_id(
+                &raw,
+                &format!(
                     "usage type gts_id `{raw}` must derive from the reserved base `{base}`",
                     base = Self::USAGE_RECORD_BASE,
                 ),
-            });
+            ));
         }
         // The last parsed segment is the derivation tail. The `let Some`
         // fall-through is structurally unreachable — `get_type_id()`
@@ -503,10 +509,10 @@ impl UsageTypeGtsId {
         // but is kept as a graceful error rather than `expect` to satisfy
         // the workspace `clippy::expect_used` rule.
         let Some(segment) = parsed.gts_id_segments.last().map(|s| s.segment.as_str()) else {
-            return Err(UsageCollectorError::InvalidUsageTypeGtsId {
-                raw: raw.clone(),
-                reason: format!("usage type gts_id `{raw}` is missing a derivation segment"),
-            });
+            return Err(UsageCollectorError::invalid_usage_type_gts_id(
+                &raw,
+                &format!("usage type gts_id `{raw}` is missing a derivation segment"),
+            ));
         };
         Ok(Self(GtsInstanceId::new(Self::USAGE_RECORD_BASE, segment)))
     }
@@ -582,7 +588,7 @@ pub struct UsageType {
 /// Deserialize `metadata_fields` through a `Vec<MetadataKey>` so the SDK
 /// boundary rejects duplicate keys instead of silently collapsing them
 /// into the `BTreeSet`. The REST DTO path additionally surfaces the
-/// typed [`UsageCollectorError::DuplicateMetadataField`] via
+/// typed [`UsageCollectorError::InvalidArgument`] via
 /// `metadata_fields_from_wire`; this function provides the same
 /// duplicate-rejection guarantee for any non-REST wire entry point
 /// (config loader, alternate IPC, plugin SPI replay).
@@ -615,6 +621,43 @@ impl UsageType {
         matches!(self.kind, UsageKind::Gauge)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Filter surface for `list_usage_types`
+// ---------------------------------------------------------------------------
+//
+// `UsageTypeQuery` declares the filterable-field schema for the OData
+// surface of `list_usage_types`. The struct is never constructed at
+// runtime; it exists solely to feed `#[derive(ODataFilterable)]`, which
+// generates [`UsageTypeQueryFilterField`] and its
+// [`toolkit_odata::filter::FilterField`] impl, mirroring the
+// `UsageRecordQuery` / `UsageRecordQueryFilterField` pattern used by the
+// records surface.
+//
+// `metadata_fields` (a closed set) is intentionally absent — OData has no
+// natural filter shape for `BTreeSet<String>` in this workspace and there
+// is no operator demand for it.
+
+/// Filterable-field schema for `list_usage_types`'s `ODataQuery` argument.
+///
+/// Never constructed at runtime. The `dead_code` allow is intentional —
+/// the struct is a derive-only artifact (see module comment above for
+/// rationale).
+#[derive(ODataFilterable)]
+#[allow(dead_code)]
+pub struct UsageTypeQuery {
+    /// `usage_type_catalog.gts_id`. Supports `eq`, `ne`, `contains`,
+    /// `startswith`, `endswith`, `in`.
+    #[odata(filter(kind = "String"))]
+    pub gts_id: String,
+    /// `usage_type_catalog.kind` (`"counter"` / `"gauge"`). Plugins
+    /// translate to their storage representation via
+    /// `FieldToColumn::map_value`.
+    #[odata(filter(kind = "String"))]
+    pub kind: String,
+}
+
+pub use UsageTypeQueryFilterField as UsageTypeFilterField;
 
 // ---------------------------------------------------------------------------
 // Usage-record exchange types
@@ -683,71 +726,6 @@ pub struct UsageRecord {
     /// Record creation timestamp (RFC 3339 on the wire).
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: time::OffsetDateTime,
-}
-
-// ---------------------------------------------------------------------------
-// Time-window input shared by `list_usage_records` and
-// `query_aggregated_usage_records`
-// ---------------------------------------------------------------------------
-
-/// Half-open `[from, to)` time window in UTC.
-///
-/// Constructor [`Self::new`] enforces `from < to`; `Deserialize` routes
-/// through `new` so wire payloads cannot bypass the invariant. Both bounds
-/// serialize as RFC-3339 UTC strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct TimeWindow {
-    #[serde(with = "time::serde::rfc3339")]
-    from: time::OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    to: time::OffsetDateTime,
-}
-
-impl TimeWindow {
-    /// Creates a [`TimeWindow`] after validating that `from < to`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UsageCollectorError::InvalidTimeRange`] when `from >= to`.
-    pub fn new(
-        from: time::OffsetDateTime,
-        to: time::OffsetDateTime,
-    ) -> Result<Self, UsageCollectorError> {
-        if from >= to {
-            return Err(UsageCollectorError::InvalidTimeRange { from, to });
-        }
-        Ok(Self { from, to })
-    }
-
-    /// Inclusive lower bound.
-    #[must_use]
-    pub fn from(&self) -> time::OffsetDateTime {
-        self.from
-    }
-
-    /// Exclusive upper bound.
-    #[must_use]
-    pub fn to(&self) -> time::OffsetDateTime {
-        self.to
-    }
-}
-
-impl<'de> Deserialize<'de> for TimeWindow {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Raw {
-            #[serde(with = "time::serde::rfc3339")]
-            from: time::OffsetDateTime,
-            #[serde(with = "time::serde::rfc3339")]
-            to: time::OffsetDateTime,
-        }
-        let Raw { from, to } = Raw::deserialize(deserializer)?;
-        TimeWindow::new(from, to).map_err(serde::de::Error::custom)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -875,6 +853,12 @@ pub struct AggregationResult {
 // `FilterError::UnknownField`, so neither plugins nor the gateway need a
 // runtime reject path.
 //
+// `created_at` and `uuid` ARE on the schema: the gateway treats the
+// `[from, to)` time window as an ordinary `created_at ge … and
+// created_at lt …` predicate inside `$filter` (no separate `TimeWindow`
+// typed parameter), and `uuid` is the canonical cursor tiebreaker the
+// gateway substitutes into `$orderby` when the caller omits one.
+//
 // Nested attribution composites (`resource_ref`, `subject_ref`) are
 // flattened to their leaf identifiers (`resource_id`, `resource_type`,
 // `subject_id`, `subject_type`) so filtering goes through the macro-derived
@@ -898,6 +882,19 @@ pub struct AggregationResult {
 #[derive(ODataFilterable)]
 #[allow(dead_code)]
 pub struct UsageRecordQuery {
+    /// `usage_records.uuid` (record primary key). Carried on the filter
+    /// surface so the gateway can use it as the canonical cursor
+    /// tiebreaker (`(created_at, uuid)`) and so callers can pin a
+    /// specific record via `$filter`.
+    #[odata(filter(kind = "Uuid"))]
+    pub uuid: Uuid,
+    /// `usage_records.created_at` (record creation timestamp). The
+    /// `[from, to)` time-window is expressed as
+    /// `created_at ge X and created_at lt Y` inside `$filter`; the
+    /// plugin SPI receives that AST and is responsible for honouring
+    /// it (server-side time-bounded read).
+    #[odata(filter(kind = "DateTimeUtc"))]
+    pub created_at: time::OffsetDateTime,
     /// `usage_records.tenant_id` (owning tenant). Supports `eq` and `in`.
     #[odata(filter(kind = "Uuid"))]
     pub tenant_id: Uuid,
@@ -932,11 +929,12 @@ pub use UsageRecordQueryFilterField as UsageRecordFilterField;
 
 /// Equality-set filter applied to a single [`UsageRecord::metadata`] key.
 ///
-/// `metadata` is a `serde_json::Value` map whose keys are not part of any
-/// static schema; the `OData` filter surface in `toolkit-odata` cannot
-/// express filtering on dynamic JSON keys. `MetadataFilter` is the typed
-/// side-channel used by [`crate::UsageCollectorClientV1::list_usage_records`]
-/// and the plugin SPI to filter on those keys.
+/// `metadata` is a `BTreeMap<MetadataKey, String>` whose keys are not part
+/// of any static schema; the `OData` filter surface in `toolkit-odata`
+/// cannot express filtering on dynamic map keys. `MetadataFilter` is the
+/// typed side-channel used by
+/// [`crate::UsageCollectorClientV1::list_usage_records`] and the plugin
+/// SPI to filter on those keys.
 ///
 /// Semantics across a `&[MetadataFilter]`:
 ///
@@ -959,7 +957,7 @@ impl MetadataFilter {
     ///
     /// # Errors
     ///
-    /// Returns [`UsageCollectorError::InvalidMetadataFilter`] when the key
+    /// Returns [`UsageCollectorError::InvalidArgument`] when the key
     /// is empty or contains a NUL byte, or when `values` is empty. A
     /// failing `MetadataKey::new` is rewrapped as
     /// `InvalidMetadataFilter` so callers see one variant for the whole
@@ -969,16 +967,16 @@ impl MetadataFilter {
         values: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<Self, UsageCollectorError> {
         let key = MetadataKey::new(key).map_err(|err| match err {
-            UsageCollectorError::InvalidMetadataKey { reason } => {
-                UsageCollectorError::InvalidMetadataFilter { reason }
+            UsageCollectorError::InvalidArgument { detail, .. } => {
+                UsageCollectorError::invalid_metadata_filter(detail)
             }
             other => other,
         })?;
         let values: Vec<String> = values.into_iter().map(Into::into).collect();
         if values.is_empty() {
-            return Err(UsageCollectorError::InvalidMetadataFilter {
-                reason: format!("metadata filter for key `{key}` must carry at least one value"),
-            });
+            return Err(UsageCollectorError::invalid_metadata_filter(format!(
+                "metadata filter for key `{key}` must carry at least one value"
+            )));
         }
         Ok(Self { key, values })
     }

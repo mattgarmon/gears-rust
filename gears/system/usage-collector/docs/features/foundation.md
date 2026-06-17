@@ -130,7 +130,7 @@ This feature exists so safety-critical behavior — fail-closed authentication, 
 
 ### PDP Authorize and Constraint Return
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-flow-foundation-pdp-authorize`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-flow-foundation-pdp-authorize`
 
 **Actor**: `cpt-cf-usage-collector-actor-usage-source` | `cpt-cf-usage-collector-actor-usage-consumer` | `cpt-cf-usage-collector-actor-tenant-admin` | `cpt-cf-usage-collector-actor-platform-operator` (any caller whose domain-component invocation triggers the shared PDP dispatch helpers in `domain/authz.rs`; PDP authorize is a reusable algorithmic seam invoked inside every domain-component method, not an actor-initiated flow on its own)
 
@@ -146,13 +146,13 @@ This feature exists so safety-critical behavior — fail-closed authentication, 
 
 **Steps**:
 
-1. [ ] - `p1` - Receive (`SecurityContext`, operation descriptor, attribution) from the surface boundary; the `SecurityContext` is already resolved upstream of the collector by the ToolKit gateway (REST) or supplied by the in-process SDK caller - `inst-pdp-input`
-2. [ ] - `p1` - Compose the attribution required by `cpt-cf-usage-collector-contract-authz-resolver` for the operation's resource type (catalog ops carry no resource attributes; usage-record submission adds `OWNER_TENANT_ID`, `OWNER_ID`, `resource_type`, `resource_id`) and call the shared `domain/authz.rs` helper with `require_constraints(false)` - `inst-pdp-compose-tuple`
-3. [ ] - `p1` - **TRY** invoke `cpt-cf-usage-collector-contract-authz-resolver` via the shared PDP helper (`enforcer.access_scope_with(...)`) - `inst-pdp-resolver-call`
-4. [ ] - `p1` - **CATCH** transport-or-evaluation failure (`EnforcerError::EvaluationFailed`) - `inst-pdp-resolver-catch`
-   1. [ ] - `p1` - **RETURN** `AuthorizationUnavailable` (no cached decision, no permissive fallback) - `inst-pdp-fail-closed`
-5. [ ] - `p1` - **IF** the returned `PdpDecision` is deny **RETURN** `AuthorizationDenied` so the operation is rejected at the boundary - `inst-pdp-deny`
-6. [ ] - `p1` - **RETURN** `Ok(())` to the bound domain component without caching the result; the helper does not propagate constraint sets (intersection with user-supplied read filters lands in the read-path features when their first caller arrives) - `inst-pdp-return`
+1. [x] - `p1` - Receive (`SecurityContext`, operation descriptor, attribution) from the surface boundary; the `SecurityContext` is already resolved upstream of the collector by the ToolKit gateway (REST) or supplied by the in-process SDK caller - `inst-pdp-input`
+2. [x] - `p1` - Compose the attribution required by `cpt-cf-usage-collector-contract-authz-resolver` for the operation's resource type (catalog ops carry no resource attributes; usage-record submission adds `OWNER_TENANT_ID`, `OWNER_ID`, `resource_type`, `resource_id`) and call the shared `domain/authz.rs` helper with `require_constraints(false)` - `inst-pdp-compose-tuple`
+3. [x] - `p1` - **TRY** invoke `cpt-cf-usage-collector-contract-authz-resolver` via the shared PDP helper (`enforcer.access_scope_with(...)`) - `inst-pdp-resolver-call`
+4. [x] - `p1` - **CATCH** transport-or-evaluation failure (`EnforcerError::EvaluationFailed`) - `inst-pdp-resolver-catch`
+   1. [x] - `p1` - **RETURN** `AuthorizationUnavailable` (no cached decision, no permissive fallback) - `inst-pdp-fail-closed`
+5. [x] - `p1` - **IF** the returned `PdpDecision` is deny **RETURN** `AuthorizationDenied` so the operation is rejected at the boundary - `inst-pdp-deny`
+6. [x] - `p1` - **RETURN** `Ok(())` to the bound domain component without caching the result; the helper does not propagate constraint sets (intersection with user-supplied read filters lands in the read-path features when their first caller arrives) - `inst-pdp-return`
 
 ## 3. Processes / Business Logic (CDSL)
 
@@ -166,20 +166,20 @@ This feature exists so safety-critical behavior — fail-closed authentication, 
 
 **Steps**:
 
-1. [ ] - `p1` - On every dispatch, enter the gateway-side `cpt-cf-usage-collector-component-plugin-host` resolution seam and invoke its embedded GTS plugin selector cache lookup - `inst-algo-binding-enter-selector`
-2. [ ] - `p1` - **IF** the selector cache is empty (cold path) - `inst-algo-binding-cold-path`
-   1. [ ] - `p1` - **TRY** query the types-registry for instances of `UsageCollectorPluginSpecV1` by its GTS schema id and apply the configured vendor + priority selection (lowest priority wins) - `inst-algo-binding-resolve-plugin`
-   2. [ ] - `p1` - **CATCH** registry-or-selector failure - `inst-algo-binding-catch`
-      1. [ ] - `p1` - **RETURN** a `PluginUnavailable` outcome per the published Plugin SPI error taxonomy (covering both registry unavailability and no-match outcomes) on the per-call path; the selector cache remains empty so the next dispatch retries the lazy resolve - `inst-algo-binding-plugin-unavailable-cold`
-   3. [ ] - `p1` - Cache the resolved `PluginBinding` exactly once for the service's lifetime - `inst-algo-binding-cache-instance-id`
-3. [ ] - `p1` - **ELSE** (warm path) reuse the cached `GtsInstanceId` without a types-registry round-trip - `inst-algo-binding-warm-path`
-4. [ ] - `p1` - Resolve the scoped `cpt-cf-usage-collector-contract-storage-plugin` handle via `ClientHub::try_get_scoped` on the GTS instance scope; **IF** the lookup returns no handle **RETURN** a `PluginUnavailable` outcome per the published Plugin SPI error taxonomy on the per-call path - `inst-algo-binding-try-get-scoped`
+1. [x] - `p1` - On every dispatch, enter the gateway-side `cpt-cf-usage-collector-component-plugin-host` resolution seam and invoke its embedded GTS plugin selector cache lookup - `inst-algo-binding-enter-selector`
+2. [x] - `p1` - **IF** the selector cache is empty (cold path) - `inst-algo-binding-cold-path`
+   1. [x] - `p1` - **TRY** query the types-registry for instances of `UsageCollectorPluginSpecV1` by its GTS schema id and apply the configured vendor + priority selection (lowest priority wins) - `inst-algo-binding-resolve-plugin`
+   2. [x] - `p1` - **CATCH** registry-or-selector failure - `inst-algo-binding-catch`
+      1. [x] - `p1` - **RETURN** a `PluginUnavailable` outcome per the published Plugin SPI error taxonomy (covering both registry unavailability and no-match outcomes) on the per-call path; the selector cache remains empty so the next dispatch retries the lazy resolve - `inst-algo-binding-plugin-unavailable-cold`
+   3. [x] - `p1` - Cache the resolved `PluginBinding` exactly once for the service's lifetime - `inst-algo-binding-cache-instance-id`
+3. [x] - `p1` - **ELSE** (warm path) reuse the cached `GtsInstanceId` without a types-registry round-trip - `inst-algo-binding-warm-path`
+4. [x] - `p1` - Resolve the scoped `cpt-cf-usage-collector-contract-storage-plugin` handle via `ClientHub::try_get_scoped` on the GTS instance scope; **IF** the lookup returns no handle **RETURN** a `PluginUnavailable` outcome per the published Plugin SPI error taxonomy on the per-call path - `inst-algo-binding-try-get-scoped`
 5. [ ] - `p1` - Compute the structural readiness fact (selector has cached an instance id AND `ClientHub::try_get_scoped` returns a handle under the GTS instance scope) and set `usage_collector.plugin.ready` to `1` when both facts hold or `0` otherwise - `inst-algo-binding-readiness-fact`
-6. [ ] - `p1` - **RETURN** the resolved scoped `cpt-cf-usage-collector-contract-storage-plugin` handle to the calling pipeline so the dispatch completes; warm-path subsequent calls hit the selector fast path and the ClientHub read seam and reuse both caches with no further types-registry round-trip - `inst-algo-binding-return`
+6. [x] - `p1` - **RETURN** the resolved scoped `cpt-cf-usage-collector-contract-storage-plugin` handle to the calling pipeline so the dispatch completes; warm-path subsequent calls hit the selector fast path and the ClientHub read seam and reuse both caches with no further types-registry round-trip - `inst-algo-binding-return`
 
 ### PDP Authorize
 
-- [ ] `p2` - **ID**: `cpt-cf-usage-collector-algo-foundation-pdp-authorize`
+- [x] `p2` - **ID**: `cpt-cf-usage-collector-algo-foundation-pdp-authorize`
 
 **Input**: a reference to the `SecurityContext` (resolved upstream by the ToolKit gateway on REST or supplied by the in-process SDK caller), the operation descriptor, and the operation's attribution (catalog ops carry no resource attributes; usage-record submission adds `OWNER_TENANT_ID`, optional `OWNER_ID`, `resource_type`, `resource_id`).
 
@@ -187,18 +187,18 @@ This feature exists so safety-critical behavior — fail-closed authentication, 
 
 **Steps**:
 
-1. [ ] - `p1` - Compose the attribution from the caller-supplied operation descriptor and the resolved `SecurityContext`, applying the attributes that match the operation's resource type with `require_constraints(false)` - `inst-algo-pdp-compose`
-2. [ ] - `p1` - **TRY** invoke `cpt-cf-usage-collector-contract-authz-resolver` via the shared PDP helper (`enforcer.access_scope_with(...)`) with the composed attribution - `inst-algo-pdp-call`
-3. [ ] - `p1` - **CATCH** transport-or-evaluation failure (`EnforcerError::EvaluationFailed`) - `inst-algo-pdp-catch`
-   1. [ ] - `p1` - **RETURN** `AuthorizationUnavailable`; never serve a cached or permissive decision - `inst-algo-pdp-fail-closed`
-4. [ ] - `p1` - **IF** the returned `PdpDecision` is deny (`EnforcerError::Denied` or fail-closed `EnforcerError::CompileFailed`) **RETURN** `AuthorizationDenied` - `inst-algo-pdp-deny`
-5. [ ] - `p1` - **RETURN** `Ok(())` to the bound domain component without caching the result - `inst-algo-pdp-return`
+1. [x] - `p1` - Compose the attribution from the caller-supplied operation descriptor and the resolved `SecurityContext`, applying the attributes that match the operation's resource type with `require_constraints(false)` - `inst-algo-pdp-compose`
+2. [x] - `p1` - **TRY** invoke `cpt-cf-usage-collector-contract-authz-resolver` via the shared PDP helper (`enforcer.access_scope_with(...)`) with the composed attribution - `inst-algo-pdp-call`
+3. [x] - `p1` - **CATCH** transport-or-evaluation failure (`EnforcerError::EvaluationFailed`) - `inst-algo-pdp-catch`
+   1. [x] - `p1` - **RETURN** `AuthorizationUnavailable`; never serve a cached or permissive decision - `inst-algo-pdp-fail-closed`
+4. [x] - `p1` - **IF** the returned `PdpDecision` is deny (`EnforcerError::Denied` or fail-closed `EnforcerError::CompileFailed`) **RETURN** `AuthorizationDenied` - `inst-algo-pdp-deny`
+5. [x] - `p1` - **RETURN** `Ok(())` to the bound domain component without caching the result - `inst-algo-pdp-return`
 
 ## 4. Definitions of Done
 
 ### FR: Pluggable Storage
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-foundation-fr-pluggable-storage`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-foundation-fr-pluggable-storage`
 
 The system **MUST** materialize the active storage backend exclusively through `cpt-cf-usage-collector-contract-storage-plugin`, resolved through the `PluginV1<UsageCollectorPluginSpecV1>` GTS base + `types-registry` + `ClientHub` scoped registration pattern (SDK declares `UsageCollectorPluginSpecV1` in `usage-collector-sdk/src/gts.rs`; plugins publish through `TypesRegistryClient` and register a scoped `dyn UsageCollectorPluginV1` in `ClientHub` under `ClientScope::gts_id(&instance_id)`; the host's `GtsPluginSelector` lazily resolves the instance on the first dispatch call via `get_or_init` and caches the `GtsInstanceId` for the `Service`'s lifetime; subsequent dispatches reuse the cache via `ClientHub::try_get_scoped`). `[usage_collector].vendor` is read once at `Gear::init`; changing the binding requires a gear restart. There is no in-core fallback path and no parallel cache. Per `cpt-cf-usage-collector-adr-0012-unified-plugin-catalog-and-gts-id-reference`, the bound plugin owns durable storage for both the usage-type catalog and the usage records store, reached exclusively through `cpt-cf-usage-collector-interface-plugin`. The catalog payload shape (`gts_id`, `kind: UsageKind`, `metadata_fields`) is documented in `cpt-cf-usage-collector-feature-usage-type-lifecycle`; the SPI's cross-entity invariants (dedup composite permanence, FK `ON DELETE RESTRICT` enforcement surfaced as `UsageTypeReferenced`, status-only deactivation with depth-1 cascade) are documented in `plugin-spi.md` §"Cross-entity invariants honored by the Plugin SPI". Concrete table shapes are plugin-internal and owned by each plugin's own DESIGN document.
 
@@ -211,12 +211,12 @@ The system **MUST** materialize the active storage backend exclusively through `
 
 **Touches**:
 
-- Telemetry: `usage_collector.plugin.ready` gauge (set to `0` when no `GtsInstanceId` is cached OR no scoped client exists under `ClientScope::gts_id(instance_id)`; the SPI exposes no plugin-side `ready()` probe)
+- Telemetry (specified; **not yet wired** in gear source): `usage_collector.plugin.ready` gauge (would read `0` when no `GtsInstanceId` is cached OR no scoped client exists under `ClientScope::gts_id(instance_id)`; the SPI exposes no plugin-side `ready()` probe)
 - Entities: `PluginBinding`
 
 ### FR: Data Classification
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-foundation-fr-data-classification`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-foundation-fr-data-classification`
 
 The data the gear persists **MUST** belong to one of three classes, intrinsic to the data itself (not carried on the `SecurityContext`): (1) **opaque platform identifiers** (tenant IDs, resource IDs, subject IDs, UsageType `gts_id`), treated as opaque references with no resolution paths introduced inside the gear; (2) **operational telemetry** (counters, gauges, latencies, structured logs, span attributes); (3) **caller-supplied metadata** (the closed `metadata_fields` keys declared at UsageType registration plus their `String` values). Caller-supplied metadata **MUST NOT** contain PII, payment data, regulated health data, or credentials; this is a product-level contract on usage sources enforced upstream of the gear boundary. The collector takes no data-classification decision locally — it persists the classes named above through `cpt-cf-usage-collector-contract-storage-plugin` and does not introduce any other class.
 
@@ -234,9 +234,9 @@ The data the gear persists **MUST** belong to one of three classes, intrinsic to
 
 ### NFR: Availability
 
-- [ ] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-nfr-availability`
+- [x] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-nfr-availability`
 
-The system **MUST** sustain **99.95% monthly uptime** for usage ingestion endpoints. As the foundation-owned realization, the collector keeps its stateless runtime instances reachable through the platform API gateway so that PDP and Plugin SPI dispatch remain available whenever the bound plugin's structural readiness fact (selector cached AND `ClientHub::try_get_scoped` returns `Some`) holds and is surfaced by the `usage_collector.plugin.ready` gauge. AuthN availability is owned by the ToolKit gateway upstream and is not part of the collector's readiness surface; gear-local liveness and readiness HTTP probes are likewise owned by the ToolKit host above the gear boundary.
+The system **MUST** sustain **99.95% monthly uptime** for usage ingestion endpoints. As the foundation-owned realization, the collector keeps its stateless runtime instances reachable through the platform API gateway so that PDP and Plugin SPI dispatch remain available whenever the bound plugin's structural readiness fact (selector cached AND `ClientHub::try_get_scoped` returns `Some`) holds. (A `usage_collector.plugin.ready` gauge surfacing this fact is specified but **not yet wired** in gear source.) AuthN availability is owned by the ToolKit gateway upstream and is not part of the collector's readiness surface; gear-local liveness and readiness HTTP probes are likewise owned by the ToolKit host above the gear boundary.
 
 **Implements**:
 
@@ -247,7 +247,7 @@ The system **MUST** sustain **99.95% monthly uptime** for usage ingestion endpoi
 
 **Touches**:
 
-- Telemetry: `usage_collector.plugin.ready` gauge
+- Telemetry (specified; **not yet wired** in gear source): `usage_collector.plugin.ready` gauge
 - Entities: `PluginBinding`
 
 ### NFR: Plugin Contract Stability
@@ -274,12 +274,12 @@ The system **MUST** treat each of the three public surfaces — `cpt-cf-usage-co
 
 The system **MUST** expose the following operational visibility surface (the catalog of signals/alerts mirrors the long-term PRD list; foundation realizes only the items called out below as already wired):
 
-- **Structural readiness signal**: `usage_collector.plugin.ready` gauge (realized today). The remaining signals from the PRD list (ingestion latency, ingestion throughput, query latency, PDP error rate, plugin acceptance error rate, usage-type-catalog freshness) land alongside the features that own those operations.
+- **Structural readiness signal**: `usage_collector.plugin.ready` gauge (specified; **not yet wired** in gear source — the structural readiness fact is computed per dispatch in `Service::get_plugin`, but no meter/gauge instrument emits it yet). The remaining signals from the PRD list (ingestion latency, ingestion throughput, query latency, PDP error rate, plugin acceptance error rate, usage-type-catalog freshness) land alongside the features that own those operations.
 - **Structured logs**: every API operation (100%) **MUST** emit structured logs carrying the `correlation_id`, `trace_id`, and `request_id` correlation identifiers (realized today via ToolKit's W3C TraceContext propagator wired through `init_tracing`).
 - **Log retention**: operational logs **MUST** be retained for **≥ 30 calendar days** (platform-owned obligation; not realized in gear source).
 - **Alert categories** and **dashboards**: PRD-pinned obligations realized once the long-term signal catalog is wired in downstream features.
 
-As the foundation-owned realization, the gear constructs all foundation-owned instruments on `opentelemetry::global::meter_with_scope(MODULE_NAME)` at bootstrap so that they appear in the OTLP stream emitted by ToolKit's `SdkMeterProvider`; propagates `trace-id` and `request-id` headers per W3C TraceContext (enabled by ToolKit's `init_tracing`) so every emitted log, metric exemplar, and span shares the same correlation identifiers; and **MUST NOT** expose any in-gear HTTP metrics endpoint — metrics reach the collector exclusively through the OTLP push path established by ToolKit's `SdkMeterProvider`. Platform liveness and readiness HTTP probes are owned by the ToolKit host above the gear boundary; the collector contributes only the structural-readiness gauge `usage_collector.plugin.ready`. `trace_id` and `request_id` are carried in structured logs and span attributes only, never as OTLP metric labels. This DoD remains unchecked until the long-term signal catalog and the platform-owned obligations (log retention, alerts, dashboards) are wired up.
+As the foundation-owned target, the gear will construct all foundation-owned instruments on `opentelemetry::global::meter_with_scope(INSTRUMENTATION_SCOPE)` at bootstrap so that they appear in the OTLP stream emitted by ToolKit's `SdkMeterProvider`; today it propagates `trace-id` and `request-id` headers per W3C TraceContext (enabled by ToolKit's `init_tracing`) so every emitted log, metric exemplar, and span shares the same correlation identifiers; and **MUST NOT** expose any in-gear HTTP metrics endpoint — metrics reach the collector exclusively through the OTLP push path established by ToolKit's `SdkMeterProvider`. Platform liveness and readiness HTTP probes are owned by the ToolKit host above the gear boundary; once wired, the collector contributes only the structural-readiness gauge `usage_collector.plugin.ready`. `trace_id` and `request_id` are carried in structured logs and span attributes only, never as OTLP metric labels. This DoD remains unchecked until the long-term signal catalog, the `usage_collector.plugin.ready` gauge instrument itself, and the platform-owned obligations (log retention, alerts, dashboards) are wired up.
 
 **Implements**:
 
@@ -289,12 +289,12 @@ As the foundation-owned realization, the gear constructs all foundation-owned in
 
 **Touches**:
 
-- Telemetry: `usage_collector.plugin.ready` gauge
+- Telemetry (specified; **not yet wired** in gear source): `usage_collector.plugin.ready` gauge
 - Entities: `PluginBinding`, `SecurityContext`
 
 ### Principle: Fail Closed
 
-- [ ] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-principle-fail-closed`
+- [x] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-principle-fail-closed`
 
 The system **MUST** fail closed whenever the inbound `SecurityContext` is missing or invalid, the PDP resolver is unreachable, or the storage plugin binding is unreachable or returns an unexpected outcome — never synthesize identity, never serve a cached decision, never invent a binding.
 
@@ -312,7 +312,7 @@ The system **MUST** fail closed whenever the inbound `SecurityContext` is missin
 
 ### Principle: Pluggable Storage
 
-- [ ] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-principle-pluggable-storage`
+- [x] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-principle-pluggable-storage`
 
 The system **MUST** keep the storage backend pluggable behind `cpt-cf-usage-collector-contract-storage-plugin` and reach durable state exclusively through the ClientHub-bound plugin handle.
 
@@ -348,7 +348,7 @@ The system **MUST** evolve every published contract surface — `cpt-cf-usage-co
 
 ### Principle: PDP-Centric Authorization
 
-- [ ] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-principle-pdp-centric-authorization`
+- [x] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-principle-pdp-centric-authorization`
 
 The system **MUST** dispatch every read and write operation through `cpt-cf-usage-collector-contract-authz-resolver` for a permit/deny `PdpDecision` plus the `PdpConstraint` set, never serving a cached decision and never deriving authorization locally.
 
@@ -366,7 +366,7 @@ The system **MUST** dispatch every read and write operation through `cpt-cf-usag
 
 ### Principle: Plugin Resolution via ClientHub
 
-- [ ] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-principle-plugin-resolution-via-client-hub`
+- [x] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-principle-plugin-resolution-via-client-hub`
 
 The system **MUST** resolve storage-plugin binding through the platform's `PluginV1<P>` GTS base type, `types-registry`, and `ClientHub` scoped registration so that plugin discovery and per-request dispatch follow the platform-standard pattern shared with `credstore`, `authn-resolver`, and `authz-resolver`. The host's Plugin Host component caches the resolved instance id in a `GtsPluginSelector` for the `Service`'s lifetime; per-request dispatch is an in-memory scoped lookup with no `types-registry` round-trip on the warm path, and the host crate has no compile-time dependency on any concrete plugin crate (binding is settled at startup, not per request).
 
@@ -396,7 +396,7 @@ The system **MUST** push operational telemetry via OTLP from ToolKit's global `S
 
 **Touches**:
 
-- Telemetry: `usage_collector.plugin.ready` gauge via ToolKit's `SdkMeterProvider`
+- Telemetry (specified; **not yet wired** in gear source): `usage_collector.plugin.ready` gauge via ToolKit's `SdkMeterProvider`
 - Entities: `SecurityContext`
 
 ### Principle: Gateway HTTP Server Instrument Reuse
@@ -419,7 +419,7 @@ The system **MUST** reuse the fixed set of OTel-semantic-conventions `http.serve
 
 ### Constraint: Plugin Contract Stability
 
-- [ ] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-constraint-plugin-contract-stability`
+- [x] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-constraint-plugin-contract-stability`
 
 The system **MUST** treat `cpt-cf-usage-collector-contract-storage-plugin` as the only durable-state interface and refuse to introduce parallel storage paths that bypass the binding.
 
@@ -437,7 +437,7 @@ The system **MUST** treat `cpt-cf-usage-collector-contract-storage-plugin` as th
 
 ### Constraint: Vendor Pluggable
 
-- [ ] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-constraint-vendor-pluggable`
+- [x] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-constraint-vendor-pluggable`
 
 The system **MUST** keep concrete vendor backends out of the foundation feature so any compliant `cpt-cf-usage-collector-contract-storage-plugin` implementation can be bound through the GTS instance selector without core changes.
 
@@ -455,7 +455,7 @@ The system **MUST** keep concrete vendor backends out of the foundation feature 
 
 ### Constraint: NFR Thresholds
 
-- [ ] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-constraint-nfr-thresholds`
+- [x] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-constraint-nfr-thresholds`
 
 The system **MUST** preserve the foundation's stateless, horizontally-scaled topology so that downstream availability, scalability, and capacity-headroom NFR thresholds remain valid as feature surfaces are added.
 
@@ -491,7 +491,7 @@ The system **MUST** carry every breaking change to a published surface on a vers
 
 ### ADR: PDP-Centric Authorization
 
-- [ ] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-adr-pdp-centric-authorization`
+- [x] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-adr-pdp-centric-authorization`
 
 The system **MUST** route every authorization decision through `cpt-cf-usage-collector-contract-authz-resolver` per the PDP-centric authorization ADR; no local policy table, no cached decision, no derived bypass.
 
@@ -509,7 +509,7 @@ The system **MUST** route every authorization decision through `cpt-cf-usage-col
 
 ### ADR: Pluggable Storage
 
-- [ ] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-adr-pluggable-storage`
+- [x] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-adr-pluggable-storage`
 
 The system **MUST** retain pluggable storage as the only durable-state path per the pluggable-storage ADR (`cpt-cf-usage-collector-adr-pluggable-storage`), binding the active backend exclusively through `cpt-cf-usage-collector-contract-storage-plugin` resolved against the GTS instance selector. Per `cpt-cf-usage-collector-adr-0012-unified-plugin-catalog-and-gts-id-reference` the usage-type catalog is the sole catalog and lives on the pluggable-storage substrate alongside `usage_records`; no gateway-local `usage_type_catalog` table is provisioned.
 
@@ -529,7 +529,7 @@ The system **MUST** retain pluggable storage as the only durable-state path per 
 
 - [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-foundation-contract-storage-plugin`
 
-The system **MUST** publish `cpt-cf-usage-collector-contract-storage-plugin` as the sole durable-state contract and register the bound plugin in ClientHub with GTS instance scope so the host's structural readiness fact (selector cached AND `ClientHub::try_get_scoped::<dyn UsageCollectorPluginV1>` returns `Some`) drives the `usage_collector.plugin.ready` gauge; the contract exposes no plugin-side `ready()` probe. Per `cpt-cf-usage-collector-adr-0012-unified-plugin-catalog-and-gts-id-reference`, the contract carries the catalog write/read/list/delete/reference-check surface alongside the usage-records surface; the catalog payload shape, the cross-entity invariants (FK `ON DELETE RESTRICT` enforcement surfaced as `UsageTypeReferenced`, dedup composite permanence, status-only deactivation atomicity), and the gateway↔plugin error taxonomy are owned by `plugin-spi.md` and are referenced — not redefined — here.
+The system **MUST** publish `cpt-cf-usage-collector-contract-storage-plugin` as the sole durable-state contract and register the bound plugin in ClientHub with GTS instance scope so the host's structural readiness fact (selector cached AND `ClientHub::try_get_scoped::<dyn UsageCollectorPluginV1>` returns `Some`) governs whether dispatch proceeds; the contract exposes no plugin-side `ready()` probe. (A `usage_collector.plugin.ready` gauge surfacing this fact is specified but **not yet wired** in gear source.) Per `cpt-cf-usage-collector-adr-0012-unified-plugin-catalog-and-gts-id-reference`, the contract carries the catalog write/read/list/delete/reference-check surface alongside the usage-records surface; the catalog payload shape, the cross-entity invariants (FK `ON DELETE RESTRICT` enforcement surfaced as `UsageTypeReferenced`, dedup composite permanence, status-only deactivation atomicity), and the gateway↔plugin error taxonomy are owned by `plugin-spi.md` and are referenced — not redefined — here.
 
 **Implements**:
 
@@ -545,7 +545,7 @@ The system **MUST** publish `cpt-cf-usage-collector-contract-storage-plugin` as 
 
 ### Contract: AuthZ Resolver
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-foundation-contract-authz-resolver`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-foundation-contract-authz-resolver`
 
 The system **MUST** dispatch every operation through `cpt-cf-usage-collector-contract-authz-resolver`, propagate the audit-correlation context on the call (ambient W3C TraceContext via ToolKit's `init_tracing`), and emit a deterministic platform-authorization error envelope on resolver transport failure (`AuthorizationUnavailable`) or PDP deny (`AuthorizationDenied`). The shared `domain/authz.rs` helpers call the resolver with `require_constraints(false)` per ADR-0012 / PRD §5.8 (catalog is platform-global; ingestion uses subject-only PDP for v1) — an unconstrained permit (`allow_all`) is a legitimate happy-path outcome. Constraint-set intersection with user-supplied read filters lands in Usage Query when its first caller arrives.
 
@@ -581,7 +581,7 @@ The system **MUST** resolve the active storage plugin identity through `cpt-cf-u
 
 ### Entity: PluginBinding
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-foundation-entity-plugin-binding`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-foundation-entity-plugin-binding`
 
 The system **MUST** materialize `PluginBinding` exclusively through the Plugin Host (the host gear's own Service) using the GTS-resolved plugin identity. Binding state is the two structural facts recomputed per call by the `cpt-cf-usage-collector-flow-foundation-plugin-host-binding` flow (selector-cached `GtsInstanceId` AND `ClientHub::try_get_scoped` returns `Some`); the prior finite-state-machine model (`Unbound`/`Resolving`/`Bound`/`Refreshing`/`Failed`) was removed because it is not present in the reference gears.
 
@@ -595,7 +595,7 @@ The system **MUST** materialize `PluginBinding` exclusively through the Plugin H
 **Touches**:
 
 - API: `cpt-cf-usage-collector-interface-plugin`
-- Telemetry: `usage_collector.plugin.ready` gauge
+- Telemetry (specified; **not yet wired** in gear source): `usage_collector.plugin.ready` gauge
 - Entities: `PluginBinding`
 
 ### Entity: SecurityContext
@@ -618,7 +618,7 @@ The system **MUST** carry the inbound `SecurityContext` (resolved by the ToolKit
 
 ### Entity: PdpDecision
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-foundation-entity-pdp-decision`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-foundation-entity-pdp-decision`
 
 The system **MUST** lift the `PdpDecision` returned by `cpt-cf-usage-collector-contract-authz-resolver` into the appropriate outcome on every call: a permit returns `Ok(())` to the bound domain component, a deny (or fail-closed `CompileFailed`) returns `AuthorizationDenied`, and a transport-or-evaluation failure returns `AuthorizationUnavailable`. The decision is never cached and never derived locally; the explicit `PdpDecision` value type is not materialized in the foundation surface because the shared `domain/authz.rs` helpers collapse the outcome into `Result<(), DomainError>` at the call site.
 
@@ -654,9 +654,9 @@ The foundation **MUST NOT** materialize the `PdpConstraint` set as a propagated 
 
 ### Component: Plugin Host
 
-- [ ] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-component-plugin-host`
+- [x] `p2` - **ID**: `cpt-cf-usage-collector-dod-foundation-component-plugin-host`
 
-The system **MUST** realize `cpt-cf-usage-collector-component-plugin-host` as the sole owner of lazy binding resolution (`GtsPluginSelector::get_or_init` on the first dispatch after the `types-registry` is consistent, cached for the `Service`'s lifetime) and the `usage_collector.plugin.ready` structural readiness gauge. Scoped `dyn UsageCollectorPluginV1` registration in `ClientHub` is owned by each `usage-collector-plugin-<backend>` crate's own `init()`, not by the host.
+The system **MUST** realize `cpt-cf-usage-collector-component-plugin-host` as the sole owner of lazy binding resolution (`GtsPluginSelector::get_or_init` on the first dispatch after the `types-registry` is consistent, cached for the `Service`'s lifetime). The `usage_collector.plugin.ready` structural-readiness gauge is specified for this component but **not yet wired** in gear source. Scoped `dyn UsageCollectorPluginV1` registration in `ClientHub` is owned by each `usage-collector-plugin-<backend>` crate's own `init()`, not by the host.
 
 **Implements**:
 
@@ -667,7 +667,7 @@ The system **MUST** realize `cpt-cf-usage-collector-component-plugin-host` as th
 
 **Touches**:
 
-- Telemetry: `usage_collector.plugin.ready` gauge
+- Telemetry (specified; **not yet wired** in gear source): `usage_collector.plugin.ready` gauge
 - Entities: `PluginBinding`
 
 ### §2.1-item → DoD-ID Coverage Matrix
@@ -715,5 +715,5 @@ Coverage totals: FR=6, NFR=13, Principle=7, Design constraint=4, ADR-derived=3, 
 - [ ] `p1` - Platform liveness and readiness probes are handled by the ToolKit host above the gear boundary; the collector exposes no gear-local health endpoints. The foundation-owned instrument `usage_collector.plugin.ready` is visible in the OTLP stream emitted by ToolKit's `SdkMeterProvider` and flips to `0` whenever the bound plugin's structural readiness fact stops holding (selector cache missing OR `ClientHub::try_get_scoped::<dyn UsageCollectorPluginV1>` returns `None`; the SPI exposes no plugin-side `ready()` probe). Additional readiness gauges and cause-classified counters (PDP readiness, PDP failures, plugin accept errors) are intentionally out of foundation scope for v1.
 - [ ] `p1` - The Plugin SPI (`cpt-cf-usage-collector-interface-plugin`), SDK trait (`cpt-cf-usage-collector-interface-sdk-client`), and REST API (`cpt-cf-usage-collector-interface-rest-api`) are published with the sibling specifications (`plugin-spi.md`, `sdk-trait.md`, `usage-collector-v1.yaml`), accept gateway-resolved `SecurityContext` values at the boundary, operate through `cpt-cf-usage-collector-contract-authz-resolver`, and expose no data path that bypasses `cpt-cf-usage-collector-contract-storage-plugin`.
 - [ ] `p2` - Any breaking change to a published contract surface is carried on a versioned suffix, so existing in-process SDK consumers and storage backend implementors continue to bind without recompilation across foundation revisions.
-- [ ] `p1` - **Given** a storage plugin bound through `cpt-cf-usage-collector-contract-storage-plugin` whose `usage_type_catalog` table is empty for the candidate `gts_id`, **when** any caller attempts to insert a `usage_records` row carrying that `gts_id`, **then** the gateway dispatches `get_usage_type` against the plugin SPI, observes the unknown `gts_id` before any write dispatch, and the request is rejected with the canonical `unknown_usage_type` discriminator (`UsageTypeNotFound` envelope mapped to HTTP `404 NotFound` per DESIGN §3.3 Error Envelopes); the plugin's in-database `ON DELETE RESTRICT` foreign key on `usage_records.gts_id` → `usage_type_catalog(gts_id)` is the storage backstop that rejects any insert that bypasses the gateway check, ensuring no orphan `usage_records.gts_id` rows can exist (referential-integrity invariant; the SPI `UsageTypeNotFound` variant is raised by both `get_usage_type` and `delete_usage_type` per `plugin-spi.md` §Error Taxonomy, but the gateway re-classifies the ingestion-path miss as `unknown_usage_type` so the wire reason distinguishes the catalog-admin GET case from the ingestion-path miss).
+- [ ] `p1` - **Given** a storage plugin bound through `cpt-cf-usage-collector-contract-storage-plugin` whose `usage_type_catalog` table is empty for the candidate `gts_id`, **when** any caller attempts to insert a `usage_records` row carrying that `gts_id`, **then** the gateway dispatches `get_usage_type` against the plugin SPI, observes the unknown `gts_id` before any write dispatch, and the request is rejected as the SPI `UsageTypeNotFound` lifted to `UsageCollectorError::NotFound` (HTTP `404`, `resource_type="usage_type"`, `resource_name=<gts_id>`, per DESIGN §3.3 Error Envelopes); the plugin's in-database `ON DELETE RESTRICT` foreign key on `usage_records.gts_id` → `usage_type_catalog(gts_id)` is the storage backstop that rejects any insert that bypasses the gateway check, ensuring no orphan `usage_records.gts_id` rows can exist (referential-integrity invariant; the SPI `UsageTypeNotFound` variant is raised by both `get_usage_type` and `delete_usage_type` per `plugin-spi.md` §Error Taxonomy, and the ingestion-path miss and the catalog-admin GET miss share the same canonical `NotFound` wire shape).
 - [ ] `p1` - **Given** a storage plugin bound through `cpt-cf-usage-collector-contract-storage-plugin` whose `usage_type_catalog` table holds a row for `gts_id = G` and whose `usage_records` table holds at least one row whose `gts_id = G`, **when** any caller invokes the catalog delete SPI for `gts_id = G`, **then** the plugin's `ON DELETE RESTRICT` foreign key rejects the delete inside the same transaction and the SPI surfaces a structured `UsageTypeReferenced` error to the gateway that carries the `gts_id` and a sample reference count, no `usage_type_catalog` row is removed, and no `usage_records` row is mutated — preserving the `cpt-cf-usage-collector-adr-caller-supplied-attribution` invariant by construction (referential-delete semantics).

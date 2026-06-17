@@ -6,8 +6,7 @@ use uuid::Uuid;
 
 use crate::error::UsageCollectorPluginError;
 use crate::models::{
-    AggregationResult, AggregationSpec, MetadataFilter, TimeWindow, UsageRecord, UsageType,
-    UsageTypeGtsId,
+    AggregationResult, AggregationSpec, MetadataFilter, UsageRecord, UsageType, UsageTypeGtsId,
 };
 
 /// Backend storage adapter trait implemented by
@@ -42,20 +41,26 @@ pub trait UsageCollectorPluginV1: Send + Sync + 'static {
     async fn get_usage_record(&self, uuid: Uuid) -> Result<UsageRecord, UsageCollectorPluginError>;
 
     /// Aggregated query over usage records.
+    ///
+    /// The time window is expressed inside `query.filter` as a
+    /// `created_at ge … and created_at lt …` predicate; there is no
+    /// separate typed parameter.
     async fn query_aggregated_usage_records(
         &self,
         gts_id: UsageTypeGtsId,
-        window: TimeWindow,
         query: &ODataQuery,
         metadata_filter: &[MetadataFilter],
         aggregation: AggregationSpec,
     ) -> Result<AggregationResult, UsageCollectorPluginError>;
 
     /// Keyset-paginated list of usage records.
+    ///
+    /// `query.order` is guaranteed non-empty (the gateway defaults to
+    /// `(created_at asc, uuid asc)` if the caller omits `$orderby`), so
+    /// plugins MUST honour it for stable pagination.
     async fn list_usage_records(
         &self,
         gts_id: UsageTypeGtsId,
-        window: TimeWindow,
         query: &ODataQuery,
         metadata_filter: &[MetadataFilter],
     ) -> Result<ODataPage<UsageRecord>, UsageCollectorPluginError>;

@@ -3,14 +3,18 @@
 use toolkit::gts::PluginV1;
 use toolkit_gts::gts_type_schema;
 
+/// Canonical GTS resource type for Usage Type
+/// `resource_type` carried by [`crate::UsageCollectorError`] envelopes about
+/// a usage type (`create` / `get` / `list` / `delete`). Match
+/// [`crate::UsageCollectorError::NotFound::resource_type`] etc. against this.
+pub const USAGE_TYPE_RESOURCE: &str = "gts.cf.core.uc.usage_type.v1~";
+
+/// Canonical GTS resource type for the **ingestion** surface — the wire
+/// `resource_type` carried by [`crate::UsageCollectorError`] envelopes about
+/// a usage record (`create` / `deactivate` / `list` / `aggregate`).
+pub const USAGE_RECORD_RESOURCE: &str = "gts.cf.core.uc.usage_record.v1~";
+
 /// GTS plugin specification for usage-collector storage backends.
-///
-/// Concrete storage plugins publish a `PluginV1<UsageCollectorPluginSpecV1>`
-/// instance to `types-registry` and register their scoped
-/// [`crate::plugin_api::UsageCollectorPluginV1`] client in `ClientHub` under
-/// `ClientScope::gts_id(&instance_id)`. The empty `properties = ""` is
-/// intentional — instance metadata (`vendor`, `priority`) is carried by the
-/// `PluginV1<P>` base type.
 // @cpt-dod:cpt-cf-usage-collector-dod-foundation-contract-storage-plugin:p1
 // @cpt-dod:cpt-cf-usage-collector-dod-foundation-contract-gts-registry:p1
 #[derive(Default)]

@@ -18,6 +18,7 @@ cpt:
   - [Emit Record (single)](#emit-record-single)
   - [Emit Records Batch](#emit-records-batch)
   - [Compensation Emission](#compensation-emission)
+  - [Get Record (by id)](#get-record-by-id)
 - [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
   - [Attribution and PDP Authorization](#attribution-and-pdp-authorization)
   - [Semantics Enforcement on Ingest](#semantics-enforcement-on-ingest)
@@ -63,6 +64,7 @@ cpt:
   - [Entity: UsageType](#entity-usagetype)
   - [Entity: Security Context](#entity-security-context)
   - [API: POST /usage-collector/v1/records](#api-post-usage-collectorv1records)
+  - [API: GET /usage-collector/v1/records/{id}](#api-get-usage-collectorv1recordsid)
   - [§2.3-item → DoD-ID Coverage Matrix](#23-item--dod-id-coverage-matrix)
 - [6. Acceptance Criteria](#6-acceptance-criteria)
 
@@ -127,11 +129,11 @@ This feature exists so that at-least-once delivery of usage records is uniformly
 
 ### Emit Record (single)
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-flow-usage-emission-emit-record`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-flow-usage-emission-emit-record`
 
 **Actor**: `cpt-cf-usage-collector-actor-usage-source`
 
-> **Surface posture (single emit).** This flow describes the SDK single-emit path `UsageCollectorClientV1::create_usage_record(ctx, …)`, which returns `Result<UsageRecord, UsageCollectorError>`: any per-record validation, authorization, or SPI failure lifts to a whole-call `Err(UsageCollectorError::*)` (typed variants: `Authorization`, `UsageTypeNotFound`, `UnknownMetadataKey`, `InvalidMetadataField` / `DuplicateMetadataField`, `IdempotencyConflict`, `PluginUnavailable`, `Internal`, …) rather than an `outcome="rejected"` envelope. The REST single-emit form is wire-level a one-item batch through `POST /usage-collector/v1/records`, so its `CreateUsageRecordsResponse` envelope semantics (HTTP `200` on accept, `207 Multi-Status` if `results[0].outcome="rejected"`) live in `cpt-cf-usage-collector-flow-usage-emission-emit-records-batch`. Per-record envelope semantics apply ONLY on the REST path or the SDK batch form (`create_usage_records`).
+> **Surface posture (single emit).** This flow describes the SDK single-emit path `UsageCollectorClientV1::create_usage_record(ctx, …)`, which returns `Result<UsageRecord, UsageCollectorError>`: any per-record validation, authorization, or SPI failure lifts to a whole-call `Err(UsageCollectorError::*)` (category variants: `PermissionDenied`, `NotFound`, `InvalidArgument` — with `ValidationReason::UnknownMetadataKey` / `MetadataFieldEmptyString` / `MetadataFieldDuplicate` / etc. — `Conflict` for `IdempotencyConflict`, `ServiceUnavailable`, `Internal`) rather than an `outcome="rejected"` envelope. The REST single-emit form is wire-level a one-item batch through `POST /usage-collector/v1/records`, so its `CreateUsageRecordsResponse` envelope semantics (HTTP `200` on accept, `207 Multi-Status` if `results[0].outcome="rejected"`) live in `cpt-cf-usage-collector-flow-usage-emission-emit-records-batch`. Per-record envelope semantics apply ONLY on the REST path or the SDK batch form (`create_usage_records`).
 
 **Success Scenarios**:
 
@@ -141,36 +143,36 @@ This feature exists so that at-least-once delivery of usage records is uniformly
 **Error Scenarios**:
 
 - The SDK trait is invoked without a `ctx` argument — disallowed at compile time by the `create_usage_record(ctx: &SecurityContext, …)` signature; the collector never synthesizes identity. (REST callers without an `Extension<SecurityContext>` are rejected upstream — that path lives in `cpt-cf-usage-collector-flow-usage-emission-emit-records-batch:inst-emit-batch-missing-ctx`.)
-- PDP denies the ingestion attribution tuple — lifted as `Err(UsageCollectorError::Authorization(_))`; no SPI dispatch occurs.
-- UsageType `gts_id` is not present in the plugin's `usage_type_catalog` (the per-record `get_usage_type` SPI dispatch surfaces `Err(UsageTypeNotFound { gts_id })`) — re-classified at the call site as `Err(UsageCollectorError::UsageTypeNotFound(gts_id))`; no usage-record write dispatch occurs.
-- Counter record carries a negative `value` (violates the counter non-negativity invariant `value >= 0`) — once `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` lands, this will lift as `Err(UsageCollectorError::Validation(_))` carrying the `SEMANTICS_VIOLATION` reason; today the algorithm is not yet wired and counter-negative submissions reach the SPI unchecked (see `usage-emission.sync-report.md` outstanding #2).
-- `RecordMetadata` violates the closed-shape rule — lifted as `Err(UsageCollectorError::UnknownMetadataKey { key })` citing the offending key; no SPI dispatch occurs.
-- `RecordMetadata` exceeds the fixed 8 KiB cap — lifted as `Err(UsageCollectorError::MetadataValidationError(_))` carrying the measured size and the configured cap; no SPI dispatch occurs.
+- PDP denies the ingestion attribution tuple — lifted as `Err(UsageCollectorError::PermissionDenied { .. })`; no SPI dispatch occurs.
+- UsageType `gts_id` is not present in the plugin's `usage_type_catalog` (the per-record `get_usage_type` SPI dispatch surfaces `Err(UsageTypeNotFound { gts_id })`) — re-classified at the call site as `Err(UsageCollectorError::NotFound { .. })`; no usage-record write dispatch occurs.
+- Counter record carries a negative `value` (violates the counter non-negativity invariant `value >= 0`) — once `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` lands, this will lift as `Err(UsageCollectorError::InvalidArgument { reason: SemanticsViolation, .. })`; today the algorithm is not yet wired and counter-negative submissions reach the SPI unchecked (see `usage-emission.sync-report.md` outstanding #2).
+- `RecordMetadata` violates the closed-shape rule — lifted as `Err(UsageCollectorError::InvalidArgument { reason: UnknownMetadataKey, .. })` citing the offending key; no SPI dispatch occurs.
+- `RecordMetadata` exceeds the fixed 8 KiB cap — lifted as `Err(UsageCollectorError::InvalidArgument { reason: MetadataValidation, .. })` carrying the measured size and the configured cap; no SPI dispatch occurs.
 - Plugin SPI transport / readiness / persistence error (any `Err(UsageCollectorPluginError::*)` other than `IdempotencyConflict`) — lifted through `UsageCollectorPluginError → DomainError → UsageCollectorError` (e.g., `PluginUnavailable`, `Internal`); no record is acknowledged.
-- A same-key submission whose canonical fields DIFFER from the stored record (e.g., the same `(tenant_id, gts_id, idempotency_key)` resubmitted with a different `value`) — the plugin returns `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, gts_id })`, which lifts as `Err(UsageCollectorError::IdempotencyConflict { idempotency_key, gts_id })` (AlreadyExists/409) carrying the conflicting key; the second write is NOT silently absorbed.
+- A same-key submission whose canonical fields DIFFER from the stored record (e.g., the same `(tenant_id, gts_id, idempotency_key)` resubmitted with a different `value`) — the plugin returns `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, existing_uuid })`, which lifts as `Err(UsageCollectorError::Conflict { reason: IdempotencyConflict, .. })` (Aborted/409) carrying the conflicting key; the second write is NOT silently absorbed.
 
 **Steps**:
 
-1. [ ] - `p1` - Caller invokes `UsageCollectorClientV1::create_usage_record(ctx, record)` per `sdk-trait.md` Method 1 with `ctx: &SecurityContext` as the first parameter and a `UsageRecord` payload carrying the mandatory caller-supplied `IdempotencyKey` - `inst-emit-record-submit`
-2. [ ] - `p1` - The `ctx: &SecurityContext` parameter is compile-time required by the trait signature, so a missing context is rejected at the type-system boundary rather than at runtime; the collector never synthesizes identity. (The REST one-item-batch surface routes its `Extension<SecurityContext>` check through `cpt-cf-usage-collector-flow-usage-emission-emit-records-batch:inst-emit-batch-missing-ctx`.) - `inst-emit-record-missing-ctx`
-3. [ ] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization` to authorize the attribution tuple through `cpt-cf-usage-collector-flow-foundation-pdp-authorize` (per-component `authz_scope` helper wrapping `cpt-cf-usage-collector-contract-authz-resolver`) against the inbound `SecurityContext` and the attribution tuple (`tenant_id`, `ResourceRef`, optional `SubjectRef`, UsageType `gts_id`), receiving the (`PdpDecision`, `PdpConstraint` set) pair - `inst-emit-record-attrib-authz`
-4. [ ] - `p1` - **IF** the per-record authorization outcome is `deny` lift the deny into `Err(UsageCollectorError::Authorization(_))` (carrying the propagated platform-authorization context with `reason="AUTHZ"`) and **RETURN** that `Err` — no SPI dispatch occurs - `inst-emit-record-pdp-deny`
-5. [ ] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` with the record's UsageType `gts_id` to obtain the resolved `UsageType` (`kind` read from the catalog row's `kind` field) and the declared `metadata_fields` via a `get_usage_type` SPI dispatch against `cpt-cf-usage-collector-contract-storage-plugin` - `inst-emit-record-catalog-lookup`
-6. [ ] - `p1` - **IF** the catalog lookup returns `not-found` lift the absence into `Err(UsageCollectorError::UsageTypeNotFound(gts_id))` and **RETURN** that `Err` without falling back to a direct Plugin SPI catalog read - `inst-emit-record-usage-type-not-found`
-7. [ ] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` with the submitted value and the catalog-resolved `UsageType` (and optional `unit`) - `inst-emit-record-semantics-check`
-8. [ ] - `p1` - **IF** the semantics-enforcement algorithm returns a counter-or-gauge semantics-violation violation lift the violation into `Err(UsageCollectorError::Validation(_))` carrying `context.reason="SEMANTICS_VIOLATION"`, then **RETURN** that `Err` - `inst-emit-record-semantics-invalid`
-9. [ ] - `p1` - Perform the **closed-shape** metadata-key check against the usage type's `metadata_fields` (resolved per record via the `get_usage_type` SPI dispatch above): every key in the candidate `RecordMetadata` MUST be a declared member of `metadata_fields`; otherwise lift the offending key into `Err(UsageCollectorError::UnknownMetadataKey { key })` and **RETURN** that `Err` - `inst-emit-record-metadata-closed-shape`
-10. [ ] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-metadata-size-cap-enforcement` against the record's `RecordMetadata` payload (fixed 8 KiB cap) - `inst-emit-record-metadata-cap`
-11. [ ] - `p1` - **IF** the metadata-size-cap algorithm returns `metadata-too-large` lift the measurement into `Err(UsageCollectorError::MetadataValidationError(_))` carrying the measured size and the configured cap, then **RETURN** that `Err` - `inst-emit-record-metadata-too-large`
-12. [ ] - `p1` - **TRY** invoke the Plugin SPI Method 1 single-record persist capability (`create_usage_record`) under the composite key `(tenant_id, gts_id, idempotency_key)` per `plugin-spi.md` — the plugin is the single source of dedup truth (the UNIQUE `(tenant_id, gts_id, idempotency_key)` constraint atomically performs the dedup check and the persist), and the trait surfaces either `Ok(UsageRecord)` — covering **both** a fresh persist and a silent-absorb exact-equality dedup (byte-identical stored body, no second write, counter totals not inflated) — or `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, gts_id })` for a same-key canonical-field mismatch, or another `Err(UsageCollectorPluginError::*)` variant for SPI transport / readiness / persistence failures. The ambient `tracing::Span` / OpenTelemetry context opened by the ToolKit gateway middleware (REST) or the in-process caller (SDK) propagates across the SPI call per `plugin-spi.md` §"Trace context propagation"; trace context is ambient, not an explicit parameter - `inst-emit-record-spi-dispatch`
-13. [ ] - `p1` - **CATCH** Plugin SPI transport / readiness / persistence error (any `Err` variant other than `IdempotencyConflict`) - `inst-emit-record-spi-catch`
-    1. [ ] - `p1` - Lift the SPI failure through `UsageCollectorPluginError → DomainError → UsageCollectorError` (e.g., `Err(UsageCollectorError::PluginUnavailable)` for readiness, `Err(UsageCollectorError::Internal(_))` for unmapped variants) and **RETURN** that `Err`; no record is acknowledged - `inst-emit-record-spi-fail`
-14. [ ] - `p1` - **IF** the SPI returned `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, gts_id })` (a same-key submission whose canonical fields differ from the stored record) lift it into `Err(UsageCollectorError::IdempotencyConflict { idempotency_key, gts_id })` (AlreadyExists/409) and **RETURN** that `Err` — the second write is NOT silently absorbed - `inst-emit-record-conflict`
-15. [ ] - `p1` - **ELSE** the SPI returned `Ok(UsageRecord)`; **RETURN** that `Ok(UsageRecord)` with the persisted body (the caller-supplied `uuid` plus all caller-supplied canonical fields, byte-identical on a fresh insert, byte-identical to the previously persisted row on a silent-absorb exact-equality retry) - `inst-emit-record-accepted`
+1. [x] - `p1` - Caller invokes `UsageCollectorClientV1::create_usage_record(ctx, record)` per `sdk-trait.md` Method 1 with `ctx: &SecurityContext` as the first parameter and a `UsageRecord` payload carrying the mandatory caller-supplied `IdempotencyKey` - `inst-emit-record-submit`
+2. [x] - `p1` - The `ctx: &SecurityContext` parameter is compile-time required by the trait signature, so a missing context is rejected at the type-system boundary rather than at runtime; the collector never synthesizes identity. (The REST one-item-batch surface routes its `Extension<SecurityContext>` check through `cpt-cf-usage-collector-flow-usage-emission-emit-records-batch:inst-emit-batch-missing-ctx`.) - `inst-emit-record-missing-ctx`
+3. [x] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization` to authorize the attribution tuple through `cpt-cf-usage-collector-flow-foundation-pdp-authorize` (per-component `authz_scope` helper wrapping `cpt-cf-usage-collector-contract-authz-resolver`) against the inbound `SecurityContext` and the attribution tuple (`tenant_id`, `ResourceRef`, optional `SubjectRef`, UsageType `gts_id`), receiving the (`PdpDecision`, `PdpConstraint` set) pair - `inst-emit-record-attrib-authz`
+4. [x] - `p1` - **IF** the per-record authorization outcome is `deny` lift the deny into `Err(UsageCollectorError::PermissionDenied { .. })` (carrying the propagated platform-authorization context with `reason="AUTHZ"`) and **RETURN** that `Err` — no SPI dispatch occurs - `inst-emit-record-pdp-deny`
+5. [x] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` with the record's UsageType `gts_id` to obtain the resolved `UsageType` (`kind` read from the catalog row's `kind` field) and the declared `metadata_fields` via a `get_usage_type` SPI dispatch against `cpt-cf-usage-collector-contract-storage-plugin` - `inst-emit-record-catalog-lookup`
+6. [x] - `p1` - **IF** the catalog lookup returns `not-found` lift the absence into `Err(UsageCollectorError::NotFound { .. })` and **RETURN** that `Err` without falling back to a direct Plugin SPI catalog read - `inst-emit-record-usage-type-not-found`
+7. [x] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` with the submitted value and the catalog-resolved `UsageType` (and optional `unit`) - `inst-emit-record-semantics-check`
+8. [x] - `p1` - **IF** the semantics-enforcement algorithm returns a counter-or-gauge semantics-violation violation lift the violation into `Err(UsageCollectorError::InvalidArgument { reason: SemanticsViolation, .. })` (wire `field_violations[0].reason="SEMANTICS_VIOLATION"`), then **RETURN** that `Err` - `inst-emit-record-semantics-invalid`
+9. [x] - `p1` - Perform the **closed-shape** metadata-key check against the usage type's `metadata_fields` (resolved per record via the `get_usage_type` SPI dispatch above): every key in the candidate `RecordMetadata` MUST be a declared member of `metadata_fields`; otherwise lift the offending key into `Err(UsageCollectorError::InvalidArgument { reason: UnknownMetadataKey, .. })` and **RETURN** that `Err` - `inst-emit-record-metadata-closed-shape`
+10. [x] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-metadata-size-cap-enforcement` against the record's `RecordMetadata` payload (fixed 8 KiB cap) - `inst-emit-record-metadata-cap`
+11. [x] - `p1` - **IF** the metadata-size-cap algorithm returns `metadata-too-large` lift the measurement into `Err(UsageCollectorError::InvalidArgument { reason: MetadataValidation, .. })` carrying the measured size and the configured cap, then **RETURN** that `Err` - `inst-emit-record-metadata-too-large`
+12. [x] - `p1` - **TRY** invoke the Plugin SPI Method 1 single-record persist capability (`create_usage_record`) under the composite key `(tenant_id, gts_id, idempotency_key)` per `plugin-spi.md` — the plugin is the single source of dedup truth (the UNIQUE `(tenant_id, gts_id, idempotency_key)` constraint atomically performs the dedup check and the persist), and the trait surfaces either `Ok(UsageRecord)` — covering **both** a fresh persist and a silent-absorb exact-equality dedup (byte-identical stored body, no second write, counter totals not inflated) — or `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, gts_id })` for a same-key canonical-field mismatch, or another `Err(UsageCollectorPluginError::*)` variant for SPI transport / readiness / persistence failures. The ambient `tracing::Span` / OpenTelemetry context opened by the ToolKit gateway middleware (REST) or the in-process caller (SDK) propagates across the SPI call per `plugin-spi.md` §"Trace context propagation"; trace context is ambient, not an explicit parameter - `inst-emit-record-spi-dispatch`
+13. [x] - `p1` - **CATCH** Plugin SPI transport / readiness / persistence error (any `Err` variant other than `IdempotencyConflict`) - `inst-emit-record-spi-catch`
+    1. [x] - `p1` - Lift the SPI failure through `UsageCollectorPluginError → DomainError → UsageCollectorError` (e.g., `Err(UsageCollectorError::ServiceUnavailable { .. })` for readiness, `Err(UsageCollectorError::Internal { .. })` for unmapped variants) and **RETURN** that `Err`; no record is acknowledged - `inst-emit-record-spi-fail`
+14. [x] - `p1` - **IF** the SPI returned `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, existing_uuid })` (a same-key submission whose canonical fields differ from the stored record) lift it into `Err(UsageCollectorError::Conflict { reason: IdempotencyConflict, .. })` (Aborted/409) and **RETURN** that `Err` — the second write is NOT silently absorbed - `inst-emit-record-conflict`
+15. [x] - `p1` - **ELSE** the SPI returned `Ok(UsageRecord)`; **RETURN** that `Ok(UsageRecord)` with the persisted body (the caller-supplied `uuid` plus all caller-supplied canonical fields, byte-identical on a fresh insert, byte-identical to the previously persisted row on a silent-absorb exact-equality retry) - `inst-emit-record-accepted`
 
 ### Emit Records Batch
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-flow-usage-emission-emit-records-batch`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-flow-usage-emission-emit-records-batch`
 
 **Actor**: `cpt-cf-usage-collector-actor-usage-source`
 
@@ -189,35 +191,37 @@ This feature exists so that at-least-once delivery of usage records is uniformly
 
 **Steps**:
 
-1. [ ] - `p1` - Caller submits an `CreateUsageRecordsRequest` of up to 100 `UsageRecord` payloads — on REST through `POST /usage-collector/v1/records`; the REST handler receives `Extension<SecurityContext>` populated by ToolKit gateway middleware (`OperationBuilder::authenticated()`) and W3C audit-correlation headers — or on the SDK through `UsageCollectorClientV1::create_usage_records(ctx, ...)` with `ctx: &SecurityContext` as the first parameter per `sdk-trait.md` Method 2; the payload carries one mandatory caller-supplied `IdempotencyKey` per record - `inst-emit-batch-submit`
-2. [ ] - `p1` - **IF** the REST handler receives no `Extension<SecurityContext>` (gateway middleware rejected the call upstream) or the SDK trait is invoked without a `ctx` argument **RETURN** the canonical `Unauthenticated` `Problem` envelope per `usage-collector-v1.yaml` default response; the collector never synthesizes identity - `inst-emit-batch-missing-ctx`
-3. [ ] - `p1` - **IF** the request `records` array is empty (`minItems: 1` violation) or larger than 100 entries (`maxItems: 100` violation per the wire-level cap declared in `usage-collector-v1.yaml`) **RETURN** the request-level structural validation `Problem` envelope (HTTP `400`) per `usage-collector-v1.yaml` without any per-record processing - `inst-emit-batch-cap-check`
-4. [ ] - `p1` - PDP authorization runs per-record inline inside the foreach validation loop at step 5 (see `inst-emit-batch-record-pdp`); there is no upfront batch-PDP pre-pass — `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization` is invoked once per record at the point where its outcome is consumed, preserving the per-tuple PDP contract (one PDP call per record's caller-supplied attribution tuple via the per-component `authz_scope` helper wrapping `cpt-cf-usage-collector-contract-authz-resolver`) - `inst-emit-batch-pdp`
-5. [ ] - `p1` - **FOR EACH** `UsageRecord` in the request `records` array (in input order, preserving index for the per-record result), consume its `allow`/`deny` outcome from step 4 - `inst-emit-batch-foreach-validate`
-   1. [ ] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization` for this record via the per-component `authz_scope` helper (`PolicyEnforcer::access_scope_with(ctx, ...)` against `cpt-cf-usage-collector-contract-authz-resolver`) with the inbound `SecurityContext` and the record's attribution tuple (`tenant_id`, `ResourceRef`, optional `SubjectRef`, UsageType `gts_id`), receiving an `allow`/`deny` outcome - `inst-emit-batch-record-pdp`
-   2. [ ] - `p1` - **IF** the per-record PDP outcome is `deny` record the per-record outcome `rejected` with the propagated platform-authorization envelope (`context.reason="AUTHZ"`) and CONTINUE to the next record - `inst-emit-batch-record-deny`
-   3. [ ] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` with the record's UsageType `gts_id` - `inst-emit-batch-record-catalog`
-   4. [ ] - `p1` - **IF** the catalog lookup returned `not-found` record the per-record outcome `rejected` (`context.reason="UNKNOWN_USAGE_TYPE"`) and CONTINUE - `inst-emit-batch-record-unknown-usage-type`
-   5. [ ] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` with the catalog-resolved `UsageType` (and optional `unit`) - `inst-emit-batch-record-semantics`
-   6. [ ] - `p1` - **IF** the semantics-enforcement algorithm returned any `invalid-*` outcome record the per-record outcome `rejected` with the appropriate `context.reason` per the algorithm-outcome → wire-reason-code mapping defined under `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` (`SEMANTICS_VIOLATION` for matrix-cell value-sign violations including `invalid-counter-delta`, `invalid-compensation-value`, and the defensive `unsupported-kind`; `GAUGE_COMPENSATION_REJECTED` for `invalid-gauge-compensation`; `CORRECTS_ID_NOT_FOUND` / `CORRECTS_ID_TARGETS_COMPENSATION` / `CORRECTS_ID_WRONG_SCOPE` / `CORRECTS_ID_INACTIVE` for the four L1 referential failures) and CONTINUE - `inst-emit-batch-record-semantics-invalid`
-   7. [ ] - `p1` - Perform the **closed-shape** metadata-key check against the usage type's `metadata_fields` (resolved via the catalog lookup at step 5.3); **IF** any key in the candidate `RecordMetadata` is not a declared member of `metadata_fields` record the per-record outcome `rejected` (`context.reason="UNKNOWN_METADATA_KEY"`, citing `context.key` and `instance_path="/metadata/{key}"`) and CONTINUE - `inst-emit-batch-record-metadata-closed-shape`
-   8. [ ] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-metadata-size-cap-enforcement` against the record's `RecordMetadata` - `inst-emit-batch-record-metadata`
-   9. [ ] - `p1` - **IF** the metadata-size-cap algorithm returned `metadata-too-large` lift the measurement into `UsageCollectorError::MetadataValidationError(_)` (carrying the measured size and the configured cap) and record the per-record outcome `rejected` with the per-record `error: Problem` lifted from that variant (`context.reason="METADATA_VALIDATION"`, field violation on `metadata_fields`), then CONTINUE - `inst-emit-batch-record-metadata-too-large`
-   10. [ ] - `p1` - Mark the record as eligible-for-persist and append it to the batch dispatch buffer in input-order index - `inst-emit-batch-record-eligible`
-6. [ ] - `p1` - **TRY** invoke the Plugin SPI Method 2 batch persist capability (`create_usage_records`) under the per-record composite key `(tenant_id, gts_id, idempotency_key)` — the single SPI call drives the plugin's native bulk-write path and returns a per-record `Result<UsageRecord, UsageCollectorPluginError>` list in input order per `plugin-spi.md` Method 2; the plugin is the single source of dedup truth (the UNIQUE constraint atomically performs the dedup check and the persist per record). The ambient `tracing::Span` / OpenTelemetry context opened upstream propagates across the SPI call per `plugin-spi.md` §"Trace context propagation" - `inst-emit-batch-spi-dispatch`
-7. [ ] - `p1` - **CATCH** outer call-level Plugin SPI failure (the whole `create_usage_records` invocation returned `Err(UsageCollectorPluginError::*)` — e.g. plugin handle resolution failure, host-contract breach surfaced as `BackendError { kind: "contract_violation", … }`, transport collapse before any per-record result was produced) - `inst-emit-batch-spi-catch`
-   1. [ ] - `p1` - Surface the failure as a **whole-request** canonical `Problem` envelope (HTTP `503`/`504` per the usage-collector-v1.yaml availability mapping); the failure would hit every eligible-for-persist record identically, so it is reported once at the request level rather than fanned out per-record - `inst-emit-batch-spi-fail-mark`
-8. [ ] - `p1` - **FOR EACH** SPI per-record result paired with its original input index - `inst-emit-batch-foreach-spi`
-   1. [ ] - `p1` - **IF** the per-record result is `Ok(UsageRecord)` record the per-record outcome `accepted` carrying the persisted body (caller-supplied `uuid` plus all canonical fields; covers both a fresh insert and a silent-absorb exact-equality retry) - `inst-emit-batch-record-accepted`
-   2. [ ] - `p1` - **ELSE IF** the per-record result is `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, gts_id })` (a same-key submission whose canonical fields differ from the stored record) record the per-record outcome `rejected` with a per-record `error: Problem` (`context.reason="IDEMPOTENCY_CONFLICT"`, AlreadyExists/409) carrying the conflicting `idempotency_key` and `gts_id`; the second write is NOT silently absorbed - `inst-emit-batch-record-conflict`
-   3. [ ] - `p1` - **ELSE** the per-record result is some other `Err(UsageCollectorPluginError::*)` (per-record `PluginUnavailable`, `Timeout`, `BackendError`); record the per-record outcome `rejected` with a per-record `error: Problem` (`context.reason="PLUGIN_READINESS"`) - `inst-emit-batch-record-spi-err`
-9. [ ] - `p1` - Compose the `CreateUsageRecordsResponse` `results` array in input-order index, merging the validation-stage outcomes from step 5 with the SPI-stage outcomes from step 8 - `inst-emit-batch-compose-response`
-10. [ ] - `p1` - **IF** every per-record outcome is `accepted` **RETURN** HTTP `200` with the `CreateUsageRecordsResponse` per `usage-collector-v1.yaml` - `inst-emit-batch-return-200`
-11. [ ] - `p1` - **ELSE** **RETURN** HTTP `207 Multi-Status` with the `CreateUsageRecordsResponse` carrying the mixed per-record outcomes in input order (no whole-batch rollback per-record acceptance promise) - `inst-emit-batch-return-207`
+1. [x] - `p1` - Caller submits an `CreateUsageRecordsRequest` of up to 100 `UsageRecord` payloads — on REST through `POST /usage-collector/v1/records`; the REST handler receives `Extension<SecurityContext>` populated by ToolKit gateway middleware (`OperationBuilder::authenticated()`) and W3C audit-correlation headers — or on the SDK through `UsageCollectorClientV1::create_usage_records(ctx, ...)` with `ctx: &SecurityContext` as the first parameter per `sdk-trait.md` Method 2; the payload carries one mandatory caller-supplied `IdempotencyKey` per record - `inst-emit-batch-submit`
+2. [x] - `p1` - **IF** the REST handler receives no `Extension<SecurityContext>` (gateway middleware rejected the call upstream) or the SDK trait is invoked without a `ctx` argument **RETURN** the canonical `Unauthenticated` `Problem` envelope per `usage-collector-v1.yaml` default response; the collector never synthesizes identity - `inst-emit-batch-missing-ctx`
+3. [x] - `p1` - **IF** the request `records` array is empty (`minItems: 1` violation) or larger than 100 entries (`maxItems: 100` violation per the wire-level cap declared in `usage-collector-v1.yaml`) **RETURN** the request-level structural validation `Problem` envelope (HTTP `400`) per `usage-collector-v1.yaml` without any per-record processing - `inst-emit-batch-cap-check`
+4. [x] - `p1` - Run an upfront PDP pre-pass that invokes `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization` against the full input vector — the algorithm builds a request-local `distinct_tuples` map (`inst-algo-attrib-dedup-tuple-key`) and concurrently evaluates each distinct attribution tuple under a fixed concurrency cap (`inst-algo-attrib-bounded-fanout`); the returned per-input-index outcome list is then merged into the per-record results buffer in input-order. The pre-pass MAY issue strictly fewer PDP RPCs than the input length whenever records share an attribution tuple (no cross-request cache; intra-batch projection only) - `inst-emit-batch-pdp`
+   1. [x] - `p1` - For each input index whose pre-pass outcome is `deny`, record the per-record outcome `rejected` with the propagated platform-authorization envelope (`context.reason="AUTHZ"`) in the results buffer at that index; the remaining steps skip these indices - `inst-emit-batch-pdp-projected-deny`
+5. [x] - `p1` - Run an upfront catalog pre-pass by invoking `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` over the PDP-allowed input vector — the algorithm dedups by `gts_id` (`inst-algo-catalog-dedup-gts-id`), fans out the per-`gts_id` `get_usage_type` SPI dispatches under a fixed concurrency cap (`inst-algo-catalog-bounded-fanout`), and produces a request-local `catalog_cache: gts_id → Result<UsageType, DomainError>` map. Subsequent per-record validation reads each record's outcome from this map — no further SPI dispatches occur on the batch path - `inst-emit-batch-catalog`
+6. [x] - `p1` - **FOR EACH** `UsageRecord` in the request `records` array (in input order, preserving index for the per-record result), consume its `allow`/`deny` outcome from step 4 - `inst-emit-batch-foreach-validate`
+   1. [x] - `p1` - Read this record's pre-pass PDP outcome from step 4; the per-record decision is the one published for this index by `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization` (one PDP call per distinct attribution tuple, projected to every input index carrying that tuple via `inst-algo-attrib-dedup-tuple-key`) - `inst-emit-batch-record-pdp`
+   2. [x] - `p1` - **IF** the per-record PDP outcome is `deny` the rejection is already recorded by `inst-emit-batch-pdp-projected-deny`; CONTINUE to the next record without re-emitting an envelope - `inst-emit-batch-record-deny`
+   3. [x] - `p1` - Read this record's catalog outcome from the `catalog_cache` populated by step 5; the lookup is a request-local map read, not a new SPI dispatch - `inst-emit-batch-record-catalog`
+   4. [x] - `p1` - **IF** the catalog lookup returned `not-found` record the per-record outcome `rejected` (`context.reason="UNKNOWN_USAGE_TYPE"`) and CONTINUE - `inst-emit-batch-record-unknown-usage-type`
+   5. [x] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` with the catalog-resolved `UsageType` (and optional `unit`) - `inst-emit-batch-record-semantics`
+   6. [x] - `p1` - **IF** the semantics-enforcement algorithm returned any `invalid-*` outcome record the per-record outcome `rejected` with the appropriate `context.reason` per the algorithm-outcome → wire-reason-code mapping defined under `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` (`SEMANTICS_VIOLATION` for matrix-cell value-sign violations including `invalid-counter-delta`, `invalid-compensation-value`, and the defensive `unsupported-kind`; `GAUGE_COMPENSATION_REJECTED` for `invalid-gauge-compensation`; `CORRECTS_ID_NOT_FOUND` / `CORRECTS_ID_TARGETS_COMPENSATION` / `CORRECTS_ID_WRONG_SCOPE` / `CORRECTS_ID_INACTIVE` for the four L1 referential failures) and CONTINUE - `inst-emit-batch-record-semantics-invalid`
+   7. [x] - `p1` - Perform the **closed-shape** metadata-key check against the usage type's `metadata_fields` (resolved via the catalog lookup at step 5.3); **IF** any key in the candidate `RecordMetadata` is not a declared member of `metadata_fields` record the per-record outcome `rejected` (`context.reason="UNKNOWN_METADATA_KEY"`, citing `context.key` and `instance_path="/metadata/{key}"`) and CONTINUE - `inst-emit-batch-record-metadata-closed-shape`
+   8. [x] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-metadata-size-cap-enforcement` against the record's `RecordMetadata` - `inst-emit-batch-record-metadata`
+   9. [x] - `p1` - **IF** the metadata-size-cap algorithm returned `metadata-too-large` lift the measurement into `UsageCollectorError::InvalidArgument { reason: MetadataValidation, .. }` (carrying the measured size and the configured cap) and record the per-record outcome `rejected` with the per-record `error: Problem` lifted from that variant (`field_violations[0].reason="METADATA_VALIDATION"`, field violation on `metadata`), then CONTINUE - `inst-emit-batch-record-metadata-too-large`
+   10. [x] - `p1` - Mark the record as eligible-for-persist and append it to the batch dispatch buffer in input-order index - `inst-emit-batch-record-eligible`
+7. [x] - `p1` - **TRY** invoke the Plugin SPI Method 2 batch persist capability (`create_usage_records`) under the per-record composite key `(tenant_id, gts_id, idempotency_key)` — the single SPI call drives the plugin's native bulk-write path and returns a per-record `Result<UsageRecord, UsageCollectorPluginError>` list in input order per `plugin-spi.md` Method 2; the plugin is the single source of dedup truth (the UNIQUE constraint atomically performs the dedup check and the persist per record). The ambient `tracing::Span` / OpenTelemetry context opened upstream propagates across the SPI call per `plugin-spi.md` §"Trace context propagation" - `inst-emit-batch-spi-dispatch`
+8. [x] - `p1` - **CATCH** outer call-level Plugin SPI failure (the whole `create_usage_records` invocation returned `Err(UsageCollectorPluginError::*)` — e.g. plugin handle resolution failure, host-contract breach surfaced as `BackendError { kind: "contract_violation", … }`, transport collapse before any per-record result was produced) - `inst-emit-batch-spi-catch`
+   1. [x] - `p1` - Surface the failure as a **whole-request** canonical `Problem` envelope (HTTP `503`/`504` per the usage-collector-v1.yaml availability mapping); the failure would hit every eligible-for-persist record identically, so it is reported once at the request level rather than fanned out per-record - `inst-emit-batch-spi-fail-mark`
+9. [x] - `p1` - **FOR EACH** SPI per-record result paired with its original input index - `inst-emit-batch-foreach-spi`
+   1. [x] - `p1` - **IF** the per-record result is `Ok(UsageRecord)` record the per-record outcome `accepted` carrying the persisted body (caller-supplied `uuid` plus all canonical fields; covers both a fresh insert and a silent-absorb exact-equality retry) - `inst-emit-batch-record-accepted`
+   2. [x] - `p1` - **ELSE IF** the per-record result is `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, gts_id })` (a same-key submission whose canonical fields differ from the stored record) record the per-record outcome `rejected` with a per-record `error: Problem` (`context.reason="IDEMPOTENCY_CONFLICT"`, AlreadyExists/409) carrying the conflicting `idempotency_key` and `gts_id`; the second write is NOT silently absorbed - `inst-emit-batch-record-conflict`
+   3. [x] - `p1` - **ELSE** the per-record result is some other `Err(UsageCollectorPluginError::*)` (per-record `PluginUnavailable`, `Timeout`, `BackendError`); record the per-record outcome `rejected` with a per-record `error: Problem` (`context.reason="PLUGIN_READINESS"`) - `inst-emit-batch-record-spi-err`
+10. [x] - `p1` - Compose the `CreateUsageRecordsResponse` `results` array in input-order index, merging the validation-stage outcomes from step 6 with the SPI-stage outcomes from step 9 - `inst-emit-batch-compose-response`
+11. [x] - `p1` - **IF** every per-record outcome is `accepted` **RETURN** HTTP `200` with the `CreateUsageRecordsResponse` per `usage-collector-v1.yaml` - `inst-emit-batch-return-200`
+12. [x] - `p1` - **ELSE** **RETURN** HTTP `207 Multi-Status` with the `CreateUsageRecordsResponse` carrying the mixed per-record outcomes in input order (no whole-batch rollback per-record acceptance promise) - `inst-emit-batch-return-207`
 
 ### Compensation Emission
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-flow-usage-emission-compensation`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-flow-usage-emission-compensation`
 
 **Actor**: `cpt-cf-usage-collector-actor-usage-source`
 
@@ -244,48 +248,87 @@ This feature exists so that at-least-once delivery of usage records is uniformly
 
 **Steps**:
 
-1. [ ] - `p1` - Caller computes a give-back amount according to its own business logic and constructs a single or batched `UsageRecord` payload with a signed-negative `value` and a non-empty `corrects_id` pointing at the target ordinary usage row (one with `corrects_id IS NULL`), plus a mandatory caller-supplied `IdempotencyKey` — submitted on the **same unified ingestion path** as ordinary usage emission (REST `POST /usage-collector/v1/records` or the SDK emit operation) - `inst-compensation-submit`
-2. [ ] - `p1` - **IF** the REST handler receives no `Extension<SecurityContext>` or the SDK trait is invoked without a `ctx` argument **RETURN** the canonical `Unauthenticated` `Problem` envelope per `usage-collector-v1.yaml`; the collector never synthesizes identity - `inst-compensation-missing-ctx`
-3. [ ] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization` to authorize the per-record attribution tuple via `cpt-cf-usage-collector-flow-foundation-pdp-authorize` — same PDP surface, same per-component `authz_scope` helper, same per-record `allow`/`deny` outcome shape as ordinary ingestion - `inst-compensation-attrib-authz`
-4. [ ] - `p1` - **IF** the per-record authorization outcome is `deny` record `outcome="rejected"` with `context.reason="AUTHZ"` and **RETURN** the `CreateUsageRecordsResponse` — no SPI dispatch occurs - `inst-compensation-pdp-deny`
-5. [ ] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` with the record's UsageType `gts_id` to obtain the (`UsageType`, optional `unit`) pair - `inst-compensation-catalog-lookup`
-6. [ ] - `p1` - **IF** the catalog lookup returns `not-found` record `outcome="rejected"` with `context.reason="UNKNOWN_USAGE_TYPE"` and **RETURN** the response - `inst-compensation-usage-type-not-found`
-7. [ ] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` with the submitted (`value`, `corrects_id`, `tenant_id`, `gts_id`, `resource_ref`, optional `subject_ref`) tuple and the catalog-resolved `UsageType`; the algorithm runs the full four-cell `(MetricSemantics × corrects_id presence)` value matrix AND, when `corrects_id` is set, the L1 referential checks (existence, referenced row has `corrects_id IS NULL`, same `(tenant_id, gts_id, resource_ref, subject_ref)` identity tuple, `status=active`) - `inst-compensation-validate`
-8. [ ] - `p1` - **IF** the algorithm returns any `invalid-*` outcome record `outcome="rejected"` with the appropriate `context.reason` per the algorithm-outcome → wire-reason-code mapping defined under `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` (`GAUGE_COMPENSATION_REJECTED` for `invalid-gauge-compensation`; `SEMANTICS_VIOLATION` for `invalid-counter-delta`, `invalid-compensation-value`, or the defensive `unsupported-kind`; `CORRECTS_ID_NOT_FOUND` for `invalid-corrects-id-not-found`; `CORRECTS_ID_TARGETS_COMPENSATION` for `invalid-corrects-id-targets-compensation`; `CORRECTS_ID_WRONG_SCOPE` for `invalid-corrects-id-cross-scope`; `CORRECTS_ID_INACTIVE` for `invalid-corrects-id-inactive` — which includes the "referenced record must be active" branch that handles concurrent deactivation) and **RETURN** the response — no SPI dispatch occurs - `inst-compensation-validate-fail`
-9. [ ] - `p1` - Perform the **closed-shape** metadata-key check against the usage type's `metadata_fields` (resolved at step 5): every key in the candidate `RecordMetadata` MUST be a declared member of `metadata_fields`; otherwise record `outcome="rejected"` with `context.reason="UNKNOWN_METADATA_KEY"`, `context.key`, and `instance_path="/metadata/{key}"`, and **RETURN** the response - `inst-compensation-metadata-closed-shape`
-10. [ ] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-metadata-size-cap-enforcement` against the record's `RecordMetadata` payload - `inst-compensation-metadata-cap`
-11. [ ] - `p1` - **IF** the metadata-size-cap algorithm returns `metadata-too-large` record `outcome="rejected"` with `context.reason="METADATA_SIZE"` and **RETURN** the response - `inst-compensation-metadata-too-large`
-12. [ ] - `p1` - **TRY** invoke the Plugin SPI persist capability (`create_usage_record` for single, `create_usage_records` for batch) under the same composite key `(tenant_id, gts_id, idempotency_key)` as ordinary ingestion per `plugin-spi.md`; the SPI receives the row with a signed-negative `value` and the `corrects_id` pointer to the referenced ordinary usage row (one with `corrects_id IS NULL`), and persists it with `status=active` - `inst-compensation-spi-dispatch`
-13. [ ] - `p1` - **CATCH** Plugin SPI transport / readiness / persistence error - `inst-compensation-spi-catch`
-    1. [ ] - `p1` - Compose `CreateUsageRecordsResponse` with `outcome="rejected"` and `context.reason="PLUGIN_READINESS"` while preserving the audit-correlation context, then **RETURN** that response; no record is acknowledged - `inst-compensation-spi-fail`
-14. [ ] - `p1` - **IF** the SPI returned `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, gts_id })` (a same-key submission whose canonical fields differ from the stored record) record `outcome="rejected"` with `context.reason="IDEMPOTENCY_CONFLICT"` (AlreadyExists/409) carrying the conflicting `idempotency_key` and `gts_id`, and **RETURN** the response — the second write is NOT silently absorbed - `inst-compensation-conflict`
-15. [ ] - `p1` - **ELSE** the SPI returned `Ok(UsageRecord)` (a fresh compensation insert, or a silent-absorb exact-equality retry — the wire surface does not distinguish the two); record `outcome="accepted"` carrying the persisted compensation row body (caller-supplied `uuid` plus all canonical fields, byte-identical to the request or to the previously-persisted row), propagate the audit-correlation context, then **RETURN** the response - `inst-compensation-accepted`
+1. [x] - `p1` - Caller computes a give-back amount according to its own business logic and constructs a single or batched `UsageRecord` payload with a signed-negative `value` and a non-empty `corrects_id` pointing at the target ordinary usage row (one with `corrects_id IS NULL`), plus a mandatory caller-supplied `IdempotencyKey` — submitted on the **same unified ingestion path** as ordinary usage emission (REST `POST /usage-collector/v1/records` or the SDK emit operation) - `inst-compensation-submit`
+2. [x] - `p1` - **IF** the REST handler receives no `Extension<SecurityContext>` or the SDK trait is invoked without a `ctx` argument **RETURN** the canonical `Unauthenticated` `Problem` envelope per `usage-collector-v1.yaml`; the collector never synthesizes identity - `inst-compensation-missing-ctx`
+3. [x] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization` to authorize the per-record attribution tuple via `cpt-cf-usage-collector-flow-foundation-pdp-authorize` — same PDP surface, same per-component `authz_scope` helper, same per-record `allow`/`deny` outcome shape as ordinary ingestion - `inst-compensation-attrib-authz`
+4. [x] - `p1` - **IF** the per-record authorization outcome is `deny` record `outcome="rejected"` with `context.reason="AUTHZ"` and **RETURN** the `CreateUsageRecordsResponse` — no SPI dispatch occurs - `inst-compensation-pdp-deny`
+5. [x] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` with the record's UsageType `gts_id` to obtain the (`UsageType`, optional `unit`) pair - `inst-compensation-catalog-lookup`
+6. [x] - `p1` - **IF** the catalog lookup returns `not-found` record `outcome="rejected"` with `context.reason="UNKNOWN_USAGE_TYPE"` and **RETURN** the response - `inst-compensation-usage-type-not-found`
+7. [x] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` with the submitted (`value`, `corrects_id`, `tenant_id`, `gts_id`, `resource_ref`, optional `subject_ref`) tuple and the catalog-resolved `UsageType`; the algorithm runs the full four-cell `(MetricSemantics × corrects_id presence)` value matrix AND, when `corrects_id` is set, the L1 referential checks (existence, referenced row has `corrects_id IS NULL`, same `(tenant_id, gts_id, resource_ref, subject_ref)` identity tuple, `status=active`) - `inst-compensation-validate`
+8. [x] - `p1` - **IF** the algorithm returns any `invalid-*` outcome record `outcome="rejected"` with the appropriate `context.reason` per the algorithm-outcome → wire-reason-code mapping defined under `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` (`GAUGE_COMPENSATION_REJECTED` for `invalid-gauge-compensation`; `SEMANTICS_VIOLATION` for `invalid-counter-delta`, `invalid-compensation-value`, or the defensive `unsupported-kind`; `CORRECTS_ID_NOT_FOUND` for `invalid-corrects-id-not-found`; `CORRECTS_ID_TARGETS_COMPENSATION` for `invalid-corrects-id-targets-compensation`; `CORRECTS_ID_WRONG_SCOPE` for `invalid-corrects-id-cross-scope`; `CORRECTS_ID_INACTIVE` for `invalid-corrects-id-inactive` — which includes the "referenced record must be active" branch that handles concurrent deactivation) and **RETURN** the response — no SPI dispatch occurs - `inst-compensation-validate-fail`
+9. [x] - `p1` - Perform the **closed-shape** metadata-key check against the usage type's `metadata_fields` (resolved at step 5): every key in the candidate `RecordMetadata` MUST be a declared member of `metadata_fields`; otherwise record `outcome="rejected"` with `context.reason="UNKNOWN_METADATA_KEY"`, `context.key`, and `instance_path="/metadata/{key}"`, and **RETURN** the response - `inst-compensation-metadata-closed-shape`
+10. [x] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-metadata-size-cap-enforcement` against the record's `RecordMetadata` payload - `inst-compensation-metadata-cap`
+11. [x] - `p1` - **IF** the metadata-size-cap algorithm returns `metadata-too-large` record `outcome="rejected"` with `context.reason="METADATA_SIZE"` and **RETURN** the response - `inst-compensation-metadata-too-large`
+12. [x] - `p1` - **TRY** invoke the Plugin SPI persist capability (`create_usage_record` for single, `create_usage_records` for batch) under the same composite key `(tenant_id, gts_id, idempotency_key)` as ordinary ingestion per `plugin-spi.md`; the SPI receives the row with a signed-negative `value` and the `corrects_id` pointer to the referenced ordinary usage row (one with `corrects_id IS NULL`), and persists it with `status=active` - `inst-compensation-spi-dispatch`
+13. [x] - `p1` - **CATCH** Plugin SPI transport / readiness / persistence error - `inst-compensation-spi-catch`
+    1. [x] - `p1` - Compose `CreateUsageRecordsResponse` with `outcome="rejected"` and `context.reason="PLUGIN_READINESS"` while preserving the audit-correlation context, then **RETURN** that response; no record is acknowledged - `inst-compensation-spi-fail`
+14. [x] - `p1` - **IF** the SPI returned `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, gts_id })` (a same-key submission whose canonical fields differ from the stored record) record `outcome="rejected"` with `context.reason="IDEMPOTENCY_CONFLICT"` (AlreadyExists/409) carrying the conflicting `idempotency_key` and `gts_id`, and **RETURN** the response — the second write is NOT silently absorbed - `inst-compensation-conflict`
+15. [x] - `p1` - **ELSE** the SPI returned `Ok(UsageRecord)` (a fresh compensation insert, or a silent-absorb exact-equality retry — the wire surface does not distinguish the two); record `outcome="accepted"` carrying the persisted compensation row body (caller-supplied `uuid` plus all canonical fields, byte-identical to the request or to the previously-persisted row), propagate the audit-correlation context, then **RETURN** the response - `inst-compensation-accepted`
+
+### Get Record (by id)
+
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-flow-usage-emission-get-record`
+
+**Actor**: `cpt-cf-usage-collector-actor-usage-source`
+
+> **Surface posture (read-by-id).** This flow describes the read-by-id surface (`GET /usage-collector/v1/records/{id}` and the SDK trait method `UsageCollectorClientV1::get_usage_record(ctx, uuid)`) of the usage-emission feature: it returns the durably persisted `UsageRecord` so an authenticated source gear can confirm the post-emission body it acknowledged from the ingestion path. The aggregated / raw query surfaces (`POST /usage-collector/v1/records/aggregate`, `GET /usage-collector/v1/records`) are owned by `cpt-cf-usage-collector-feature-usage-query` and remain out of scope here. There is no per-record envelope: success is `Ok(UsageRecord)` (HTTP 200) and per-record failure modes lift to the canonical `Problem` envelope on the wire.
+>
+> **Pre-PDP fetch (existence-oracle guard).** The handler has only `id` at the boundary; it MUST pre-fetch the target row via Plugin SPI Method 10 `get_usage_record(id)` so PDP can authorize over the row's full attribution tuple (`tenant_id`, `resource_ref`, optional `subject_ref`). Because the prefetch precedes PDP, a denied caller could otherwise distinguish a missing row from one that exists-but-is-denied; this surface closes the oracle by collapsing a PDP denial into the same `NotFound` the missing-row path returns (mirrors `cpt-cf-usage-collector-flow-event-deactivation-deactivate-record` step `inst-deactivate-record-pdp-deny`).
+
+**Success Scenarios**:
+
+- An authenticated source gear calls `UsageCollectorClientV1::get_usage_record(ctx, uuid)` (or the REST equivalent `GET /usage-collector/v1/records/{id}`); the Ingestion Gateway resolves the bound storage plugin, dispatches Plugin SPI Method 10 `get_usage_record(id)` to load the row's attribution tuple, invokes `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization` with the loaded `UsageRecord` and the `usage_record::actions::GET` verb, and on `allow` returns `Ok(UsageRecord)` (the trait) / HTTP 200 with the wire-projected `UsageRecordDto` (the REST handler).
+
+**Error Scenarios**:
+
+- The SDK trait is invoked without a `ctx` argument — disallowed at compile time by the `get_usage_record(ctx: &SecurityContext, uuid)` signature. (REST callers without an `Extension<SecurityContext>` are rejected upstream — that path lives in `inst-get-record-missing-ctx`.)
+- The path-supplied `id` is not a valid UUID — lifted as the canonical `InvalidArgument` `Problem` envelope (HTTP `400`) with `field_violations[0].field="id"`, `reason="VALIDATION"`, before the service is invoked.
+- The target row does not exist in the plugin (Plugin SPI Method 10 surfaces `UsageRecordNotFound { id }`) — lifted as the canonical `NotFound` `Problem` envelope (HTTP `404`); no PDP call occurs.
+- PDP denies — collapsed into the canonical `NotFound` envelope (HTTP `404`, indistinguishable from a missing row so the by-id surface is not an existence oracle); the loaded row is NOT handed back to the caller.
+- Plugin SPI transport / readiness fault — lifted through `UsageCollectorPluginError → DomainError → UsageCollectorError` and surfaced as the canonical `ServiceUnavailable` envelope (HTTP `503`).
+
+**Steps**:
+
+1. [x] - `p1` - Caller invokes `UsageCollectorClientV1::get_usage_record(ctx, uuid)` per `sdk-trait.md` Method 3 with `ctx: &SecurityContext` as the first parameter, OR submits `GET /usage-collector/v1/records/{id}`; the REST handler receives `Extension<SecurityContext>` populated by ToolKit gateway middleware (`OperationBuilder::authenticated()`) - `inst-get-record-submit`
+2. [x] - `p1` - **IF** the REST handler receives no `Extension<SecurityContext>` or the SDK trait is invoked without a `ctx` argument **RETURN** the canonical `Unauthenticated` `Problem` envelope per `usage-collector-v1.yaml`; the collector never synthesizes identity - `inst-get-record-missing-ctx`
+3. [x] - `p1` - Pre-fetch the target `UsageRecord` via Plugin SPI Method 10 `get_usage_record(id)` so PDP can authorize over the row's full attribution tuple - `inst-get-record-prefetch`
+4. [x] - `p1` - **IF** the Plugin SPI returned `Err(UsageCollectorPluginError::UsageRecordNotFound { id })` lift it to `Err(UsageCollectorError::NotFound { .. })` (the canonical `NotFound` envelope, HTTP `404`) and **RETURN** that `Err` — no PDP dispatch occurs - `inst-get-record-prefetch-not-found`
+5. [x] - `p1` - Invoke `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization` with the loaded `UsageRecord` and the `usage_record::actions::GET` verb - `inst-get-record-pdp`
+6. [x] - `p1` - **IF** the per-record authorization outcome is `deny` collapse it into `Err(UsageCollectorError::NotFound { .. })` (the canonical `NotFound` envelope, indistinguishable from a missing row so the by-id surface is not an existence oracle) and **RETURN** that `Err` — the loaded row MUST NOT be handed back - `inst-get-record-pdp-deny`
+7. [x] - `p1` - **CATCH** Plugin SPI transport / readiness / persistence error other than `UsageRecordNotFound` — lift through `UsageCollectorPluginError → DomainError → UsageCollectorError` (e.g. `Err(UsageCollectorError::ServiceUnavailable(_))`) and **RETURN** that `Err` - `inst-get-record-spi-fail`
+8. [x] - `p1` - **ELSE** **RETURN** `Ok(UsageRecord)` carrying the loaded persisted body — wire-projected through `UsageRecordDto` on the REST surface (HTTP 200), and propagated verbatim on the SDK surface - `inst-get-record-success`
 
 ## 3. Processes / Business Logic (CDSL)
 
 ### Attribution and PDP Authorization
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization`
 
 **Input**: an inbound `POST /usage-collector/v1/records` REST request carrying the gateway-resolved `Extension<SecurityContext>`, audit-correlation headers, and a per-record attribution tuple lifted directly off each `UsageRecord` payload — caller-supplied `tenant_id` (never derived from the inbound `SecurityContext`), `ResourceRef`, optional `SubjectRef` (its mandatory `subject_id` plus the optional `subject_type` qualifier when populated), UsageType `gts_id`; OR an SDK `UsageCollectorClientV1::create_usage_record(ctx, ...)` / `create_usage_records(ctx, ...)` invocation carrying `ctx: &SecurityContext` as the first parameter and an equivalent attribution tuple lifted off each `UsageRecord`.
 
-**Output**: A per-record outcome list (each entry is `allow` or `deny` with the propagated platform-authorization envelope on deny — `context.reason="AUTHZ"`). PDP decisions are per-attribution-tuple — there is no envelope-level PDP `deny` aggregation. This algorithm MUST NOT re-implement PDP logic — it invokes the per-component `authz_scope` helper (`PolicyEnforcer::access_scope_with(ctx, ...)` against `cpt-cf-usage-collector-contract-authz-resolver`) once per record and forwards the attribution tuple to the PDP. Authentication is owned by the ToolKit gateway upstream of the REST handler and by the in-process caller on the SDK trait surface; the collector NEVER synthesizes identity and NEVER consults an authentication contract.
+**Output**: A per-record outcome list (each entry is `allow` or `deny` with the propagated platform-authorization envelope on deny — `context.reason="AUTHZ"`). PDP decisions are per-attribution-tuple — there is no envelope-level PDP `deny` aggregation. This algorithm MUST NOT re-implement PDP logic — it invokes the per-component `authz_scope` helper (`PolicyEnforcer::access_scope_with(ctx, ...)` against `cpt-cf-usage-collector-contract-authz-resolver`) once per **distinct** attribution tuple in the request and projects the resulting decision back to every record carrying that tuple. Authentication is owned by the ToolKit gateway upstream of the REST handler and by the in-process caller on the SDK trait surface; the collector NEVER synthesizes identity and NEVER consults an authentication contract.
 
 > **Constraint propagation (deferred).** The PDP returns an `AccessScope` carrying the `(PdpDecision, PdpConstraint set)` pair on every permit. The ingestion algorithm CURRENTLY discards the scope after the allow/deny decision: no constraint is plumbed to the persist path, because the foundation Plugin SPI does not accept per-record PDP constraints and there is no row-level filtering on the write path that could consume them. When the read-side query feature lands (or when a write-time row-level policy is introduced), this algorithm will be revisited to thread the `AccessScope` through to the SPI; until then, the carried-through pair is intentionally `()`.
 
+> **Intra-request dedup (no cross-request cache).** Records sharing the same attribution tuple `(tenant_id, resource_type, resource_id, subject_id, subject_type)` within a single batch produce identical PDP requests by construction — the PDP payload is fully determined by these fields plus the constant `SecurityContext` and `action`. The algorithm SHALL evaluate one PDP call per distinct tuple per request and project the outcome to every record carrying that tuple; the projection is local to the in-flight batch and SHALL NOT outlive the call (no `HashMap`/cache survives across requests). This preserves the "no PDP-decision cache" anchor in ADR-0001 (no cross-request memoization, no drift window, fail-closed on transport errors per the foundation `From<EnforcerError>` mapping) while honoring the `nfr-ingestion-latency` p95 target.
+
+> **Dedup safety invariant (structural).** Correctness of the dedup hinges on this property: **the dedup grouping key MUST describe exactly the same field set as the PDP payload composer.** If the two ever diverge — e.g. a new PEP attribute is added to the PDP request but not to the grouping key — records the PDP would judge differently could silently share one decision. This is a security bypass, not just a stale-decision bug. The host enforces the invariant **structurally**, not by review: the per-tuple PDP composer (`authz::authorize_attribution_tuple`) takes only `&AttributionTupleKey` and has no syntactic access to a `&UsageRecord`, so adding a new attribution attribute requires (a) extending `AttributionTupleKey`, (b) updating `AttributionTupleKey::from_record`, and (c) adding a `.resource_property(...)` line in `authorize_attribution_tuple` — divergent edits cannot pass `cargo check`. The behavioral pin (records sharing a tuple key compose byte-identical `EvaluationRequest`s) lives in `domain/authz_tests.rs`.
+
+> **Bounded fan-out.** Distinct-tuple PDP evaluations SHALL be issued concurrently with a fixed concurrency cap (the implementing host pins this constant; see `service.rs::PDP_CONCURRENCY`). The cap mirrors the platform's established external-call fan-out posture (`account-management::TenantService::deprovision_concurrency` = 8) and bounds connection-pool / PDP-side pressure for the worst-case all-distinct batch at `MAX_BATCH_RECORDS` (= 100) — wall-clock = `ceil(distinct_tuples / cap) × PDP_RTT` rather than `distinct_tuples × PDP_RTT`.
+
 **Steps**:
 
-1. [ ] - `p1` - Receive the inbound `SecurityContext` at the `cpt-cf-usage-collector-component-ingestion-gateway` boundary — on REST as `Extension<SecurityContext>` from the gateway middleware, on SDK as the `ctx: &SecurityContext` first argument — and extract the per-record attribution tuples from the request payload - `inst-algo-attrib-receive-ctx`
-2. [ ] - `p1` - **FOR EACH** per-record attribution tuple in the request envelope - `inst-algo-attrib-foreach`
-   1. [ ] - `p1` - Compose the per-record attribution tuple required by `cpt-cf-usage-collector-flow-foundation-pdp-authorize` directly from the `UsageRecord` fields: the caller-supplied `tenant_id` (carried as the PDP `OWNER_TENANT_ID` attribute), `ResourceRef` (`resource_type` / `resource_id`), optional `SubjectRef` (`subject_id` carried as `OWNER_ID`, plus the optional `subject_type` qualifier carried as the `SUBJECT_TYPE` attribute only when populated), and UsageType `gts_id` - `inst-algo-attrib-compose-tuple`
-   2. [ ] - `p1` - Invoke `cpt-cf-usage-collector-flow-foundation-pdp-authorize` via the per-component `authz_scope` helper (`PolicyEnforcer::access_scope_with(ctx, ...)` against `cpt-cf-usage-collector-contract-authz-resolver`) with the inbound `SecurityContext` and the composed attribution tuple - `inst-algo-attrib-pdp-call`
-   3. [ ] - `p1` - **IF** the foundation PDP flow returns `deny` record the per-record outcome `deny` with the propagated platform-authorization envelope (`context.reason="AUTHZ"`) - `inst-algo-attrib-pdp-deny`
-   4. [ ] - `p1` - **ELSE** record the per-record outcome `allow`; the PDP-returned `AccessScope` (decision + constraint set) is intentionally discarded — see "Constraint propagation (deferred)" above — and is not threaded into the record's downstream context on the ingestion path - `inst-algo-attrib-pdp-allow`
-3. [ ] - `p1` - **RETURN** the per-record outcome list to the calling flow without caching the PDP decision; PDP decisions are per-attribution-tuple, so the calling flow surfaces every `deny` outcome as a per-record `outcome="rejected"` (`context.reason="AUTHZ"`) — there is no envelope-level PDP `deny` aggregation - `inst-algo-attrib-return`
+1. [x] - `p1` - Receive the inbound `SecurityContext` at the `cpt-cf-usage-collector-component-ingestion-gateway` boundary — on REST as `Extension<SecurityContext>` from the gateway middleware, on SDK as the `ctx: &SecurityContext` first argument — and extract the per-record attribution tuples from the request payload - `inst-algo-attrib-receive-ctx`
+2. [x] - `p1` - Compose each record's attribution tuple key from the `UsageRecord` fields: the caller-supplied `tenant_id` (carried as the PDP `OWNER_TENANT_ID` attribute), `ResourceRef` (`resource_type` / `resource_id`), and optional `SubjectRef` (`subject_id` carried as `OWNER_ID`, plus the optional `subject_type` qualifier carried as the `SUBJECT_TYPE` attribute only when populated). Group the input-record indices by this tuple key into a request-local map `distinct_tuples: TupleKey → Vec<input_index>`. Two records with equal tuple keys are guaranteed to compose byte-identical PDP requests under a fixed `(SecurityContext, action)` pair, so a single decision SHALL stand in for the whole group - `inst-algo-attrib-dedup-tuple-key`
+3. [x] - `p1` - For each distinct tuple key in the map, compose the attribution tuple required by `cpt-cf-usage-collector-flow-foundation-pdp-authorize` (the same `(tenant_id, resource_type, resource_id, subject_id, subject_type)` shape) - `inst-algo-attrib-compose-tuple`
+4. [x] - `p1` - Evaluate the distinct tuples concurrently with a fixed concurrency cap (`PDP_CONCURRENCY`, host-defined constant; see "Bounded fan-out" callout above): drive `cpt-cf-usage-collector-flow-foundation-pdp-authorize` once per distinct tuple via the per-component `authz_scope` helper (`PolicyEnforcer::access_scope_with(ctx, ...)` against `cpt-cf-usage-collector-contract-authz-resolver`). The cap MUST NOT serialize the work (`> 1`) and MUST NOT unbound it (`<= 32` is the host's defensive ceiling); the production value is 8 - `inst-algo-attrib-bounded-fanout`
+5. [x] - `p1` - **IF** the foundation PDP flow returns `deny` for a tuple, record the per-record outcome `deny` for **every input index** mapped to that tuple with the propagated platform-authorization envelope (`context.reason="AUTHZ"`) - `inst-algo-attrib-pdp-deny`
+6. [x] - `p1` - **ELSE** record the per-record outcome `allow` for every input index mapped to the tuple; the PDP-returned `AccessScope` (decision + constraint set) is intentionally discarded — see "Constraint propagation (deferred)" above — and is not threaded into the record's downstream context on the ingestion path - `inst-algo-attrib-pdp-allow`
+7. [x] - `p1` - **RETURN** the per-record outcome list (one entry per input index, ordered by input index) to the calling flow without caching the PDP decision beyond the request scope; PDP decisions are per-attribution-tuple, so the calling flow surfaces every `deny` outcome as a per-record `outcome="rejected"` (`context.reason="AUTHZ"`) — there is no envelope-level PDP `deny` aggregation - `inst-algo-attrib-return`
 
 ### Semantics Enforcement on Ingest
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2`
 
 **Input**: A single submitted `UsageRecord` payload (`value`, optional `corrects_id`, `tenant_id`, `gts_id`, `resource_ref`, optional `subject_ref`) plus the catalog-resolved (`UsageType`, optional `unit`) returned by `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup`.
 
@@ -300,27 +343,35 @@ This feature exists so that at-least-once delivery of usage records is uniformly
 | `gauge`    | `IS NULL`     | Any signed value (unchanged)    |
 | `gauge`    | `SET`         | REJECTED before persistence     |
 
+> **Intra-request L1 dedup (batch path).** Records sharing the same `corrects_id` reference the same `usage_records` row by SPI contract — `get_usage_record` is keyed by `id`, so two lookups with equal `corrects_id` are guaranteed to return byte-identical bodies (modulo a concurrent deactivation that affects both lookups equally). On the batch path the algorithm SHALL evaluate one `get_usage_record` SPI call per distinct `corrects_id` per request and project the outcome to every record that references it. The cache is request-local and SHALL NOT outlive the call — there is no cross-request memoization, consistent with the no-cache posture in ADR-0001 / ADR-0011 (intra-batch projection only). Ordinary records (`corrects_id IS NULL`) MUST NOT trigger any L1 lookup.
+
+> **Bounded L1 fan-out (batch path).** Distinct-`corrects_id` SPI dispatches SHALL be issued concurrently with a fixed concurrency cap (`L1_LOOKUP_FANOUT_CONCURRENCY`, host-defined constant; production value 8, identical to the PDP and catalog pre-pass caps). The PDP, catalog, and L1 pre-passes run *sequentially*, not concurrently, so the effective in-flight ceiling against any one downstream stays bounded at the per-pass cap.
+
+> **Error-priority order (batch path).** Records that need an L1 lookup defer not only the lookup itself but also the metadata-size-cap check until after the L1 phase resolves; this preserves the same `semantics → L1 → metadata` error-priority ordering that the synchronous single-record path exhibits. A record with both an L1 referential failure AND an oversized metadata payload surfaces the L1 failure (`CORRECTS_ID_*`) — not `METADATA_SIZE`.
+
 **Steps**:
 
-1. [ ] - `p1` - Read the submitted `value`, optional `corrects_id`, `tenant_id`, and `gts_id` from the inbound `UsageRecord` payload without any Plugin SPI persist dispatch - `inst-algo-semantics-read-input-v2`
-2. [ ] - `p1` - Read the catalog-resolved `UsageType` (and optional `unit`) supplied by `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` - `inst-algo-semantics-read-type-v2`
-3. [ ] - `p1` - **IF** `UsageType` is `counter` - `inst-algo-semantics-counter-branch-v2`
-   1. [ ] - `p1` - **IF** `corrects_id IS NULL` (ordinary usage row) - `inst-algo-semantics-counter-usage`
-      1. [ ] - `p1` - **IF** the submitted `value` is below zero **RETURN** `invalid-counter-delta` and the four-cell matrix (`counter` + `corrects_id IS NULL` requires `value >= 0`) - `inst-algo-semantics-counter-usage-negative`
-      2. [ ] - `p1` - **RETURN** `valid` — the `counter` + `corrects_id IS NULL` cell holds (`value >= 0`) - `inst-algo-semantics-counter-usage-valid`
-   2. [ ] - `p1` - **ELSE** `corrects_id` is set (counter compensation row) - `inst-algo-semantics-counter-compensation`
-      1. [ ] - `p1` - **IF** the submitted `value` is greater than or equal to zero **RETURN** `invalid-compensation-value` per the four-cell matrix (`counter` + `corrects_id SET` requires `value < 0`; zero is not accepted as a no-op compensation) and `cpt-cf-usage-collector-fr-usage-compensation` - `inst-algo-semantics-counter-compensation-non-negative`
-      2. [ ] - `p1` - Perform the L1 `corrects_id` referential lookup against the storage plugin's `usage_records` projection: read the referenced row by `corrects_id` (single ingestion-time read; idempotent; not a persist dispatch) - `inst-algo-semantics-l1-lookup`
-      3. [ ] - `p1` - **IF** the lookup returns `not-found` **RETURN** `invalid-corrects-id-not-found` — the referenced row MUST exist (L1 rule) - `inst-algo-semantics-l1-not-found`
-      4. [ ] - `p1` - **IF** the referenced row's `corrects_id IS NOT NULL` **RETURN** `invalid-corrects-id-targets-compensation` — the referenced row MUST itself be an ordinary usage row (`corrects_id IS NULL`); compensating a compensation is a non-goal (L1 rule) - `inst-algo-semantics-l1-targets-compensation`
-      5. [ ] - `p1` - **IF** the referenced row's `tenant_id != incoming.tenant_id` OR `gts_id != incoming.gts_id` OR `resource_ref != incoming.resource_ref` OR `subject_ref != incoming.subject_ref` (strict-presence equality: `None` vs `Some(_)` is a mismatch) **RETURN** `invalid-corrects-id-cross-scope` — cross-tenant, cross-usage-type, cross-resource, or cross-subject compensation is rejected per the L1 rule (a compensation MUST share the full identity tuple `(tenant_id, gts_id, resource_ref, subject_ref)` with the referenced ordinary usage row) - `inst-algo-semantics-l1-cross-scope`
-      6. [ ] - `p1` - **IF** the referenced row's `status != active` **RETURN** `invalid-corrects-id-inactive` — the referenced row MUST be `active` per the L1 rule; a compensation referencing a row that is **concurrently being deactivated** is rejected by this same check (no quarantine, no retry queue, no compensating cascade for the rejection — the caller retries at its own discretion; idempotency key makes retries safe) - `inst-algo-semantics-l1-inactive-or-deactivating`
-      7. [ ] - `p1` - **RETURN** `valid` — the `counter` + `corrects_id SET` cell holds (`value < 0`) and the L1 referential checks all passed; the row is recorded as-supplied (no L2 remaining-amount tracking, no refund/credit/credit-note/quota computation) - `inst-algo-semantics-counter-compensation-valid`
-4. [ ] - `p1` - **ELSE IF** `UsageType` is `gauge` - `inst-algo-semantics-gauge-branch-v2`
-   1. [ ] - `p1` - **IF** `corrects_id` is set **RETURN** `invalid-gauge-compensation` — `gauge` + `corrects_id SET` is rejected before persistence per the four-cell matrix (gauges have no `SUM` semantics; the only correction for a gauge is deactivation) - `inst-algo-semantics-gauge-compensation-rejected`
-   2. [ ] - `p1` - Accept the submitted `value` as a point-in-time replacement and DESIGN §3.1 (gauges are stored as-is, no delta accumulation, no shape rewriting) - `inst-algo-semantics-gauge-accept-v2`
-   3. [ ] - `p1` - **RETURN** `valid` — the `gauge` + `corrects_id IS NULL` cell accepts any signed value as-is - `inst-algo-semantics-gauge-valid-v2`
-5. [ ] - `p1` - **ELSE** **RETURN** `unsupported-kind` (defensive — this branch is unreachable when the catalog read is consistent because `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` constrains `UsageType` to the registered enum set) - `inst-algo-semantics-unsupported-v2`
+1. [x] - `p1` - Read the submitted `value`, optional `corrects_id`, `tenant_id`, and `gts_id` from the inbound `UsageRecord` payload without any Plugin SPI persist dispatch - `inst-algo-semantics-read-input-v2`
+2. [x] - `p1` - Read the catalog-resolved `UsageType` (and optional `unit`) supplied by `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` - `inst-algo-semantics-read-type-v2`
+3. [x] - `p1` - **IF** `UsageType` is `counter` - `inst-algo-semantics-counter-branch-v2`
+   1. [x] - `p1` - **IF** `corrects_id IS NULL` (ordinary usage row) - `inst-algo-semantics-counter-usage`
+      1. [x] - `p1` - **IF** the submitted `value` is below zero **RETURN** `invalid-counter-delta` and the four-cell matrix (`counter` + `corrects_id IS NULL` requires `value >= 0`) - `inst-algo-semantics-counter-usage-negative`
+      2. [x] - `p1` - **RETURN** `valid` — the `counter` + `corrects_id IS NULL` cell holds (`value >= 0`) - `inst-algo-semantics-counter-usage-valid`
+   2. [x] - `p1` - **ELSE** `corrects_id` is set (counter compensation row) - `inst-algo-semantics-counter-compensation`
+      1. [x] - `p1` - **IF** the submitted `value` is greater than or equal to zero **RETURN** `invalid-compensation-value` per the four-cell matrix (`counter` + `corrects_id SET` requires `value < 0`; zero is not accepted as a no-op compensation) and `cpt-cf-usage-collector-fr-usage-compensation` - `inst-algo-semantics-counter-compensation-non-negative`
+      2. [x] - `p1` - **(Batch path only.)** Build a request-local set `distinct_corrects_ids: Set<Uuid>` from every record whose semantics outcome up to this step is "NeedsL1Lookup", collapsing duplicate ids; ordinary records (`corrects_id IS NULL`) are excluded. Records hash-equal under `Uuid` resolve to the same `usage_records` row by the SPI contract, so a single dispatch per distinct id is contractually equivalent to one dispatch per record - `inst-algo-semantics-l1-dedup`
+      3. [x] - `p1` - **(Batch path only.)** Dispatch `get_usage_record(corrects_id)` concurrently for each id in `distinct_corrects_ids`, capped at `L1_LOOKUP_FANOUT_CONCURRENCY`; collect outcomes into a request-local `l1_cache: Map<Uuid, Result<UsageRecord, Err>>`. On the single-record path this is just one call - `inst-algo-semantics-l1-bounded-fanout`
+      4. [x] - `p1` - Perform the L1 `corrects_id` referential lookup against the storage plugin's `usage_records` projection: read the referenced row by `corrects_id` (single ingestion-time read; idempotent; not a persist dispatch). On the batch path this step reads from `l1_cache` populated by the pre-pass above; on the single-record path it is the only `get_usage_record` dispatch - `inst-algo-semantics-l1-lookup`
+      5. [x] - `p1` - **IF** the lookup returns `not-found` **RETURN** `invalid-corrects-id-not-found` for every input index that references this `corrects_id` — the referenced row MUST exist (L1 rule) - `inst-algo-semantics-l1-not-found`
+      6. [x] - `p1` - **IF** the referenced row's `corrects_id IS NOT NULL` **RETURN** `invalid-corrects-id-targets-compensation` — the referenced row MUST itself be an ordinary usage row (`corrects_id IS NULL`); compensating a compensation is a non-goal (L1 rule) - `inst-algo-semantics-l1-targets-compensation`
+      7. [x] - `p1` - **IF** the referenced row's `tenant_id != incoming.tenant_id` OR `gts_id != incoming.gts_id` OR `resource_ref != incoming.resource_ref` OR `subject_ref != incoming.subject_ref` (strict-presence equality: `None` vs `Some(_)` is a mismatch) **RETURN** `invalid-corrects-id-cross-scope` — cross-tenant, cross-usage-type, cross-resource, or cross-subject compensation is rejected per the L1 rule (a compensation MUST share the full identity tuple `(tenant_id, gts_id, resource_ref, subject_ref)` with the referenced ordinary usage row) - `inst-algo-semantics-l1-cross-scope`
+      8. [x] - `p1` - **IF** the referenced row's `status != active` **RETURN** `invalid-corrects-id-inactive` — the referenced row MUST be `active` per the L1 rule; a compensation referencing a row that is **concurrently being deactivated** is rejected by this same check (no quarantine, no retry queue, no compensating cascade for the rejection — the source gear retries at its own discretion; idempotency key makes retries safe) - `inst-algo-semantics-l1-inactive-or-deactivating`
+      9. [x] - `p1` - **RETURN** `valid` — the `counter` + `corrects_id SET` cell holds (`value < 0`) and the L1 referential checks all passed; the row is recorded as-supplied (no L2 remaining-amount tracking, no refund/credit/credit-note/quota computation) - `inst-algo-semantics-counter-compensation-valid`
+4. [x] - `p1` - **ELSE IF** `UsageType` is `gauge` - `inst-algo-semantics-gauge-branch-v2`
+   1. [x] - `p1` - **IF** `corrects_id` is set **RETURN** `invalid-gauge-compensation` — `gauge` + `corrects_id SET` is rejected before persistence per the four-cell matrix (gauges have no `SUM` semantics; the only correction for a gauge is deactivation) - `inst-algo-semantics-gauge-compensation-rejected`
+   2. [x] - `p1` - Accept the submitted `value` as a point-in-time replacement and DESIGN §3.1 (gauges are stored as-is, no delta accumulation, no shape rewriting) - `inst-algo-semantics-gauge-accept-v2`
+   3. [x] - `p1` - **RETURN** `valid` — the `gauge` + `corrects_id IS NULL` cell accepts any signed value as-is - `inst-algo-semantics-gauge-valid-v2`
+5. [x] - `p1` - **ELSE** **RETURN** `unsupported-kind` (defensive — this branch is unreachable when the catalog read is consistent because `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` constrains `UsageType` to the registered enum set) - `inst-algo-semantics-unsupported-v2`
 
 **Algorithm outcome → wire `context.reason` mapping** (verbatim contract from this algorithm to the `Problem.context.reason` taxonomy locked in `usage-collector-v1.yaml` and the SDK trait error catalog in `sdk-trait.md`):
 
@@ -343,7 +394,7 @@ Notes (locked):
 
 ### Metadata Size-Cap Enforcement
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-algo-usage-emission-metadata-size-cap-enforcement`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-algo-usage-emission-metadata-size-cap-enforcement`
 
 **Input**: A submitted `RecordMetadata` payload (key/value map; every key MUST be a declared member of the usage type's `metadata_fields`; values are conveyed as `String` end-to-end) plus the fixed 8 KiB per record size cap. The closed-shape key-set check is performed before this algorithm; this algorithm enforces the orthogonal size cap.
 
@@ -351,34 +402,40 @@ Notes (locked):
 
 **Steps**:
 
-1. [ ] - `p1` - Receive the submitted `RecordMetadata` payload by borrowed immutable reference at the algorithm boundary so it can neither be copied nor mutated (enforced by the implementing function signature `validate_submit_record_metadata(usage_type, metadata: &serde_json::Value)`) - `inst-algo-metadata-read-input`
-2. [ ] - `p1` - Use the fixed 8 KiB per-record size cap defined at compile time as the constant `RECORD_METADATA_SIZE_CAP_BYTES`; this cap is NOT operator-configurable and has no override path (matches the Output clause and G4 of the sync report) - `inst-algo-metadata-read-cap`
-3. [ ] - `p1` - Serialize `RecordMetadata` to its canonical on-the-wire representation (the same representation that the Plugin SPI will persist byte-for-byte and `plugin-spi.md` Method 1 invariant 2) - `inst-algo-metadata-serialize`
-4. [ ] - `p1` - Measure the serialized size in bytes - `inst-algo-metadata-measure`
-5. [ ] - `p1` - **IF** the measured size exceeds the configured cap **RETURN** `metadata-too-large` carrying both the measured bytes and the configured cap bytes so the calling flow can populate the actionable validation error envelope (`context.reason="METADATA_SIZE"`) - `inst-algo-metadata-exceeds`
-6. [ ] - `p1` - **ELSE** **RETURN** `valid`; the payload is forwarded unmodified to the Plugin SPI persist dispatch (`create_usage_record` / `create_usage_records`) per the byte-for-byte persistence invariant (`plugin-spi.md` Method 1 invariant 2) - `inst-algo-metadata-valid`
+1. [x] - `p1` - Receive the submitted `RecordMetadata` payload by borrowed immutable reference at the algorithm boundary so it can neither be copied nor mutated (enforced by the implementing function signature `validate_submit_record_metadata(usage_type, metadata: &serde_json::Value)`) - `inst-algo-metadata-read-input`
+2. [x] - `p1` - Use the fixed 8 KiB per-record size cap defined at compile time as the constant `RECORD_METADATA_SIZE_CAP_BYTES`; this cap is NOT operator-configurable and has no override path (matches the Output clause and G4 of the sync report) - `inst-algo-metadata-read-cap`
+3. [x] - `p1` - Serialize `RecordMetadata` to its canonical on-the-wire representation (the same representation that the Plugin SPI will persist byte-for-byte and `plugin-spi.md` Method 1 invariant 2) - `inst-algo-metadata-serialize`
+4. [x] - `p1` - Measure the serialized size in bytes - `inst-algo-metadata-measure`
+5. [x] - `p1` - **IF** the measured size exceeds the configured cap **RETURN** `metadata-too-large` carrying both the measured bytes and the configured cap bytes so the calling flow can populate the actionable validation error envelope (`context.reason="METADATA_SIZE"`) - `inst-algo-metadata-exceeds`
+6. [x] - `p1` - **ELSE** **RETURN** `valid`; the payload is forwarded unmodified to the Plugin SPI persist dispatch (`create_usage_record` / `create_usage_records`) per the byte-for-byte persistence invariant (`plugin-spi.md` Method 1 invariant 2) - `inst-algo-metadata-valid`
 
 ### Catalog Existence and Kind Lookup
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup`
 
-**Input**: A target UsageType `gts_id` extracted from a per-record `UsageRecord` payload by `cpt-cf-usage-collector-component-ingestion-gateway`.
+**Input**: A target UsageType `gts_id` (single-record path) **OR** the full set of `gts_id`s carried by the PDP-allowed records of a batch (batch path), extracted from per-record `UsageRecord` payloads by `cpt-cf-usage-collector-component-ingestion-gateway`.
 
-**Output**: A `found: true` shape descriptor carrying the resolved `UsageType` (with counter / gauge `kind` read directly from the catalog row's `UsageKind` enum via `UsageType::is_counter` / `UsageType::is_gauge`) plus the usage type's closed `metadata_fields: array<string>` (the declared metadata key set used by the ingest-time closed-shape check) when the `gts_id` is present in the plugin's `usage_type_catalog`; or `found: false` when the `gts_id` is absent (the calling flow surfaces this as the actionable not-found error envelope). This algorithm dispatches `get_usage_type` directly against `cpt-cf-usage-collector-contract-storage-plugin` on every call. The cost is one plugin SPI round-trip per record on the ingestion hot path.
+**Output**: A `found: true` shape descriptor carrying the resolved `UsageType` (with counter / gauge `kind` read directly from the catalog row's `UsageKind` enum via `UsageType::is_counter` / `UsageType::is_gauge`) plus the usage type's closed `metadata_fields: array<string>` (the declared metadata key set used by the ingest-time closed-shape check) when the `gts_id` is present in the plugin's `usage_type_catalog`; or `found: false` when the `gts_id` is absent (the calling flow surfaces this as the actionable not-found error envelope). On the batch path the algorithm SHALL evaluate each *distinct* `gts_id` exactly once and project the outcome to every record that references it.
+
+> **Intra-request dedup (no cross-request cache).** Catalog rows are eventually consistent (`get_usage_type` per `plugin-spi.md`) and the `usage_type_catalog` is plugin-owned, so a cross-request cache would expose drift across catalog edits. Within a single in-flight batch, however, the snapshot of `gts_id → UsageType` is fixed (the call has already begun), so deduplicating identical lookups in that scope produces no drift window: every record observes the same row a single per-request `get_usage_type` would have. The cache built here SHALL be request-local and SHALL NOT outlive the batch call.
+
+> **Bounded fan-out.** Distinct-`gts_id` SPI dispatches SHALL be issued concurrently with a fixed concurrency cap (`CATALOG_FANOUT_CONCURRENCY`, host-defined constant; production value 8, identical to the `inst-algo-attrib-bounded-fanout` PDP cap). The PDP pre-pass and the catalog pre-pass run *sequentially*, not concurrently, so the effective in-flight ceiling against any one downstream stays bounded at the per-pass cap.
 
 **Steps**:
 
-1. [ ] - `p1` - Read the target UsageType `gts_id` from the calling pipeline at the `cpt-cf-usage-collector-component-ingestion-gateway` boundary - `inst-algo-catalog-read-input`
-2. [ ] - `p1` - Dispatch `get_usage_type(gts_id)` against `cpt-cf-usage-collector-contract-storage-plugin` - `inst-algo-catalog-spi-dispatch`
-3. [ ] - `p1` - **IF** the plugin returns `Err(UsageTypeNotFound { gts_id })` **RETURN** `found: false` so the calling flow surfaces the actionable not-found error envelope - `inst-algo-catalog-not-found`
-4. [ ] - `p1` - **IF** the plugin returns a transport / availability error **PROPAGATE** the platform-error envelope to the calling flow (HTTP `503` for `PluginUnavailable` / `TypesRegistryUnavailable` / `ServiceUnavailable` — plugin-side `Transient` and host-side per-call deadline expirations both lift to `ServiceUnavailable`; HTTP `500` for plugin `BackendError`, which lifts to the unclassified `Internal` envelope until a retryable-kind taxonomy is defined) - `inst-algo-catalog-spi-fail`
-5. [ ] - `p1` - **ELSE** the plugin returned `Ok(UsageType { gts_id, kind, metadata_fields })`; **RETURN** `found: true` with the `kind` value and `metadata_fields` shape descriptor — the calling flow reads counter / gauge `kind` directly from the catalog row via `UsageType::is_counter` / `UsageType::is_gauge` for consumption by `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` and the ingest-time closed-shape metadata-key check - `inst-algo-catalog-found`
+1. [x] - `p1` - Read the target UsageType `gts_id`s from the calling pipeline at the `cpt-cf-usage-collector-component-ingestion-gateway` boundary — for the single-record path this is one id; for the batch path this is the input vector, restricted to records whose PDP outcome is `allow` (see `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization`) - `inst-algo-catalog-read-input`
+2. [x] - `p1` - **(Batch path only.)** Build a request-local set `distinct_gts_ids: Set<UsageTypeGtsId>` from the PDP-allowed input vector, collapsing duplicate ids. Records hash-equal under `UsageTypeGtsId` resolve to the same catalog row by the SPI contract, so a single dispatch per distinct id is contractually equivalent to one dispatch per record - `inst-algo-catalog-dedup-gts-id`
+3. [x] - `p1` - **(Batch path only.)** Dispatch `get_usage_type(gts_id)` concurrently for each id in `distinct_gts_ids`, capped at `CATALOG_FANOUT_CONCURRENCY`; collect outcomes into a request-local `catalog_cache: Map<UsageTypeGtsId, Result<UsageType, Err>>`. On the single-record path the dispatch is just one call - `inst-algo-catalog-bounded-fanout`
+4. [x] - `p1` - Dispatch `get_usage_type(gts_id)` against `cpt-cf-usage-collector-contract-storage-plugin`; on the batch path this is the per-distinct-id call issued under `inst-algo-catalog-bounded-fanout` above, on the single-record path it is the only call - `inst-algo-catalog-spi-dispatch`
+5. [x] - `p1` - **IF** the plugin returns `Err(UsageTypeNotFound { gts_id })` **RETURN** `found: false` for every input index referencing `gts_id` so the calling flow surfaces the actionable not-found error envelope - `inst-algo-catalog-not-found`
+6. [x] - `p1` - **IF** the plugin returns a transport / availability error for some `gts_id`, **PROPAGATE** the platform-error envelope to every input index referencing that id (HTTP `503` for `PluginUnavailable` / `TypesRegistryUnavailable` / `ServiceUnavailable` — plugin-side `Transient` and host-side per-call deadline expirations both lift to `ServiceUnavailable`; HTTP `500` for plugin `BackendError`, which lifts to the unclassified `Internal` envelope until a retryable-kind taxonomy is defined) - `inst-algo-catalog-spi-fail`
+7. [x] - `p1` - **ELSE** the plugin returned `Ok(UsageType { gts_id, kind, metadata_fields })`; **RETURN** `found: true` with the `kind` value and `metadata_fields` shape descriptor for every input index referencing `gts_id` — the calling flow reads counter / gauge `kind` directly from the catalog row via `UsageType::is_counter` / `UsageType::is_gauge` for consumption by `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` and the ingest-time closed-shape metadata-key check - `inst-algo-catalog-found`
 
 ## 4. States (CDSL)
 
 ### Usage Record Ingestion Lifecycle State Machine
 
-- [ ] `p2` - **ID**: `cpt-cf-usage-collector-state-usage-emission-usage-record-ingestion-lifecycle`
+- [x] `p2` - **ID**: `cpt-cf-usage-collector-state-usage-emission-usage-record-ingestion-lifecycle`
 
 **States**: `submitted`, `validated`, `persisted`, `rejected-validation`, `spi-errored`
 
@@ -388,16 +445,16 @@ Notes (locked):
 
 **Transitions**:
 
-1. [ ] - `p1` - **FROM** `submitted` **TO** `validated` **WHEN** `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization`, `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup`, `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2`, and `cpt-cf-usage-collector-algo-usage-emission-metadata-size-cap-enforcement` all return their success outcome on the per-record path (mirrors `inst-emit-record-attrib-authz`, `inst-emit-record-catalog-lookup`, `inst-emit-record-semantics-check`, `inst-emit-record-metadata-cap` in `cpt-cf-usage-collector-flow-usage-emission-emit-record` and the per-record equivalents `inst-emit-batch-record-pdp`, `inst-emit-batch-record-catalog`, `inst-emit-batch-record-semantics`, `inst-emit-batch-record-metadata` in `cpt-cf-usage-collector-flow-usage-emission-emit-records-batch`) - `inst-state-usage-record-validated`
-2. [ ] - `p1` - **FROM** `submitted` **TO** `rejected-validation` **WHEN** any of the gateway-side validation algorithms returns a deterministic rejection — the inbound `SecurityContext` is missing (mirrors `inst-emit-record-missing-ctx`, `inst-emit-batch-missing-ctx`; surfaced as the canonical `Unauthenticated` `Problem` envelope), `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization` returns per-record `deny` (mirrors `inst-emit-record-pdp-deny`, `inst-emit-batch-record-deny`), `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` returns `not-found` (mirrors `inst-emit-record-usage-type-not-found`, `inst-emit-batch-record-unknown-usage-type`), `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` returns a counter-or-gauge semantics-violation violation (mirrors `inst-emit-record-semantics-invalid`, `inst-emit-batch-record-semantics-invalid`), or `cpt-cf-usage-collector-algo-usage-emission-metadata-size-cap-enforcement` returns `metadata-too-large` (mirrors `inst-emit-record-metadata-too-large`, `inst-emit-batch-record-metadata-too-large`); the SPI-dispatch stage joins the same `rejected-validation` disposition when the Plugin SPI `create_usage_record` / `create_usage_records` call returns `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, gts_id })` for a same-key submission whose canonical fields differ (mirrors `inst-emit-record-conflict`, `inst-emit-batch-record-conflict`), surfaced as `outcome="rejected"` with `context.reason="IDEMPOTENCY_CONFLICT"` (AlreadyExists/409) carrying the conflicting `idempotency_key` and `gts_id` and NOT silently absorbed; the actionable error envelope is surfaced and no record is acknowledged - `inst-state-usage-record-rejected-validation`
-3. [ ] - `p1` - **FROM** `validated` **TO** `persisted` **WHEN** the Plugin SPI `create_usage_record` / `create_usage_records` call returns `Ok(UsageRecord)` under the composite key `(tenant_id, gts_id, idempotency_key)` per `plugin-spi.md` (mirrors `inst-emit-record-accepted`, `inst-emit-batch-record-accepted`); this single transition covers **both** a fresh persist and a silent-absorb exact-equality retry — the wire surface returns `outcome="accepted"` carrying the persisted body (with the caller-supplied `uuid`) per `usage-collector-v1.yaml` and counter totals are not inflated by a retry - `inst-state-usage-record-persisted`
-4. [ ] - `p1` - **FROM** `validated` **TO** `spi-errored` **WHEN** the Plugin SPI `create_usage_record` / per-record `create_usage_records` result is an `Err(UsageCollectorPluginError::*)` other than `IdempotencyConflict` (`PluginUnavailable`, `Timeout`, `BackendError`) — mirrors `inst-emit-record-spi-fail`, `inst-emit-batch-record-spi-err`; the per-record outcome is `rejected` (`context.reason="PLUGIN_READINESS"`); an outer batch-level call failure (where the whole `create_usage_records` invocation returns `Err`) surfaces as a whole-request canonical `Problem` instead per `inst-emit-batch-spi-fail-mark` - `inst-state-usage-record-spi-error`
+1. [x] - `p1` - **FROM** `submitted` **TO** `validated` **WHEN** `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization`, `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup`, `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2`, and `cpt-cf-usage-collector-algo-usage-emission-metadata-size-cap-enforcement` all return their success outcome on the per-record path (mirrors `inst-emit-record-attrib-authz`, `inst-emit-record-catalog-lookup`, `inst-emit-record-semantics-check`, `inst-emit-record-metadata-cap` in `cpt-cf-usage-collector-flow-usage-emission-emit-record` and the per-record equivalents `inst-emit-batch-record-pdp`, `inst-emit-batch-record-catalog`, `inst-emit-batch-record-semantics`, `inst-emit-batch-record-metadata` in `cpt-cf-usage-collector-flow-usage-emission-emit-records-batch`) - `inst-state-usage-record-validated`
+2. [x] - `p1` - **FROM** `submitted` **TO** `rejected-validation` **WHEN** any of the gateway-side validation algorithms returns a deterministic rejection — the inbound `SecurityContext` is missing (mirrors `inst-emit-record-missing-ctx`, `inst-emit-batch-missing-ctx`; surfaced as the canonical `Unauthenticated` `Problem` envelope), `cpt-cf-usage-collector-algo-usage-emission-attribution-and-pdp-authorization` returns per-record `deny` (mirrors `inst-emit-record-pdp-deny`, `inst-emit-batch-record-deny`), `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` returns `not-found` (mirrors `inst-emit-record-usage-type-not-found`, `inst-emit-batch-record-unknown-usage-type`), `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` returns a counter-or-gauge semantics-violation violation (mirrors `inst-emit-record-semantics-invalid`, `inst-emit-batch-record-semantics-invalid`), or `cpt-cf-usage-collector-algo-usage-emission-metadata-size-cap-enforcement` returns `metadata-too-large` (mirrors `inst-emit-record-metadata-too-large`, `inst-emit-batch-record-metadata-too-large`); the SPI-dispatch stage joins the same `rejected-validation` disposition when the Plugin SPI `create_usage_record` / `create_usage_records` call returns `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, gts_id })` for a same-key submission whose canonical fields differ (mirrors `inst-emit-record-conflict`, `inst-emit-batch-record-conflict`), surfaced as `outcome="rejected"` with `context.reason="IDEMPOTENCY_CONFLICT"` (AlreadyExists/409) carrying the conflicting `idempotency_key` and `gts_id` and NOT silently absorbed; the actionable error envelope is surfaced and no record is acknowledged - `inst-state-usage-record-rejected-validation`
+3. [x] - `p1` - **FROM** `validated` **TO** `persisted` **WHEN** the Plugin SPI `create_usage_record` / `create_usage_records` call returns `Ok(UsageRecord)` under the composite key `(tenant_id, gts_id, idempotency_key)` per `plugin-spi.md` (mirrors `inst-emit-record-accepted`, `inst-emit-batch-record-accepted`); this single transition covers **both** a fresh persist and a silent-absorb exact-equality retry — the wire surface returns `outcome="accepted"` carrying the persisted body (with the caller-supplied `uuid`) per `usage-collector-v1.yaml` and counter totals are not inflated by a retry - `inst-state-usage-record-persisted`
+4. [x] - `p1` - **FROM** `validated` **TO** `spi-errored` **WHEN** the Plugin SPI `create_usage_record` / per-record `create_usage_records` result is an `Err(UsageCollectorPluginError::*)` other than `IdempotencyConflict` (`PluginUnavailable`, `Timeout`, `BackendError`) — mirrors `inst-emit-record-spi-fail`, `inst-emit-batch-record-spi-err`; the per-record outcome is `rejected` (`context.reason="PLUGIN_READINESS"`); an outer batch-level call failure (where the whole `create_usage_records` invocation returns `Err`) surfaces as a whole-request canonical `Problem` instead per `inst-emit-batch-spi-fail-mark` - `inst-state-usage-record-spi-error`
 
 ## 5. Definitions of Done
 
 ### FR: Ingestion
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-ingestion`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-ingestion`
 
 The system **MUST** expose `POST /usage-collector/v1/records` as the single contract-first write path for at-least-once ingestion of usage records from authenticated callers, accept a `CreateUsageRecordsRequest` carrying 1..100 `UsageRecord` payloads (single or batched) per `usage-collector-v1.yaml`, route every submission through `cpt-cf-usage-collector-component-ingestion-gateway`, and end the synchronous path with persistence through the Plugin Host's persist capability — surfacing deterministic per-record acknowledgements (`accepted` for both a fresh persist and a silent-absorb exact-equality retry, or `rejected` with a per-record `error: Problem` envelope for any per-record failure) in input order with no whole-batch rollback.
 
@@ -416,7 +473,7 @@ The system **MUST** expose `POST /usage-collector/v1/records` as the single cont
 
 ### FR: Idempotency
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-idempotency`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-idempotency`
 
 The system **MUST** require a caller-supplied `IdempotencyKey` on every record and dedup retried submissions via the Plugin SPI composite key `(tenant_id, gts_id, idempotency_key)` UNIQUE constraint; the dedup check and the persist MUST be a single SPI capability (Method 1 `create_usage_record` for single, Method 2 `create_usage_records` for batch) and MUST NOT be split into separate non-transactional calls. The system **MUST** distinguish two same-key outcomes per the plugin's canonical-field equality comparison: (a) an EXACT-EQUALITY retry — where ALL caller canonical fields (`value`, `ResourceRef`, `SubjectRef`, and `RecordMetadata`) match the stored record — is dedup'd silently: the SPI returns `Ok(UsageRecord)` carrying the previously-persisted body and the wire surface returns `outcome="accepted"` indistinguishably from a fresh insert, without performing a second write and without inflating counter totals; and (b) a same-key submission with ANY canonical-field mismatch (including a metadata-only difference) MUST be rejected: the SPI returns `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, gts_id })` and the wire surface returns `outcome="rejected"` with a per-record `error: Problem` (`context.reason="IDEMPOTENCY_CONFLICT"`, AlreadyExists/409) — the second write MUST NOT be silently absorbed. (c) The idempotency window **MUST** be UNBOUNDED — the `IdempotencyKey` never expires, has no TTL, and the UNIQUE `(tenant_id, gts_id, idempotency_key)` constraint is permanent — and the storage plugin **MUST** preserve the `(tenant_id, gts_id, idempotency_key)` tuple permanently even when record bodies are purged/archived by retention (retention/purge MUST NOT free a dedup key) per `plugin-spi.md`.
 
@@ -434,9 +491,9 @@ The system **MUST** require a caller-supplied `IdempotencyKey` on every record a
 
 ### FR: Record Metadata
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-record-metadata`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-record-metadata`
 
-The system **MUST** enforce a **closed-shape** check on the `RecordMetadata` payload at the Ingestion Gateway before any usage-record Plugin SPI write dispatch: every key in the submitted metadata MUST be a declared member of the usage type's `metadata_fields` (resolved per record via a `get_usage_type` SPI dispatch against `cpt-cf-usage-collector-contract-storage-plugin`) and every value is conveyed as `String` end-to-end; any undeclared key MUST be rejected with the `UNKNOWN_METADATA_KEY` error name (REST `context.reason="UNKNOWN_METADATA_KEY"`; SDK `UsageCollectorError::UnknownMetadataKey`) lifting to AIP-193 `InvalidArgument` / HTTP `400` carrying `context.key` and `instance_path` (e.g. `/metadata/{key}`) per `usage-collector-v1.yaml`. The system **MUST** also enforce a fixed 8 KiB per record size cap on the conforming payload at the Ingestion Gateway before any Plugin SPI dispatch, surface oversize records with the actionable validation error envelope (`context.reason="METADATA_SIZE"`) carrying the measured size and the configured cap per `usage-collector-v1.yaml`, and persist conforming payloads byte-for-byte through the Plugin SPI (no silent truncation, no rewriting, no interpretation of declared-key values) per the `sdk-trait.md` Method 1 invariant and `plugin-spi.md` Method 1 invariant 2. There is no free-form remainder and no preserved extras — undeclared keys are validation errors, not silently-stored extras.
+The system **MUST** enforce a **closed-shape** check on the `RecordMetadata` payload at the Ingestion Gateway before any usage-record Plugin SPI write dispatch: every key in the submitted metadata MUST be a declared member of the usage type's `metadata_fields` (resolved per record via a `get_usage_type` SPI dispatch against `cpt-cf-usage-collector-contract-storage-plugin`) and every value is conveyed as `String` end-to-end; any undeclared key MUST be rejected as `UsageCollectorError::InvalidArgument` carrying `ValidationReason::UnknownMetadataKey` (REST `field_violations[0].reason="UNKNOWN_METADATA_KEY"`), AIP-193 `InvalidArgument` / HTTP `400` carrying `context.key` and `instance_path` (e.g. `/metadata/{key}`) per `usage-collector-v1.yaml`. The system **MUST** also enforce a fixed 8 KiB per record size cap on the conforming payload at the Ingestion Gateway before any Plugin SPI dispatch, surface oversize records with the actionable validation error envelope (`context.reason="METADATA_SIZE"`) carrying the measured size and the configured cap per `usage-collector-v1.yaml`, and persist conforming payloads byte-for-byte through the Plugin SPI (no silent truncation, no rewriting, no interpretation of declared-key values) per the `sdk-trait.md` Method 1 invariant and `plugin-spi.md` Method 1 invariant 2. There is no free-form remainder and no preserved extras — undeclared keys are validation errors, not silently-stored extras.
 
 **Implements**:
 
@@ -451,7 +508,7 @@ The system **MUST** enforce a **closed-shape** check on the `RecordMetadata` pay
 
 ### FR: UsageType Existence and Semantics
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-usage-type-existence-and-semantics`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-usage-type-existence-and-semantics`
 
 The system **MUST** reject any usage record whose target UsageType `gts_id` is not present in the plugin's `usage_type_catalog` at the time of submission, before any usage-record Plugin SPI write dispatch — surfaced as the per-record `outcome="rejected"` with `Problem.context.reason="UNKNOWN_USAGE_TYPE"` per `usage-collector-v1.yaml`. UsageType existence is resolved by `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup`, which dispatches `get_usage_type` against `cpt-cf-usage-collector-contract-storage-plugin` per record. The system **MUST** additionally enforce semantics-dependent invariants based on the referenced UsageType's counter / gauge classification (read from the catalog row's `kind` field via `UsageType::is_counter` / `UsageType::is_gauge`) — counter records with a negative delta `value` MUST be rejected with `Problem.context.reason="SEMANTICS_VIOLATION"`; gauge records are accepted as point-in-time values. Both rejections MUST be returned to the caller as actionable per-record `error: Problem` envelopes before any usage-record persistence, so unregistered UsageType references and semantics-violating values can never enter the `usage_records` table.
 
@@ -470,7 +527,7 @@ The system **MUST** reject any usage record whose target UsageType `gts_id` is n
 
 ### FR: Counter Semantics
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-counter-semantics`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-counter-semantics`
 
 The system **MUST** enforce counter non-negativity at the Ingestion Gateway before any Plugin SPI dispatch — rejecting any counter-kind record whose submitted `value` is below zero — by consulting the `UsageType` and reading the row's closed `UsageKind` enum (`UsageType.kind == Counter`) through `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` and surfacing the actionable validation error envelope (`context.reason="SEMANTICS_VIOLATION"`) per `usage-collector-v1.yaml` so the counter non-negativity invariant (counter-kind records MUST have `value >= 0`) is upheld before persistence.
 
@@ -487,7 +544,7 @@ The system **MUST** enforce counter non-negativity at the Ingestion Gateway befo
 
 ### FR: Gauge Semantics
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-gauge-semantics`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-gauge-semantics`
 
 The system **MUST** accept gauge-kind records as point-in-time values stored as-is — no delta accumulation, no rewriting, no server-side shape rewriting — per DESIGN §3.1 and `cpt-cf-usage-collector-fr-gauge-semantics` (gauge classification read from the catalog row's closed `UsageKind` enum, `UsageType.kind == Gauge`), preserving the gauge replacement semantic that the most recent accepted value supersedes prior values for the same `(tenant_id, gts_id)` pair without delta arithmetic, and rejecting any submission against a gauge UsageType that carries `corrects_id` set per the locked (`MetricSemantics` × `corrects_id` presence) value matrix in `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2`.
 
@@ -504,7 +561,7 @@ The system **MUST** accept gauge-kind records as point-in-time values stored as-
 
 ### FR: Tenant Attribution
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-tenant-attribution`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-tenant-attribution`
 
 The system **MUST** treat tenant attribution as caller-supplied in the request payload as the mandatory `tenant_id` field of `UsageRecordInput` per `usage-collector-v1.yaml` rather than server-synthesized or inferred from the inbound `SecurityContext`, include the caller-supplied `tenant_id` in the per-record attribution tuple sent to `cpt-cf-usage-collector-flow-foundation-pdp-authorize` via the per-component `authz_scope` helper inside `cpt-cf-usage-collector-component-ingestion-gateway` (which authorizes the caller's `SecurityContext` for the requested `tenant_id`), materialize the caller-supplied `tenant_id` byte-identical on every persisted record via the Plugin SPI persist capability, and refuse any ingestion attempt whose attribution tuple cannot be authorized and the PDP permit/deny outcome.
 
@@ -523,7 +580,7 @@ The system **MUST** treat tenant attribution as caller-supplied in the request p
 
 ### FR: Resource Attribution
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-resource-attribution`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-resource-attribution`
 
 The system **MUST** require a mandatory caller-supplied `ResourceRef` (composite `resource_id` plus `resource_type`) on every `UsageRecord` payload, materialize both mandatory components on every persisted record via the Plugin SPI persist capability, include the resource attribution in the per-record attribution tuple sent to `cpt-cf-usage-collector-flow-foundation-pdp-authorize`, and never synthesize resource attribution server-side.
 
@@ -542,7 +599,7 @@ The system **MUST** require a mandatory caller-supplied `ResourceRef` (composite
 
 ### FR: Subject Attribution
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-subject-attribution`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-subject-attribution`
 
 The system **MUST** treat `SubjectRef` as caller-supplied and optional — `subject_id` is the only mandatory component when subject attribution is supplied, `subject_type` is optional and MUST NOT be supplied without `subject_id` per the optional-subject rule — materialize the supplied components on every persisted record via the Plugin SPI persist capability, omit the entity entirely for system-level consumption, include subject attribution in the per-record attribution tuple sent to `cpt-cf-usage-collector-flow-foundation-pdp-authorize` when present, and never synthesize subject attribution server-side.
 
@@ -561,7 +618,7 @@ The system **MUST** treat `SubjectRef` as caller-supplied and optional — `subj
 
 ### FR: Ingestion Authorization
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-ingestion-authorization`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-fr-ingestion-authorization`
 
 The system **MUST** accept an inbound `SecurityContext` at both ingestion entry points — on REST as `Extension<SecurityContext>` populated by ToolKit gateway middleware (`OperationBuilder::authenticated()`), on the SDK trait as `ctx: &SecurityContext` first parameter to `UsageCollectorClientV1::create_usage_record` / `create_usage_records` per `sdk-trait.md` Methods 1 and 2 — and authorize every ingestion call by dispatching per-attribution-tuple PDP authorization to `cpt-cf-usage-collector-flow-foundation-pdp-authorize` through the per-component `authz_scope` helper (`PolicyEnforcer::access_scope_with(ctx, ...)` against `cpt-cf-usage-collector-contract-authz-resolver`) inside `cpt-cf-usage-collector-component-ingestion-gateway` against the full attribution tuple (`tenant_id`, `ResourceRef`, optional `SubjectRef`, UsageType `gts_id`); fail closed when the inbound `SecurityContext` is missing (canonical `Unauthenticated` `Problem` envelope per the `usage-collector-v1.yaml` `default` response) or when the PDP resolver is unavailable (no synthesized identity, no cached PDP decision); surface per-tuple PDP `deny` decisions as per-record `outcome="rejected"` with `context.reason="AUTHZ"` inside `CreateUsageRecordsResponse` — never as whole-request rejection, because PDP authorization is per attribution tuple and there is no envelope-level PDP deny aggregation — without any Plugin SPI dispatch in either case.
 
@@ -580,7 +637,7 @@ The system **MUST** accept an inbound `SecurityContext` at both ingestion entry 
 
 ### FR: Usage Compensation — Flow
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-compensation-flow`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-compensation-flow`
 
 The system **MUST** accept counter value-reversal records on the **same unified ingestion path** as ordinary usage emission (`POST /usage-collector/v1/records` and the SDK emit operation routed through `cpt-cf-usage-collector-component-ingestion-gateway`) without introducing a dedicated `compensate` REST path, SDK method, or Plugin SPI call and DESIGN §3.3 "Unified ingestion request shape"; persist accepted compensation records as a `UsageRecord` with a strictly-negative signed `value` and a non-empty `corrects_id` pointing at the referenced ordinary usage row (one with `corrects_id IS NULL`), under the same PDP attribution (`cpt-cf-usage-collector-flow-foundation-pdp-authorize` via the per-component `authz_scope` helper) and the same mandatory caller-supplied `IdempotencyKey` (`cpt-cf-usage-collector-adr-mandatory-idempotency`) that govern ordinary ingestion; surface the per-record acknowledgement (`outcome="accepted"` for both a fresh compensation insert and a silent-absorb exact-equality retry, or `outcome="rejected"` for any per-record failure including `IDEMPOTENCY_CONFLICT`) in the same `CreateUsageRecordsResponse` shape. Recording a caller-supplied signed-negative `value` is recording, not computing — the system MUST NOT compute refunds, credits, credit-notes, or quota; mandatory idempotency prevents double-refund for free.
 
@@ -600,7 +657,7 @@ The system **MUST** accept counter value-reversal records on the **same unified 
 
 ### FR: Usage Compensation — Value Matrix
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-value-matrix`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-value-matrix`
 
 The system **MUST** enforce the locked four-cell `(MetricSemantics × corrects_id presence)` value matrix at validation time via `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` before any Plugin SPI persist dispatch: `counter` + `corrects_id IS NULL` requires `value >= 0` (unchanged); `counter` + `corrects_id SET` requires `value < 0` (strictly negative — zero is not accepted); `gauge` + `corrects_id IS NULL` accepts any signed value (unchanged); `gauge` + `corrects_id SET` is **REJECTED** before persistence (gauges have no `SUM` semantics; the only correction for a gauge is deactivation). Value-sign violations of the `counter` + `corrects_id IS NULL` (`value < 0`) and `counter` + `corrects_id SET` (`value >= 0`) cells surface as the per-record `outcome="rejected"` with `context.reason="SEMANTICS_VIOLATION"` per `usage-collector-v1.yaml`; the `gauge` + `corrects_id SET` cell surfaces with `context.reason="GAUGE_COMPENSATION_REJECTED"` (HTTP `422`) per the locked five-code compensation taxonomy in `usage-collector-v1.yaml` and the SDK trait `GaugeCompensationRejected` variant — it is NEVER collapsed into the generic `SEMANTICS_VIOLATION` code.
 
@@ -618,7 +675,7 @@ The system **MUST** enforce the locked four-cell `(MetricSemantics × corrects_i
 
 ### FR: Usage Compensation — L1 corrects_id
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-corrects-id-l1`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-corrects-id-l1`
 
 The system **MUST** enforce the L1 `corrects_id` referential rule synchronously at ingestion via `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` whenever the submitted `UsageRecord` carries `corrects_id` set: (1) the referenced row MUST exist; (2) the referenced row MUST itself be an ordinary usage row (`corrects_id IS NULL`) — compensating a compensation is a non-goal; (3) the referenced row MUST share the full identity tuple `(tenant_id, gts_id, resource_ref, subject_ref)` with the incoming compensation (cross-tenant, cross-usage-type, cross-resource, cross-subject, or `subject_ref` presence mismatches are rejected — `None` vs `Some(_)` is a scope error); (4) the referenced row MUST be `status = active`. Failures (1)-(4) surface as `outcome="rejected"` with one of the four granular wire codes from the locked `usage-collector-v1.yaml` Problem.context.reason taxonomy: rule (1) → `CORRECTS_ID_NOT_FOUND` (HTTP `404`); rule (2) → `CORRECTS_ID_TARGETS_COMPENSATION` (HTTP `409`); rule (3) → `CORRECTS_ID_WRONG_SCOPE` (HTTP `409`); rule (4) → `CORRECTS_ID_INACTIVE` (HTTP `409`) — these codes are NEVER collapsed into a single generic `corrects_id_invalid` code (no such code is declared in the OpenAPI taxonomy or in `sdk-trait.md`). The mapping from algorithm outcomes to these wire codes is the contract recorded in the algorithm's "Algorithm outcome → wire `context.reason` mapping" table. The system MUST NOT track L2 per-record remaining amounts, lots, FIFO/LIFO ordering, or non-negative net.
 
@@ -636,7 +693,7 @@ The system **MUST** enforce the L1 `corrects_id` referential rule synchronously 
 
 ### FR: Usage Compensation — Concurrency
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-compensation-concurrency`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-compensation-concurrency`
 
 The system **MUST** reject a compensation whose referenced ordinary usage row (`corrects_id IS NULL`) is mid-deactivation via the L1 "referenced record MUST be `active`" check inside `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` — there is no quarantine, no retry queue, no compensating cascade for the rejection, and no additional distributed-coordination machinery is added at the gateway. A compensation referencing a row R that arrives while R is being deactivated is rejected by the same L1 "active" check that handles fully-inactive references; the caller retries at its own discretion and the mandatory idempotency key makes those retries safe (the depth-1 cascade itself is owned by `cpt-cf-usage-collector-feature-event-deactivation` and `cpt-cf-usage-collector-adr-monotonic-deactivation`, not by this feature).
 
@@ -654,7 +711,7 @@ The system **MUST** reject a compensation whose referenced ordinary usage row (`
 
 ### FR: Usage Compensation — No Business Logic
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-compensation-no-business-logic`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-compensation-no-business-logic`
 
 The system **MUST NOT** compute refunds, credits, credit-notes, quota, lot/FIFO-LIFO state, or per-record remaining amounts when recording a compensation. Recording a caller-supplied signed-negative `value` on a `UsageRecord` whose `corrects_id` is set is **recording, not computing** — the caller owns the business decision to give back capacity (capacity refund, partial cancellation, dispute resolution, billing-period correction); the Usage Collector validates the four-cell matrix + the L1 `corrects_id` rule and persists the row as-supplied. The system MUST NOT validate non-negative net at write time and MUST NOT emit a negative-net detection signal per the un-policed-net stance recorded in `cpt-cf-usage-collector-adr-usage-compensation`; downstream consumers (billing, quota, FinOps) own any "net can't be negative" policy. Mandatory idempotency prevents double-refund for free.
 
@@ -724,7 +781,7 @@ The system **MUST** hold the per-record ingestion-latency budget declared by `cp
 
 ### NFR: Workload Isolation
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-nfr-workload-isolation`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-nfr-workload-isolation`
 
 The system **MUST** isolate the synchronous ingestion path from the read-side query path and from operator-side UsageType and deactivation paths so that sustained read or lifecycle workload does not degrade ingestion latency or throughput beyond the `cpt-cf-usage-collector-nfr-ingestion-latency` and `cpt-cf-usage-collector-nfr-throughput` budgets — `cpt-cf-usage-collector-component-ingestion-gateway` MUST be the sole entry point for the write path, with no shared mutable state or shared backpressure with the read-side or operator-side gateways beyond the single Plugin Host dispatch surface.
 
@@ -741,7 +798,7 @@ The system **MUST** isolate the synchronous ingestion path from the read-side qu
 
 ### Principle: Idempotency by Key
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-principle-idempotency-by-key`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-principle-idempotency-by-key`
 
 The system **MUST** uphold idempotency-by-key as the at-least-once delivery contract: every record carries a caller-supplied `IdempotencyKey`, the dedup boundary is the Plugin SPI composite key `(tenant_id, gts_id, idempotency_key)`, and EXACT-EQUALITY retries sharing the composite (ALL caller canonical fields equal) silently absorb at the SPI — the plugin returns `Ok(UsageRecord)` carrying the previously persisted body, and the wire surface returns `outcome="accepted"` indistinguishably from a fresh insert without a second write, so counter totals MUST NOT be inflated by retries — uniformly across counter and gauge kinds. The silent absorb is reserved EXCLUSIVELY for exact-equality retries: a same-key submission whose canonical fields differ MUST instead surface from the SPI as `Err(UsageCollectorPluginError::IdempotencyConflict { idempotency_key, gts_id })` lifted to `outcome="rejected"` with `context.reason="IDEMPOTENCY_CONFLICT"` (AlreadyExists/409) and MUST NOT be silently dropped.
 
@@ -759,7 +816,7 @@ The system **MUST** uphold idempotency-by-key as the at-least-once delivery cont
 
 ### Principle: Semantics Enforcement
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-principle-semantics-enforcement`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-principle-semantics-enforcement`
 
 The system **MUST** enforce `UsageType` invariants at `cpt-cf-usage-collector-component-ingestion-gateway` before any usage-record Plugin SPI write dispatch — counter records MUST satisfy non-negative `value` per `cpt-cf-usage-collector-adr-usage-compensation`, gauge records are accepted as-is per DESIGN §3.1 — by confirming UsageType existence via `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` (a per-record `get_usage_type` SPI dispatch against `cpt-cf-usage-collector-contract-storage-plugin`) and reading `UsageType.kind` from the catalog row via `UsageType::is_counter` / `UsageType::is_gauge`.
 
@@ -778,7 +835,7 @@ The system **MUST** enforce `UsageType` invariants at `cpt-cf-usage-collector-co
 
 ### Principle: Fail Closed
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-principle-fail-closed`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-principle-fail-closed`
 
 The system **MUST** fail closed on every boundary or downstream-resolver or Plugin SPI unavailability: when the inbound `SecurityContext` is missing at the handler boundary (REST handler did not receive `Extension<SecurityContext>` from ToolKit gateway middleware, or the SDK trait was invoked without a `ctx` argument) the ingestion path MUST return the canonical `Unauthenticated` `Problem` envelope without any PDP call or record dispatch; when the `cpt-cf-usage-collector-contract-authz-resolver` PDP resolver is unreachable or denies, `cpt-cf-usage-collector-flow-foundation-pdp-authorize` (invoked via the per-component `authz_scope` helper inside `cpt-cf-usage-collector-component-ingestion-gateway`) propagates the canonical `PermissionDenied` `Problem` envelope without record dispatch; when the Plugin SPI surfaces transport / readiness / persistence errors the per-record outcome is `rejected` (`context.reason="PLUGIN_READINESS"`) with no acknowledged record — no synthesized identity, no cached PDP decision, and no invented storage binding per the `cpt-cf-usage-collector-component-ingestion-gateway` boundary.
 
@@ -796,7 +853,7 @@ The system **MUST** fail closed on every boundary or downstream-resolver or Plug
 
 ### Principle: Pluggable Storage
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-principle-pluggable-storage`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-principle-pluggable-storage`
 
 The system **MUST** dispatch every persistence call through the foundation-owned Plugin Host and the Plugin SPI single-record (Method 1 `create_usage_record`) or batch (Method 2 `create_usage_records`) capability — never embedding backend-specific SQL, schema, or client code in `cpt-cf-usage-collector-component-ingestion-gateway`, never opening a parallel storage path, and never inventing a binding when the registry or orchestrator is unreachable — so that the active storage plugin can be swapped via operator configuration without touching the ingestion path.
 
@@ -813,7 +870,7 @@ The system **MUST** dispatch every persistence call through the foundation-owned
 
 ### Constraint: No Business Logic
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-constraint-no-business-logic`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-constraint-no-business-logic`
 
 The system **MUST** keep the ingestion path free of billing, pricing, quota enforcement, and per-UsageType payload-content interpretation — `cpt-cf-usage-collector-component-ingestion-gateway` MUST NOT interpret `RecordMetadata` content, MUST NOT apply any per-tenant or per-UsageType accounting transform, and MUST NOT mutate the `value` field beyond semantics-violation rejection — every business rule is owned by callers and downstream consumers.
 
@@ -849,7 +906,7 @@ The system **MUST** hold the PRD-declared NFR thresholds end-to-end on the inges
 
 ### ADR: Caller-supplied Attribution
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-adr-caller-supplied-attribution`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-adr-caller-supplied-attribution`
 
 The system **MUST** consume `tenant_id`, `ResourceRef`, and optional `SubjectRef` exclusively from the caller — carried verbatim on the per-record `UsageRecord` payload (the caller-supplied `tenant_id` field is the authoritative tenant scope for the record and MUST NOT be derived from the inbound `SecurityContext`) — and MUST NOT synthesize any of these fields server-side, MUST NOT derive them from headers other than the caller-bound credential material, and MUST NOT permit operator overrides on the ingestion path.
 
@@ -868,7 +925,7 @@ The system **MUST** consume `tenant_id`, `ResourceRef`, and optional `SubjectRef
 
 ### ADR: Mandatory Idempotency
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-adr-mandatory-idempotency`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-adr-mandatory-idempotency`
 
 The system **MUST** require a caller-supplied `IdempotencyKey` on every `UsageRecord` payload at the wire level — `idempotency_key` is a mandatory attribution field on every persisted record per the SPI dedup composite (`plugin-spi.md` §"Cross-entity invariants honored by the Plugin SPI") — reject submissions missing the key with the actionable validation error envelope before any Plugin SPI dispatch, dedup retries under the Plugin SPI composite `(tenant_id, gts_id, idempotency_key)`, and surface duplicate outcomes uniformly across counter and gauge kinds so retries never inflate counter totals or poison gauge point-in-time signals.
 
@@ -886,7 +943,7 @@ The system **MUST** require a caller-supplied `IdempotencyKey` on every `UsageRe
 
 ### Component: Ingestion Gateway
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-component-ingestion-gateway`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-component-ingestion-gateway`
 
 The system **MUST** realize `cpt-cf-usage-collector-component-ingestion-gateway` as the sole synchronous write entry point for usage records (REST and SDK, single and batched), owning the ingestion contract end-to-end — SecurityContext acceptance at both entry points (REST handler with `Extension<SecurityContext>` from ToolKit gateway middleware via `OperationBuilder::authenticated()`; SDK trait `create_usage_record(ctx, ...)` / `create_usage_records(ctx, ...)` with `ctx: &SecurityContext` as the first parameter), per-component PDP enforcement via the `authz_scope` helper (`PolicyEnforcer::access_scope_with(ctx, ...)` against `cpt-cf-usage-collector-contract-authz-resolver`), structural attribution-tuple validation, mandatory idempotency-key requirement, semantics-dependent invariants resolved per record via a `get_usage_type` SPI dispatch against `cpt-cf-usage-collector-contract-storage-plugin`, fixed 8 KiB `RecordMetadata` size-cap enforcement, deterministic per-record acknowledgements — while delegating persistence to `cpt-cf-usage-collector-component-plugin-host` and the UsageType catalog SoR to `cpt-cf-usage-collector-component-usage-type-catalog`, with no PDP-decision caching, no synthesized identities, no invented storage bindings, and no interpretation of `RecordMetadata` content per DESIGN §3.2.
 
@@ -908,7 +965,7 @@ The system **MUST** realize `cpt-cf-usage-collector-component-ingestion-gateway`
 
 ### Sequence: Emit Usage Record
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-seq-emit-usage`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-seq-emit-usage`
 
 The system **MUST** implement the `cpt-cf-usage-collector-seq-emit-usage` sequence end-to-end: caller surface (REST handler receiving `Extension<SecurityContext>` from ToolKit gateway middleware, or SDK trait `create_usage_record(ctx, ...)` / `create_usage_records(ctx, ...)` with `ctx: &SecurityContext` first) → Ingestion Gateway per-component PDP authorization via the `authz_scope` helper against `cpt-cf-usage-collector-contract-authz-resolver` → Ingestion Gateway dispatch → UsageType Catalog existence/semantics lookup → Plugin Host → storage plugin persist under the composite key `(tenant_id, gts_id, idempotency_key)` → per-record acknowledgement, with PDP denial, unknown UsageType, semantics-violation violation, oversize metadata, and SPI errors rejecting or marking per-record outcomes without any whole-batch rollback per DESIGN §3.6.
 
@@ -943,7 +1000,7 @@ The system **MUST** treat `UsageRecord` per DESIGN §3.1 as a single attributed 
 
 ### Entity: Record Metadata
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-entity-record-metadata`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-entity-record-metadata`
 
 The system **MUST** treat `RecordMetadata` per DESIGN §3.1 as an optional opaque JSON object carried verbatim on a `UsageRecord` — never indexed, never aggregated, never interpreted by `cpt-cf-usage-collector-component-ingestion-gateway` or the Plugin Host — persisted byte-for-byte through the Plugin SPI per the `sdk-trait.md` Method 1 invariant and `plugin-spi.md` Method 1 invariant 2, and bounded by the fixed 8 KiB cap enforced before any SPI dispatch.
 
@@ -959,7 +1016,7 @@ The system **MUST** treat `RecordMetadata` per DESIGN §3.1 as an optional opaqu
 
 ### Entity: Resource Ref
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-entity-resource-ref`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-entity-resource-ref`
 
 The system **MUST** treat `ResourceRef` per DESIGN §3.1 as a caller-supplied composite identifying the attributed resource — mandatory `resource_id` plus mandatory `resource_type` — required on every `UsageRecord` payload, materialized on every persisted record as mandatory `resource_id` and `resource_type` attribution via the Plugin SPI persist capability, and forwarded as part of the per-record attribution tuple to `cpt-cf-usage-collector-flow-foundation-pdp-authorize`.
 
@@ -977,7 +1034,7 @@ The system **MUST** treat `ResourceRef` per DESIGN §3.1 as a caller-supplied co
 
 ### Entity: Subject Ref
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-entity-subject-ref`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-entity-subject-ref`
 
 The system **MUST** treat `SubjectRef` per DESIGN §3.1 as a caller-supplied subject attribution — mandatory `subject_id` plus optional `subject_type` when supplied; omitted entirely for system-level consumption — and per the optional-subject rule MUST NOT accept `subject_type` without `subject_id`, materializing the supplied components verbatim on the persisted record as optional `subject_id` and `subject_type` attribution via the Plugin SPI persist capability, and forwarding subject attribution as part of the per-record attribution tuple to `cpt-cf-usage-collector-flow-foundation-pdp-authorize` when present.
 
@@ -1012,7 +1069,7 @@ The system **MUST** treat `IdempotencyKey` per DESIGN §3.1 as a caller-supplied
 
 ### Entity: UsageType
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-entity-usage-type`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-entity-usage-type`
 
 The system **MUST** consume `UsageType` per DESIGN §3.1 as a read-only catalog reference on the ingestion path — the ingestion path NEVER mutates UsageTypes — resolving UsageType existence and the declared `metadata_fields` for a target `gts_id` exclusively through `cpt-cf-usage-collector-algo-usage-emission-catalog-existence-and-kind-lookup` (a per-record `get_usage_type` SPI dispatch against `cpt-cf-usage-collector-contract-storage-plugin`), with absent entries surfaced as `not-found`. Counter / gauge accumulation semantics are read at the call site from the catalog row's closed `UsageKind` enum (`UsageType.kind == Counter` ⇒ counter; `UsageType.kind == Gauge` ⇒ gauge) and drive the counter and gauge branches of `cpt-cf-usage-collector-algo-usage-emission-semantics-enforcement-on-ingest-v2` deterministically.
 
@@ -1030,7 +1087,7 @@ The system **MUST** consume `UsageType` per DESIGN §3.1 as a read-only catalog 
 
 ### Entity: Security Context
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-entity-security-context`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-entity-security-context`
 
 The system **MUST** consume `SecurityContext` (see `domain-model.md` §2.7) as the platform-resolved caller-identity envelope (caller principal, caller's tenant scope, auxiliary claims) — never owned, synthesized, or cached by `cpt-cf-usage-collector-component-ingestion-gateway`. The handler MUST accept the `SecurityContext` exclusively at one of the two convention-bound entry points — on REST as `Extension<SecurityContext>` populated by ToolKit gateway middleware (`OperationBuilder::authenticated()`) and on the SDK trait as `ctx: &SecurityContext` passed as the first parameter to `UsageCollectorClientV1::create_usage_record(ctx, ...)` / `create_usage_records(ctx, ...)` per `sdk-trait.md` Methods 1 and 2 — and pass it verbatim to `cpt-cf-usage-collector-flow-foundation-pdp-authorize` via the per-component `authz_scope` helper (`PolicyEnforcer::access_scope_with(ctx, ...)` against `cpt-cf-usage-collector-contract-authz-resolver`) so PDP authorizes the caller's identity against each per-record attribution tuple (including the caller-supplied `tenant_id` from `UsageRecordInput`), and fail closed on missing `SecurityContext` or PDP unavailability. The `SecurityContext` is the subject of PDP authorization — the persisted record's `tenant_id` attribution is materialized from the caller-supplied `UsageRecordInput.tenant_id` field, not synthesized from the SecurityContext's tenant scope.
 
@@ -1048,7 +1105,7 @@ The system **MUST** consume `SecurityContext` (see `domain-model.md` §2.7) as t
 
 ### API: POST /usage-collector/v1/records
 
-- [ ] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-api-post-records`
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-api-post-records`
 
 The system **MUST** expose `POST /usage-collector/v1/records` as the sole REST write entry point per `usage-collector-v1.yaml`, with the REST handler receiving `Extension<SecurityContext>` populated by ToolKit gateway middleware (`OperationBuilder::authenticated()`) and delegating to `UsageCollectorClientV1::create_usage_record` / `create_usage_records` (`ctx: &SecurityContext` as first parameter per `sdk-trait.md` Methods 1 and 2), accepting an `CreateUsageRecordsRequest` with `records` `minItems: 1` / `maxItems: 100`, returning the `CreateUsageRecordsResponse` with per-record outcomes in input order under HTTP `200` (all accepted) or HTTP `207 Multi-Status` (mixed or all-rejected — i.e., whenever ≥1 record is rejected, single-record conflict included), and surfacing deterministic `Problem` envelopes only for whole-request failures (missing `SecurityContext` surfaced as canonical `Unauthenticated`; structural request-body validation) per the yaml's `default` response — per-record errors (PDP `deny`, unknown UsageType, semantics violation, metadata size, plugin SPI error) MUST surface as the per-record `outcome="rejected"` with a per-record `error: Problem` carrying the `context.reason` drawn from the cause-category taxonomy declared in the yaml, never widening the contract beyond what is declared in the yaml.
 
@@ -1062,6 +1119,23 @@ The system **MUST** expose `POST /usage-collector/v1/records` as the sole REST w
 **Touches**:
 
 - API: `POST /usage-collector/v1/records`
+- Entities: `UsageRecord`
+
+### API: GET /usage-collector/v1/records/{id}
+
+- [x] `p1` - **ID**: `cpt-cf-usage-collector-dod-usage-emission-api-get-records-id`
+
+The system **MUST** expose `GET /usage-collector/v1/records/{id}` as the read-by-id surface of the usage-emission feature per `usage-collector-v1.yaml`, with the REST handler receiving `Extension<SecurityContext>` populated by ToolKit gateway middleware (`OperationBuilder::authenticated()`) and delegating to `UsageCollectorClientV1::get_usage_record(ctx, uuid)` (`ctx: &SecurityContext` as first parameter per `sdk-trait.md` Method 3). The handler MUST pre-fetch the target row via Plugin SPI Method 10 `get_usage_record(id)` so the PDP authorization decision composes the row's full attribution tuple (`tenant_id`, `resource_ref`, optional `subject_ref`) under the `usage_record::actions::GET` verb against `cpt-cf-usage-collector-contract-authz-resolver`, mirroring the pre-PDP fetch posture of `cpt-cf-usage-collector-flow-event-deactivation-deactivate-record`. On success the handler returns HTTP `200` with the wire-projected `UsageRecordDto` body; per-record failure modes lift to the canonical `Problem` envelope per the yaml: a non-UUID path segment surfaces as `InvalidArgument` (HTTP `400`, `field_violations[0].field="id"`, `reason="VALIDATION"`), a missing target as `NotFound` (HTTP `404`), a PDP `deny` collapsed into that same `NotFound` (indistinguishable from a missing row so the by-id surface is not an existence oracle), and a Plugin SPI transport / readiness fault as `ServiceUnavailable` (HTTP `503`). The handler MUST NOT widen the contract beyond what is declared in the yaml, MUST NOT synthesize identity, and MUST NOT field-edit the persisted row.
+
+**Implements**:
+
+- `cpt-cf-usage-collector-flow-usage-emission-get-record`
+
+**Constraints**: `cpt-cf-usage-collector-fr-ingestion`
+
+**Touches**:
+
+- API: `GET /usage-collector/v1/records/{id}`
 - Entities: `UsageRecord`
 
 ### §2.3-item → DoD-ID Coverage Matrix
@@ -1104,6 +1178,7 @@ Coverage of every DECOMPOSITION §2.3 catalog item:
 | `UsageType`                                                                 | Entity            | `cpt-cf-usage-collector-dod-usage-emission-entity-usage-type`                                                                           |
 | `SecurityContext`                                                           | Entity            | `cpt-cf-usage-collector-dod-usage-emission-entity-security-context`                                                                     |
 | `POST /usage-collector/v1/records`                                                                         | API               | `cpt-cf-usage-collector-dod-usage-emission-api-post-records`                                                                            |
+| `GET /usage-collector/v1/records/{id}`                                                                     | API               | `cpt-cf-usage-collector-dod-usage-emission-api-get-records-id`                                                                          |
 
 ## 6. Acceptance Criteria
 

@@ -7,16 +7,10 @@ use uuid::Uuid;
 
 use crate::error::UsageCollectorError;
 use crate::models::{
-    AggregationResult, AggregationSpec, MetadataFilter, TimeWindow, UsageRecord, UsageType,
-    UsageTypeGtsId,
+    AggregationResult, AggregationSpec, MetadataFilter, UsageRecord, UsageType, UsageTypeGtsId,
 };
 
 /// Consumer-facing API for Usage Collector operations.
-///
-/// Obtained from `ClientHub` as `Arc<dyn UsageCollectorClientV1>`. The
-/// canonical implementation performs PDP enforcement, usage-type validation,
-/// and Plugin SPI dispatch — REST handlers are thin pass-throughs so
-/// in-process and out-of-process callers share one authorization path.
 // @cpt-dod:cpt-cf-usage-collector-dod-foundation-entity-security-context:p1
 #[async_trait]
 pub trait UsageCollectorClientV1: Send + Sync + 'static {
@@ -24,7 +18,7 @@ pub trait UsageCollectorClientV1: Send + Sync + 'static {
     ///
     /// An exact-equality retry under the same idempotency key returns the
     /// previously persisted record; a canonical-field mismatch surfaces as
-    /// [`UsageCollectorError::IdempotencyConflict`].
+    /// [`UsageCollectorError::Conflict`].
     async fn create_usage_record(
         &self,
         ctx: &SecurityContext,
@@ -43,7 +37,7 @@ pub trait UsageCollectorClientV1: Send + Sync + 'static {
     /// Get a single usage record by its `uuid`.
     ///
     /// Returns the persisted record on `Ok`; an unknown `uuid` surfaces
-    /// as [`UsageCollectorError::UsageRecordNotFound`].
+    /// as [`UsageCollectorError::NotFound`].
     async fn get_usage_record(
         &self,
         ctx: &SecurityContext,
@@ -55,7 +49,6 @@ pub trait UsageCollectorClientV1: Send + Sync + 'static {
         &self,
         ctx: &SecurityContext,
         gts_id: UsageTypeGtsId,
-        window: TimeWindow,
         query: &ODataQuery,
         metadata_filter: &[MetadataFilter],
         aggregation: AggregationSpec,
@@ -66,7 +59,6 @@ pub trait UsageCollectorClientV1: Send + Sync + 'static {
         &self,
         ctx: &SecurityContext,
         gts_id: UsageTypeGtsId,
-        window: TimeWindow,
         query: &ODataQuery,
         metadata_filter: &[MetadataFilter],
     ) -> Result<ODataPage<UsageRecord>, UsageCollectorError>;

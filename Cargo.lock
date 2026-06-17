@@ -1746,6 +1746,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-gears-noop-usage-collector-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-odata",
+ "cf-gears-types-registry-sdk",
+ "cf-gears-usage-collector-sdk",
+ "inventory",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cf-gears-oagw"
 version = "0.2.26"
 dependencies = [
@@ -2603,6 +2624,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-gears-usage-collector"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "cf-gears-authz-resolver-sdk",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-canonical-errors",
+ "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-odata",
+ "cf-gears-toolkit-security",
+ "cf-gears-types-registry-sdk",
+ "cf-gears-usage-collector-sdk",
+ "futures",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
 name = "cf-gears-usage-collector-sdk"
 version = "0.1.0"
 dependencies = [
@@ -2613,7 +2662,6 @@ dependencies = [
  "cf-gears-toolkit-odata-macros",
  "cf-gears-toolkit-security",
  "gts",
- "gts-macros",
  "rust_decimal",
  "schemars 1.2.1",
  "serde",

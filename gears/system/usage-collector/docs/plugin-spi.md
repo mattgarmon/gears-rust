@@ -304,7 +304,7 @@ use toolkit_gts::gts_type_schema;
 #[gts_type_schema(
     dir_path = "schemas",
     base = PluginV1,
-    schema_id = "gts.cf.toolkit.plugins.plugin.v1~cf.core.uc.plugin.v1~",
+    type_id = "gts.cf.toolkit.plugins.plugin.v1~cf.core.uc.plugin.v1~",
     description = "Usage Collector plugin specification",
     properties = "")]
 pub struct UsageCollectorPluginSpecV1;
@@ -313,7 +313,7 @@ pub struct UsageCollectorPluginSpecV1;
 The empty `properties = ""` is intentional — plugin instance metadata
 (`vendor`, `priority`) is carried by the `PluginV1<P>` base type and
 is not duplicated in usage-collector-specific spec data. The
-`schema_id` `gts.cf.toolkit.plugins.plugin.v1~cf.core.uc.plugin.v1~`
+`type_id` `gts.cf.toolkit.plugins.plugin.v1~cf.core.uc.plugin.v1~`
 is the type identifier under which every concrete plugin instance is
 registered with `types-registry`.
 
@@ -338,7 +338,7 @@ ctx.client_hub()
 ```
 
 The final `GtsInstanceId` is
-`UsageCollectorPluginSpecV1::SCHEMA_ID` concatenated with the supplied
+`UsageCollectorPluginSpecV1::TYPE_ID` concatenated with the supplied
 instance segment (for example
 `gts.cf.toolkit.plugins.plugin.v1~cf.core.uc.plugin.v1~<vendor>.<package>.usage_collector_plugin.v1`).
 The `RegisterResult::ensure_all_ok` gate enforces that the
@@ -372,8 +372,9 @@ round-trip happens only on the cold path (first call after bootstrap).
 When no matching instance is registered, the host returns the
 `plugin-unavailable` outcome documented in §"Error Taxonomy"; the
 same structural fact (selector cached AND `try_get_scoped is Some`)
-drives the `usage_collector.plugin.ready` gauge surfaced via OTLP
-per the foundation feature.
+governs whether dispatch proceeds. A `usage_collector.plugin.ready`
+gauge surfacing this fact via OTLP is specified by the foundation
+feature but is **not yet wired** in gear source.
 
 ### Compile-time linkage
 
@@ -430,8 +431,8 @@ upstream.
 
 SPI-specific aspects of the canonical types:
 
-- `UsageRecord.uuid` is **plugin-minted** on first acceptance and returned on
-  every subsequent read; the plugin is the authority for `id` allocation. The
+- `UsageRecord.uuid` is **caller-supplied**, persisted verbatim, and returned on
+  every subsequent read; the plugin MUST NOT mint or rewrite it. The
   accepted row is immutable except for the one-way `Active → Inactive` status
   transition issued through Method 5 (`deactivate_usage_record`).
 - Per `cpt-cf-usage-collector-adr-usage-compensation`, the SPI accepts both
@@ -503,7 +504,7 @@ dedicated outcome enums; failures use error variants instead.
   `created_at`, `resource_ref`, `subject_ref`,
   `corrects_id`, and `metadata` — against the stored record. The
   dedup-key tuple itself is excluded (it is the match key) and the
-  server-owned fields (`id`, `status`) are excluded. ALL compared
+  server-owned fields (`uuid`, `status`) are excluded. ALL compared
   fields equal → silent absorb (return the stored record on `Ok`);
   ANY compared field differs — including a metadata-only difference —
   → `IdempotencyConflict` error variant (the Plugin Host lifts this to
@@ -762,7 +763,7 @@ Taxonomy".
 - Identifier: `create_usage_record`.
 - Realizes: `cpt-cf-usage-collector-fr-pluggable-storage`, `cpt-cf-usage-collector-fr-ingestion`, `cpt-cf-usage-collector-fr-idempotency`, `cpt-cf-usage-collector-fr-usage-compensation`, `cpt-cf-usage-collector-seq-emit-usage`.
 - Full input/output/error contract: see [`sdk-trait.md` §"Method 1 — Create single usage record"](./sdk-trait.md#method-1--create-single-usage-record). This SPI method is the durable persistence target dispatched by `UsageCollectorClientV1::create_usage_record` after gateway PDP, attribution validation, UsageType-existence lookup, closed-shape metadata validation, and L1 `corrects_id` referential checks.
-- Structural inputs reaching the SPI: a `UsageRecord` value with all caller-supplied fields populated. `id` is plugin-minted.
+- Structural inputs reaching the SPI: a `UsageRecord` value with all caller-supplied fields populated, including the caller-supplied `uuid`, which the plugin persists verbatim.
 - **Caller/plugin validation split.** The gateway enforces PDP attribution, idempotency-key presence, UsageType existence and counter/gauge semantics (via per-record `get_usage_type` SPI dispatch and `gts_id`-prefix derivation), closed-shape metadata-key membership, and the four `corrects_id` preconditions (existence, not-a-compensation, same `(tenant_id, gts_id)`, active) BEFORE invoking this method. The plugin MUST NOT re-execute those checks; a malformed or unauthorized call reaching the SPI is a Plugin Host contract breach surfaced as `Internal(detail)` (non-retryable).
 - **Value-sign matrix (structural; enforced at the persistence boundary).**
 
@@ -775,7 +776,7 @@ Taxonomy".
 
   The plugin records the caller-supplied signed delta; it does NOT compute the delta.
 - Plugin invariants:
-  1. UNIQUE `(tenant_id, gts_id, idempotency_key)`. On collision, compare the incoming record's caller-supplied canonical fields (`value`, `created_at`, `resource_ref`, `subject_ref`, `metadata`, `corrects_id`) against the stored row (the dedup tuple itself and server-owned `id`/`status` are excluded). ALL-equal → silently absorb and return the stored row on `Ok`; ANY-differ — including metadata-only or divergent `corrects_id` — → `IdempotencyConflict`.
+  1. UNIQUE `(tenant_id, gts_id, idempotency_key)`. On collision, compare the incoming record's caller-supplied canonical fields (`value`, `created_at`, `resource_ref`, `subject_ref`, `metadata`, `corrects_id`) against the stored row (the dedup tuple itself and server-owned `uuid`/`status` are excluded). ALL-equal → silently absorb and return the stored row on `Ok`; ANY-differ — including metadata-only or divergent `corrects_id` — → `IdempotencyConflict`.
   2. Persist `metadata` byte-for-byte; the size cap is enforced upstream and the SPI MUST NOT silently truncate.
   3. Persist `status = Active` on first acceptance.
   4. Persist `corrects_id` exactly as supplied; the value-sign matrix above is a structural precondition (no row inserted on rejection).
@@ -859,7 +860,7 @@ Taxonomy".
 
   The plugin MUST treat every filter as authoritative and MUST NOT widen the result set.
 - **Keyset pagination obligation.** Plugins MUST implement keyset pagination over `(created_at, uuid)` so the combined order is total and stable across plugins. Offset/limit scans are forbidden. Plugins resume strictly after the cursor's `(created_at, uuid)` tuple and emit the next-row keyset as `Page::page_info::next_cursor` via `CursorV1::encode`.
-- Cursor lifecycle: decode, structural validation, and order/filter-binding checks are gateway-owned. No plugin-error category exists for cursor validity (`cursor_decode`, `order_mismatch`, `filter_mismatch` are gateway-surfaced canonical Problems).
+- Cursor lifecycle: decode, structural validation, and order/filter-binding checks are gateway-owned. No plugin-error category exists for cursor validity (`INVALID_CURSOR`, `ORDER_MISMATCH`, `FILTER_MISMATCH` are gateway-surfaced canonical `InvalidArgument` `Problem`s with a `field_violations[0]` on `cursor`, via `toolkit-odata`).
 - Success output: `toolkit_odata::Page<UsageRecord>` (`items` plus `page_info { next_cursor, prev_cursor, limit }`; `next_cursor: None` on the last page). An empty match inside the authorized scope returns an empty page, not an error.
 - Error variants: `Transient`, `Internal` (host-contract breaches lift through `Internal(detail)`).
 - Latency budget: total end-to-end p95 envelope of 1 s for a 1,000-record raw page. DESIGN §3.11.2 does not carve a Plugin-SPI sub-allocation; plugins SHOULD reserve ≥ 25 ms for upstream gateway + PDP + core overhead. See OQ-7.
@@ -1238,13 +1239,12 @@ deadline path, since the SPI does not carve a separate `Timeout`
 variant); `Internal` projects onto `backend_error` like every other
 backend-classified failure; and structural unavailability —
 `ClientHub::try_get_scoped` returns `None` and the host lifts that to
-`PluginUnavailable` — projects onto `unready` (the SPI itself exposes
-no `Unready` error variant and no `ready()` probe). Cursor validity
-is NOT a plugin-error category — cursor decode failure, order
-mismatch, and filter mismatch are caught by the gateway before plugin
-dispatch and surfaced as `UsageCollectorError::Validation` variants
-whose host lift produces canonical `Problem` responses
-(`cursor_decode`, `order_mismatch`, `filter_mismatch`), anchored by
+`UsageCollectorError::ServiceUnavailable` — projects onto `unready`
+(the SPI itself exposes no `Unready` error variant and no `ready()`
+probe). Cursor validity is NOT a plugin-error category — cursor decode
+failure, order mismatch, and filter mismatch are caught by the gateway
+before plugin dispatch and surfaced as `UsageCollectorError::InvalidArgument`
+(`ValidationReason::Validation`), anchored by
 `cpt-cf-usage-collector-principle-cursor-gateway-ownership`.
 
 Variant catalog:
@@ -1254,8 +1254,8 @@ Variant catalog:
   considers safe to retry. `detail` is operator-facing. Lifts to
   `UsageCollectorError::ServiceUnavailable` and is observed as
   retryable by `UsageCollectorError::is_retryable`. Structural
-  unavailability is host-side and surfaces as `PluginUnavailable`, not
-  as `Transient`.
+  unavailability is host-side and also surfaces as
+  `UsageCollectorError::ServiceUnavailable`, not as `Transient`.
 - `Internal(detail)` — non-retryable failure: an uncategorized backend
   error, a broken plugin invariant, or a host-contract breach the
   plugin happens to detect (for example an empty batch, an
@@ -1270,27 +1270,28 @@ Variant catalog:
   DSN-free / pre-redacted at the construction site. Cursor decode
   failure, order mismatch, and filter mismatch on raw queries are NOT
   reported through this channel — they are gateway-only failures
-  surfaced as canonical Problem responses (`cursor_decode`,
-  `order_mismatch`, `filter_mismatch`) before any plugin dispatch.
+  surfaced as `UsageCollectorError::InvalidArgument`
+  (`ValidationReason::Validation`) before any plugin dispatch.
 - `IdempotencyConflict { idempotency_key, existing_uuid }` — Methods
   1 / 2 (`create_usage_record` / `create_usage_records`) found the
   caller-supplied `idempotency_key` already bound to a different
   stored record. Carries the UUID of the previously persisted row so
-  the gateway / caller can `get_usage_record` and reconcile. Lifts
-  verbatim to `UsageCollectorError::IdempotencyConflict`. Exact-equality
-  retries are silently absorbed on the `Ok` arm and MUST NOT raise
-  this variant.
+  the gateway / caller can `get_usage_record` and reconcile. Lifts to
+  `UsageCollectorError::Conflict` (`ConflictReason::IdempotencyConflict`).
+  Exact-equality retries are silently absorbed on the `Ok` arm and MUST
+  NOT raise this variant.
 - `UsageRecordNotFound { id }` — Methods (`get_usage_record` /
   `deactivate_usage_record`) referenced an `id` that does not exist.
-  Lifts verbatim to `UsageCollectorError::UsageRecordNotFound`.
+  Lifts to `UsageCollectorError::NotFound`.
 - `UsageRecordAlreadyInactive { id }` — Method 5
   (`deactivate_usage_record`) targeted a row whose `status` was
-  already `Inactive`. Lifts to `UsageCollectorError::AlreadyInactive`.
+  already `Inactive`. Lifts to `UsageCollectorError::Conflict`
+  (`ConflictReason::AlreadyInactive`).
 - `UsageTypeAlreadyExists { gts_id }` — Method 6
   (`create_usage_type`) saw a row with the same `gts_id` already
   present, and the request payload differs from the stored row.
   Surfaced by the dispatch boundary as
-  `UsageCollectorError::UsageTypeAlreadyExists` and mapped to HTTP 409
+  `UsageCollectorError::AlreadyExists` and mapped to HTTP 409
   on the REST surface. An identical-payload resubmission MUST NOT
   raise this variant (Method 6 is idempotent on `gts_id` for
   byte-equal payloads).
@@ -1298,8 +1299,8 @@ Variant catalog:
   (`get_usage_type`) and Method 9 (`delete_usage_type`) when no
   `usage_type_catalog` row has the supplied `gts_id`. The SDK
   collapses ingestion-path and admin-path catalog misses into the
-  single `UsageCollectorError::UsageTypeNotFound` variant per
-  `error.rs`; the wire shape is identical.
+  single `UsageCollectorError::NotFound` category per `error.rs`; the
+  wire shape is identical.
 - `UsageTypeReferenced { gts_id, sample_ref_count }` — Method 9
   (`delete_usage_type`) was rejected by the `usage_records.gts_id`
   `ON DELETE RESTRICT` FK. `sample_ref_count` carries a bounded
@@ -1307,21 +1308,23 @@ Variant catalog:
   plugin MUST NOT scan the entire table to compute an exact count —
   a small sample sufficient to confirm "still referenced" is
   enough). Surfaced by the dispatch boundary as
-  `UsageCollectorError::UsageTypeReferenced` and mapped to HTTP 409 on
-  the REST surface.
+  `UsageCollectorError::Conflict` (`ConflictReason::UsageTypeReferenced`)
+  and mapped to HTTP 409 on the REST surface.
 - Bad `gts_id` base-derivation rejection — Method 6
   (`create_usage_type`) cannot receive a `gts_id` that does not
   derive from the reserved abstract base
   `gts.cf.core.uc.usage_record.v1~` (with at least one further
   `~`-separated segment) per ADR 0012: the
   `UsageTypeGtsId::new` boundary upstream of the gateway rejects
-  such payloads (REST: handler synthesises the canonical
-  `invalid_base_gts_id` `Problem` envelope at HTTP `400` from the
-  failed conversion on `CreateUsageTypeRequest::gts_id`; SDK:
-  `UsageCollectorError::Validation` from `UsageTypeGtsId::new`).
-  Unknown `kind` values are rejected by closed-enum serde rejection at
-  the deserialize boundary; the SPI's `UsageCollectorPluginError`
-  taxonomy therefore exposes no dedicated invalid-kind variant.
+  such payloads as `UsageCollectorError::InvalidArgument`
+  (`ValidationReason::InvalidBaseGtsId`; REST lifts to a `400` `Problem`
+  with `field_violations[0].reason="INVALID_BASE_GTS_ID"`).
+  Unknown `kind` values are rejected at the `UsageKind::from_str`
+  handler-boundary parse on the permissive `CreateUsageTypeRequest::kind`
+  DTO field (or by the typed `UsageKind` argument on the SDK trait) as
+  `InvalidArgument` (`ValidationReason::Validation`); the
+  SPI's `UsageCollectorPluginError` taxonomy therefore exposes no
+  dedicated invalid-kind variant.
   Plugins MUST NOT parse `gts_id` to re-check the base derivation
   and MUST NOT synthesize a kind / base rejection.
 
@@ -1329,8 +1332,8 @@ Variant catalog:
 Closed-shape metadata-key membership runs at the gateway against the
 `metadata_fields` resolved via a `get_usage_type` SPI dispatch before
 the Method 1 / Method 2 write call; an undeclared key is rejected as
-`UsageCollectorError::UnknownMetadataKey` on the SDK / REST surface
-without ever reaching the plugin. Plugins MUST NOT re-check
+`UsageCollectorError::InvalidArgument` (`ValidationReason::UnknownMetadataKey`)
+on the SDK / REST surface without ever reaching the plugin. Plugins MUST NOT re-check
 closed-shape membership and MUST NOT raise a closed-shape error of
 any kind — they store `metadata` byte-for-byte (Method 1 invariant
 2). See §"Catalog and validation surface" for the gateway-side
@@ -1914,12 +1917,9 @@ the conservative default this reference adopts.
   gauge discriminator is derived from the `gts_id` prefix matching
   one of a pair of reserved base type prefixes (one each for counter
   and gauge); identifiers that do not begin with one of those prefixes
-  are rejected at the `UsageTypeGtsId::new` boundary (REST: handler
-  synthesises the canonical `invalid_base_gts_id` `Problem` envelope
-  at HTTP `400` from the failed conversion on
-  `CreateUsageTypeRequest::gts_id`; SDK:
-  `UsageCollectorError::Validation` from `UsageTypeGtsId::new`) and
-  never reach `create_usage_type`. (Superseded by the 2026-06-08
+  are rejected at the `UsageTypeGtsId::new` boundary as
+  `UsageCollectorError::InvalidArgument` (`ValidationReason::InvalidBaseGtsId`)
+  and never reach `create_usage_type`. (Superseded by the 2026-06-08
   amendment — kind moves to a closed `UsageKind` enum on the catalog
   row, and every `gts_id` derives from
   `gts.cf.core.uc.usage_record.v1~`.)
