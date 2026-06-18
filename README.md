@@ -310,6 +310,7 @@ Other tests:
 make test            # unit tests (workspace)
 make test-sqlite     # integration tests (SQLite, no external DB required)
 make e2e-local       # end-to-end tests (builds + starts server automatically)
+make e2e-local E2E_TARGET=testing/e2e/gears/file_parser/  # targeted end-to-end scope
 make e2e-docker      # end-to-end tests (builds + starts server in Docker)
 make coverage-unit   # unit test code coverage
 make fuzz            # fuzz smoke tests (30 s per target)
@@ -320,6 +321,7 @@ On **Windows** (no `make`), use the cross-platform CI script directly:
 ```bash
 python tools/scripts/ci.py check          # full CI suite
 python tools/scripts/ci.py e2e-local      # end-to-end tests
+python tools/scripts/ci.py e2e-local -- testing/e2e/gears/file_parser/  # targeted end-to-end scope
 python tools/scripts/ci.py fuzz --seconds 60  # fuzz smoke run
 ```
 
