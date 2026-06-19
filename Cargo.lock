@@ -4190,9 +4190,9 @@ dependencies = [
 
 [[package]]
 name = "gts-id"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a85a48bfcfaa558f7eaee74e9a7d153d0924eac2d4d287f93323b756fe2700fe"
+checksum = "7375046849cd80b1db1ed549272eb2fab826b13b13e9efb4333a6ec606070c8c"
 dependencies = [
  "thiserror 2.0.18",
 ]
