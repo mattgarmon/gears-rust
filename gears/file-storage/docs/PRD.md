@@ -115,7 +115,7 @@ Gears security and governance model.
 | File                | Binary content stored in FileStorage with associated metadata                                                                                                                                                                                                                           |
 | Control Plane       | The FileStorage API/SDK. Owns metadata, authorization, versioning, and conditional-request semantics; issues signed URLs. Its REST surface never carries file content                                                                                                                    |
 | Sidecar (Data Plane)| The only component that moves user bytes. Has its own domain/URL, is connected to the storage backends, validates platform auth tokens and signed-URL signatures, and reaches the control plane via the FS SDK. Serves content only through signed URLs                                  |
-| Signed URL          | A short-lived, control-plane-signed URL pointing at the sidecar that authorizes one content operation (`GET`/`PUT`/part) on a specific object, subject to AND-combined constraints (`exp`, optional `ip`, optional token-claim predicates). Stateless and Ed25519-signed (`cpt-cf-file-storage-fr-signed-urls`) |
+| Signed URL          | A short-lived, control-minted **PASETO `v4.public`** token (Ed25519) pointing at the sidecar that authorizes one content operation (`GET`/`PUT`/part) on a specific object, subject to AND-combined claims (`exp`, optional `ip`, optional token-claim predicates, upload size/hash). Carried in the query (`?fs-token=`) or a header; **opaque** to all but control+sidecar (`cpt-cf-file-storage-fr-signed-urls`) |
 | File ID             | The immutable uuid identity of a logical file. The current content is reached by resolving the file's content pointer (`content_id`)                                                                                                                                                     |
 | Version ID          | A uuid assigned by FileStorage (control plane) identifying one immutable content blob; the backend object lives at `/{file_id}/{version_id}` and is never mutated in place                                                                                                                |
 | Content Pointer (`content_id`) | The `version_id` currently bound as a file's live content; changing content is a pointer swap, not an in-place mutation. The content-only ETag derives from `(file_id, content_id)`                                                                                            |
@@ -877,12 +877,17 @@ what allows the data plane (sidecar) to scale independently (ADR-0003).
 The control plane **MUST** issue short-lived **signed URLs** that authorize a single content operation
 (`GET`/`PUT`/part) against the **sidecar** for a specific object. Signed URLs **MUST**:
 
-- be **stateless** and verifiable by the sidecar without a database lookup, using an asymmetric signature (Ed25519)
-  for which the control plane holds the private key (sole issuer) and the sidecar holds only the public key;
+- be a **stateless, opaque PASETO `v4.public` token** (Ed25519), verifiable by the sidecar without a database lookup,
+  for which the control plane holds the private key (**sole minter**) and the sidecar holds only the public key;
+- be carried either in the `fs-token` URL query parameter (`?fs-token=<token>`, for bare embeddable URLs) or in the
+  `X-FS-Token` request header (for programmatic/batch) — the **same token**, chosen by access intent; it is **never**
+  carried in `Authorization`, which always carries the standard platform JWT;
+- have a format known **only** to the control plane and the sidecar; every other participant (browser, CDN, proxy,
+  app, logs) **MUST** treat the token as opaque bytes and **MUST NOT** parse it — the claim-set and crypto may change;
 - always point at the sidecar, **never** at a backend-addressable URL (`cpt-cf-file-storage-principle-backend-opacity`);
-- bind the **operation** `op` ∈ {GET, PUT, part} into the signature (also checked against the HTTP method), so a URL
-  cannot be reused for a different operation;
-- carry **AND-combined constraints**, of which only the expiry is mandatory:
+- bind the **operation** `op` ∈ {GET, PUT, part} into the token (also checked against the HTTP method), so it cannot be
+  reused for a different operation;
+- carry **AND-combined claims**, of which only the expiry is mandatory:
   - **expiry** (`exp`, required) — and it **MUST NOT** exceed a configured maximum lifetime `max_url_ttl` (recommended
     7 days), enforced by the control plane at signing; the sidecar rejects once `now > exp`;
   - optional client `ip`/CIDR;
@@ -897,8 +902,9 @@ The control plane **MUST** issue short-lived **signed URLs** that authorize a si
 - optionally carry a set of response headers the sidecar **MUST** echo verbatim on the served response (e.g.
   `Content-Disposition`, `Content-Type` override, `Cache-Control`), so the sidecar needs no control-plane round-trip.
 
-In P1 a single static signing keypair is used (no per-URL revocation and no key rotation; emergency access revocation
-is the platform auth module's token revocation). Key rotation and a multi-key set are deferred to P2, as is enforcement
+In P1 a single static signing keypair is used (a `kid` in the PASETO footer is reserved for P2 rotation; no per-token
+revocation and no key rotation in P1; emergency access revocation is the platform auth module's token revocation). Key
+rotation and a multi-key set are deferred to P2, as is enforcement
 of the `max_rate` / `max_conns` constraints (which additionally require coordinating the multi-instance sidecar fleet
 on a shared backend).
 
@@ -1129,7 +1135,7 @@ signed-URL issuance. It does **not** carry file content — content moves over s
 **Type**: HTTP (signed-URL authorized)
 **Stability**: unstable
 **Description**: The sidecar's content surface (`GET`/`PUT`/part), addressed only via control-plane-issued signed
-URLs and served from its own domain. Verifies the Ed25519 signature and constraints, validates the platform token
+URLs and served from its own domain. Verifies the PASETO `v4.public` token and its claims, validates the platform token
 when a token-claim predicate is present, serves `Range` and conditional requests, and echoes the response headers
 baked into the URL. It holds **no** backend/tenant/user policy or quota state — all such limits (storage quota,
 allowed types, size policy, retention) live in the control plane and are applied at presign; the sidecar enforces only
@@ -1395,7 +1401,7 @@ debits/credits per `cpt-cf-file-storage-fr-usage-reporting`)
 - [ ] Policies enforce file type and size restrictions on upload (most restrictive wins across tenant and user levels)
 - [ ] All content traffic flows through the **sidecar** via signed URLs; no backend-addressable URL is returned to any client
 - [ ] Content upload and download are each a two-step exchange (control request → signed URL → byte transfer to/from the sidecar); the control REST surface never carries content
-- [ ] Signed URLs are Ed25519, stateless, and enforce AND-combined constraints (expiry, optional ip, optional token-claim predicates); altering any constraint invalidates the signature
+- [ ] The credential is an opaque PASETO `v4.public` token (Ed25519), carried in the query (`?fs-token=`) or a header, stateless, enforcing AND-combined claims (expiry, optional ip, optional token-claim predicates, upload size/hash); altering any claim invalidates the signature; only control+sidecar parse it
 - [ ] file_not_found error returned for non-existent files
 - [ ] access_denied error returned for unauthorized operations
 - [ ] Metadata-only queries complete without transferring file content

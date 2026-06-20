@@ -63,7 +63,7 @@ The P1 architecture is deliberately narrow:
 - Static TOML backend configuration; runtime/DB configuration is P3
 - Content is an **immutable blob per version** at `/{file_id}/{version_id}`; a file's live content is the `content_id`
   pointer, swapped under optimistic CAS. Backend objects are **never mutated in place**
-- Signed URLs are Ed25519, stateless, and point only at the sidecar. FileStorage issues no anonymous, per-recipient,
+- Signed URLs carry an opaque **PASETO `v4.public`** token (Ed25519), stateless, pointing only at the sidecar. FileStorage issues no anonymous, per-recipient,
   or sharing links in P1 — that is the deferred sharing surface (see "Sharing boundary (P3)" below)
 
 **Sharing boundary (P3).** Anonymous/public access, time-bounded URLs, named recipients, group targeting, per-link
@@ -117,7 +117,7 @@ See [PRD.md](./PRD.md) §1 "Overview" and §1.3 "Goals":
 | `cpt-cf-file-storage-fr-rest-api`                      | Control-plane Axum router under `/api/file-storage/v1`: metadata, listing, version bind, and signed-URL issuance via OperationBuilder — **no content endpoints** (content lives on the sidecar)                                                   |
 | `cpt-cf-file-storage-fr-range-requests`                | See §4.1 Random Read Access for the full mechanics                                                                                                                       |
 | `cpt-cf-file-storage-fr-conditional-requests`          | Content-only `ETag` derived from `(file_id, content_id)`; `If-None-Match`/`If-Match` enforced on the sidecar for reads, on the control plane for bind/delete |
-| `cpt-cf-file-storage-fr-signed-urls`                   | Control plane signs Ed25519 (sole issuer); the sidecar verifies with the public key; AND-combined constraints (`exp`, `ip`, token-claim predicates); response headers baked in — see §4.5 |
+| `cpt-cf-file-storage-fr-signed-urls`                   | Control plane mints a **PASETO `v4.public`** token (sole issuer, Ed25519); sidecar verifies with the public key; AND-combined claims (`op`, `exp`, `ip`, token-claim predicates, upload size/hash, baked response-headers) carried in the query (`?fs-token=`) or a header — see §4.5 |
 | `cpt-cf-file-storage-fr-file-versioning`               | `file_versions` table (P1); each version a distinct immutable object `/{file_id}/{version_id}`; current = `content_id` pointer; restore = re-bind a prior `version_id`; backend-agnostic |
 
 #### NFR Allocation
@@ -136,7 +136,7 @@ See [PRD.md](./PRD.md) §1 "Overview" and §1.3 "Goals":
 | ADR ID                                                | Decision Summary                                                                                                                                                                                       |
 |-------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `cpt-cf-file-storage-adr-sidecar-data-plane`          | Control/data-plane split: the control plane issues signed URLs; the **sidecar** moves all bytes; backends never addressed directly by clients. **Supersedes ADR-0001**                                  |
-| `cpt-cf-file-storage-adr-signed-url-transport`        | Signed-URL fields + signature are carried as discrete `X-FS-*` query parameters (S3 SigV4 query form) — not headers, not an opaque token                                                                |
+| `cpt-cf-file-storage-adr-signed-url-transport`        | The signed-URL credential is a single **opaque PASETO `v4.public` token**, carried in the query (`?fs-token=`) or a header; its format is private to control + sidecar (others treat it as opaque bytes)      |
 | `cpt-cf-file-storage-adr-proxy-content-traffic`       | (Superseded by ADR-0003) Originally: all content traffic transits a single FileStorage monolith                                                                                                        |
 | `cpt-cf-file-storage-adr-content-hash-selection`      | P1 ships the full hash-selection API with allow-list locked to `["SHA-256"]`; P2 expands the allow-list to BLAKE3 + XXH3 alongside multipart upload                                                    |
 
@@ -171,7 +171,7 @@ graph LR
     end
 
     SCGW -.->|SDK: pre-register / bind<br/>app-token + on-behalf-of| Meta
-    SUI -.->|Ed25519 sign| SCGW
+    SUI -.->|mint PASETO token| SCGW
     AZ -->|PolicyEnforcer| AuthZ[Authorization Service]
     SC --> DB
     S3D -.->|HTTPS| S3[(S3 / MinIO)]
@@ -184,7 +184,7 @@ graph LR
 | Data plane     | sidecar  | Signature + token verification, streaming upload/download, Range, hash + magic-bytes, response-header echo       | axum/hyper streaming, `aws-sdk-s3`, `tokio::fs`                                  |
 | Application    | both     | Orchestration: presign, bind/CAS, metadata CRUD, capability discovery (control); byte pipeline (sidecar)        | Rust async services (tokio)                                                      |
 | Domain         | control  | File identity, ownership, `content_id`/`meta_version`, ETag derivation, versions                                | Rust structs + SeaORM entities                                                   |
-| Infrastructure | both     | Postgres metadata (control + sidecar via SDK); backend drivers (sidecar); PolicyEnforcer; TOML config; Ed25519 keys | SeaORM + SecureORM + SecureConn; `aws-sdk-s3`; `tokio::fs`; `ed25519-dalek`      |
+| Infrastructure | both     | Postgres metadata (control + sidecar via SDK); backend drivers (sidecar); PolicyEnforcer; TOML config; PASETO/Ed25519 keys | SeaORM + SecureORM + SecureConn; `aws-sdk-s3`; `tokio::fs`; a PASETO v4 lib (`ed25519-dalek`)      |
 
 ## 2. Principles & Constraints
 
@@ -216,13 +216,15 @@ independently of the control plane.
 
 - [ ] `p1` - **ID**: `cpt-cf-file-storage-principle-signed-urls`
 
-Content access is authorized by short-lived, **Ed25519** signed URLs that the **control plane alone mints** (holds the
-private key); the **sidecar only verifies** (holds the public key) and can never forge one. Constraints are
-AND-combined into the signed payload (`exp`, optional `ip`, optional token-claim predicates) and are tamper-evident as
-a whole. Stateless: no DB lookup to verify, no per-URL revocation (revocation is the auth module's token revocation).
-See §4.5.
+Content access is authorized by a short-lived, opaque **PASETO `v4.public`** token (Ed25519) that the **control plane
+alone mints** (holds the private key); the **sidecar only verifies** (holds the public key) and can never forge one.
+The token carries AND-combined claims (`op`, `exp`, optional `ip`, optional token-claim predicates, upload size/hash,
+baked response headers) under one signature; it is carried in the URL query (`?fs-token=`) or a header. Its **format is
+private to control + sidecar** — everyone else treats it as opaque bytes and must not parse it (ADR-0004 "Token Opacity
+Contract"). Stateless: no DB lookup to verify, no per-token revocation (revocation is the auth module's token
+revocation). See §4.5.
 
-**ADRs**: `cpt-cf-file-storage-adr-sidecar-data-plane`
+**ADRs**: `cpt-cf-file-storage-adr-sidecar-data-plane`, `cpt-cf-file-storage-adr-signed-url-transport`
 
 #### Immutable blob + pointer
 
@@ -329,7 +331,7 @@ their credentials requires a restart. Runtime/DB-driven configuration with admin
 | `VersionState`        | Enum `{Pending, Available}`; a version is `Pending` from pre-register until bind, then `Available`                                          |
 | `ContentId`           | The `version_id` currently bound as the file's live content (`File.content_id`); changing it is a pointer swap                              |
 | `ETag`                | Opaque `String` (HTTP-quoted, base64url payload); derived from `(file_id, content_id)`; **MUST NOT** equal `hash_value`                     |
-| `SignedUrl`           | A control-minted Ed25519 token over `(method, host, path, op, content_id/version_id, constraints, response-headers, exp)` — `file_id` is in the path; backend/key-id not in the URL (§4.5) |
+| `SignedUrl`           | A control-minted **PASETO `v4.public`** token (Ed25519) carrying claims `(op, file_id, content_id/version_id, exp, constraints, response-headers; kid in footer)`; **opaque** to all but control+sidecar; carried as `?fs-token=` query or `X-FS-Token` header (§4.5) |
 | `ByteRange`           | Parsed `Range` request: `Inclusive(start, end)`, `OpenEnded(start)`, `Suffix(length)`                                                       |
 | `HashPolicy`          | Per-backend hash configuration: `default_algorithm`, `allowed_algorithms`, `selection_rules`. P1: locked to `["SHA-256"]`                   |
 | `BackendCapabilities` | Per-backend feature flags: `multipart_native`, `encryption_native`, `range_native`, `presigned_url_internal` (no `versioning_native` — versioning is FS-level) |
@@ -438,14 +440,15 @@ Does not perform authorization decisions itself — delegates to `authz-adapter`
 
 ##### Why this component exists
 
-Mints the Ed25519 signed URLs that authorize a content operation against the sidecar. The control plane is the **sole
+Mints the PASETO `v4.public` tokens that authorize a content operation against the sidecar. The control plane is the **sole
 minter** (holds the private key).
 
 ##### Responsibility scope
 
-- Build the signed payload `(method, host, path=/files/{file_id}, op, content_id/version_id, constraints,
-  response-headers, exp)` and sign it with the control-plane Ed25519 private key (§4.5). `file_id` rides in the path;
-  `backend_id` and key id are not in the URL (single key in P1; backend resolved from the version row)
+- Mint a **PASETO `v4.public`** token carrying the claims `(op, file_id, content_id/version_id, exp, constraints,
+  response-headers; kid in footer)`, signed with the control-plane Ed25519 private key (§4.5). It is returned as a
+  `?fs-token=<token>` URL or to be sent as an `X-FS-Token` header; `backend_id`/path are not in the token (resolved from the
+  version row)
 - Resolve the target: for download, the file's current `content_id` (or an explicit `version_id`); for upload, allocate
   nothing here (the version is pre-registered by the sidecar at transfer time — see `bind-service`)
 - Attach AND-combined constraints (`exp` required; optional `ip`/CIDR; optional token-claim predicates) and any
@@ -501,12 +504,12 @@ present) the platform token, then drives the byte path. The only component clien
 
 ##### Responsibility scope
 
-- Verify the Ed25519 signature with the control-distributed public key; check `exp`, `ip`, and token-claim predicates
+- Verify the **PASETO `v4.public`** token (Ed25519) with the control-distributed public key; check `exp`, `ip`, and token-claim predicates
   (validating a real platform JWT when a predicate references a claim); reject with `403` on any failure
 - Parse the `Range` header (to `ByteRange`) and conditional headers; serve `200`/`206`/`304`/`412`/`416` for downloads
 - On upload: call control `bind-service` **pre-register** (app-token + on-behalf-of) before writing, then stream the
   body through `stream-proxy` to the backend, then call **bind**; on a bind `412` return the `version_id` to the client
-- Echo verbatim the response headers baked into the signed URL; advertise `Accept-Ranges: bytes`
+- Echo verbatim the response headers baked into the token; advertise `Accept-Ranges: bytes`
 - Own the **best-effort cleanup**: on the `415` magic-bytes abort (or any error after `put()` started), delete the
   partially-written object; a hard crash leaves an orphan swept by the P2 cleanup engine
 
@@ -784,7 +787,7 @@ schema, status codes — is documented in **[api.md](./api.md)**. The summary:
   `meta_version` (mismatch → `412`); absent → last-write-wins (see `cpt-cf-file-storage-principle-content-only-etag`)
 - **Range** (sidecar): full `bytes=` syntax; `Accept-Ranges: bytes` on every download response; `HEAD` ignores `Range`.
   One signed URL serves many ranges (random access). See §4.1
-- **Signed URLs**: Ed25519, stateless, AND-combined constraints + baked response headers — see §4.5
+- **Signed URLs**: an opaque **PASETO `v4.public`** token (Ed25519) carrying AND-combined claims + baked response headers, in the query (`?fs-token=`) or a header — see §4.5
 - **Custom metadata in headers**: one `X-FS-Meta-<key>` per pair; non-ASCII values use RFC 8187
   `*=UTF-8''<percent-encoded>` form
 
@@ -903,7 +906,7 @@ sequenceDiagram
     AZ-->>CTL: Allow
     CTL-->>C: 200 { signed GET url -> sidecar (pins content_id), metadata, ETag }
     C->>SC: GET signed url (optional Range / If-None-Match)
-    SC->>SC: verify Ed25519 signature + constraints (exp, ip, token claims)
+    SC->>SC: verify PASETO token + claims (exp, ip, token)
     alt If-None-Match matches ETag
         SC-->>C: 304 Not Modified (no body)
     else
@@ -1342,87 +1345,80 @@ Concurrency caps:
 - [ ] `p1` - **ID**: `cpt-cf-file-storage-design-signed-urls`
 
 The technical realization of PRD `cpt-cf-file-storage-fr-signed-urls` and principle
-`cpt-cf-file-storage-principle-signed-urls`. Stateless, à-la S3 presigned: everything is in the URL, verified by
-recomputation, no DB lookup. The fields and signature are carried as discrete `X-FS-*` **query parameters** (not
-headers, not an opaque token) — see [ADR-0004](./ADR/0004-cpt-cf-file-storage-adr-signed-url-transport.md) for why
-(bare, shareable URL; canonical S3 SigV4 query form).
+`cpt-cf-file-storage-principle-signed-urls`. The credential is a **single opaque token** — a **PASETO `v4.public`**
+token — minted by the control plane and verified by the sidecar. It is carried either in the URL query (`?fs-token=<token>`,
+for bare embeddable URLs) or in the `X-FS-Token` request header (for programmatic/batch; the token is **never** in
+`Authorization`, which always carries the platform JWT); **the token bytes are identical** in both. Per [ADR-0004](./ADR/0004-cpt-cf-file-storage-adr-signed-url-transport.md), the token's
+**format is private to the control plane and the sidecar** — every other participant treats it as opaque bytes and
+**MUST NOT** parse it (the claim-set and crypto can and will change). Verification is a pure, DB-free signature check;
+resolving the object to serve is a separate step.
 
-**Algorithm.** **Ed25519** (asymmetric). The control plane signs with the private key and is the **sole minter**; the
-sidecar verifies with the public key and can never forge a URL. P1 uses **one static keypair** (private in control
-config, public in sidecar config), so **no key id travels in the URL** — the sidecar uses its single key. A key id
-(`X-FS-KeyId`) returns in **P2** with the keyset/rotation (the sidecar picks by id when present, else falls back to the
-single key — backward-compatible). There is no per-URL revocation — emergency revocation is the platform auth module's
-token revocation, not the URL layer.
+**Token format.** **PASETO `v4.public`** — Ed25519, asymmetric, **not JWT** (no `alg` field → no algorithm-confusion).
+The control plane signs with the private key and is the **sole minter**; the sidecar verifies with the public key and
+can never forge a token. The whole claim-set is covered by **one signature**. The PASETO **footer** carries a key id
+(`kid`) for **P2** rotation (the sidecar selects the key by `kid` when present, else its single P1 key — backward
+compatible). P1 uses one static keypair (private in control config, public in sidecar config). There is no per-token
+revocation — emergency revocation is the platform auth module's token revocation, not this layer.
 
-**Parameters** (query, prefixed `X-FS-*`): `X-FS-Algorithm=Ed25519`, `X-FS-Expires=<unix>` (exp),
-`X-FS-Op=GET|PUT|part`, the version pin `X-FS-ContentId` (download; `X-FS-VersionId` for a version-specific URL),
-constraints (`X-FS-Ip`, `X-FS-Tok-<claim>`, and — upload only — `X-FS-MaxSize`/`X-FS-ExactSize`, `X-FS-ExpectedHash`;
-P2: `X-FS-MaxRate`, `X-FS-MaxConns`), baked response headers (`X-FS-Rh-<name>`), and finally `X-FS-Signature`.
+**Claims (inside the token).** `op` (`GET`/`PUT`/part), the resource (`file_id`, and the version pin
+`content_id`/`version_id` for download), `exp`, the constraints (below), and the **baked response-header set** the
+sidecar echoes. The `file_id` is **also** the URL path (`/files/{file_id}`); the sidecar resolves the **backend, object
+path, and size from the version row** (download: by `(file_id, content_id)`; upload: from control at pre-register) — these
+are never carried in the token, both to keep it small and to avoid pinning internal backend identifiers into the
+credential. (Object resolution is an indexed PK read, **not** a control-plane hop, separate from signature verification.)
 
-The `file_id` is the URL **path** (`/files/{file_id}`), already covered by the signature — it is **not** duplicated as
-a query param. The **backend, object path, and size are resolved by the sidecar from the version row** (download: by
-`(file_id, content_id)`; upload: returned by control at pre-register) — they are not carried in the URL, both to keep
-it lean and to avoid leaking internal backend identifiers. This is an indexed PK read, **not** a control-plane hop, and
-it is separate from signature verification (which stays a pure, DB-free recomputation).
+**Bound by the signature:** the whole claim-set (op, resource, `exp`, constraints, response headers) — one composite
+signature, so nothing can be added, removed, or weakened. The sidecar additionally checks the **HTTP method matches the
+`op` claim**, so a download token cannot drive an upload (or vice versa). **Not in the token:** the `Range` header
+(varies per request — free for random access), conditional headers, and the `PUT` body (byte integrity is verified by
+the size/hash claims during the stream and by the hash at bind). Consequence: a `PUT` token can be replayed with
+different bytes until `exp` → only an orphan version/blob (swept by the P2 cleanup engine); acceptable.
 
-**Canonical string to sign** = `method` + `host` + `path` + all `X-FS-*` params **except** `X-FS-Signature`, sorted by
-key and percent-encoded (RFC 3986), joined `k=v&…`. **`host` is signed** (prevents replaying a URL against a different
-sidecar). The **operation is signed two ways**: the HTTP `method` is in the canonical string and `X-FS-Op` is a signed
-param; the sidecar additionally checks the request method matches `X-FS-Op`, so a download URL cannot be used to upload
-(or vice versa). Signing *all* `X-FS-*` (minus the signature itself) means any added, removed, or altered parameter
-breaks verification — so no separate `SignedParams` list is needed, and a client cannot strip or weaken a constraint.
+**Constraints.** All are AND-combined inside the signed token (tamper-evident as a whole). Every token carries **`exp`**;
+everything else is optional.
 
-**Not signed:** the `Range` header (varies per request — kept free for random access), conditional headers, and the
-`PUT` body (byte integrity is verified by the hash/size constraints during the stream and by the hash at bind, not by
-signing the body). Consequence: a signed `PUT` URL can be replayed with different bytes until `exp` → that only
-creates an orphan version/blob (swept by the P2 cleanup engine); acceptable.
-
-**Constraints.** All are AND-combined and live inside the signed payload (tamper-evident as a whole). Every signed URL
-carries **`exp`**; everything else is optional.
-
-| Constraint | Param(s) | Required | Phase | Applies to | Violation |
+| Constraint | Claim | Required | Phase | Applies to | Violation |
 |---|---|---|---|---|---|
-| Expiry | `X-FS-Expires` | **yes** | P1 | all | `403` — past `exp` |
-| Client address | `X-FS-Ip` (addr/CIDR) | no | P1 | all | `403` |
-| Token-claim predicate | `X-FS-Tok-<claim>` | no | P1 | all (requires JWT) | `403` |
-| Operation | `X-FS-Op` (+ `method`) | **yes** | P1 | all | `403` |
-| Max size | `X-FS-MaxSize` | no | P1 | upload | `413` (mid-stream) |
-| Exact size | `X-FS-ExactSize` | no | P1 | upload | `413` over / `400` under |
-| Expected hash | `X-FS-ExpectedHash` (`<alg>:<hex>`) | no | P1 | upload | `422` |
-| Max rate | `X-FS-MaxRate` (bytes/s) | no | **P2** | up/down | throttled to ≤ rate |
-| Max connections | `X-FS-MaxConns` | no | **P2** | up/down | `429` |
+| Expiry | `exp` | **yes** | P1 | all | `403` — past `exp` |
+| Operation | `op` (+ method check) | **yes** | P1 | all | `403` |
+| Client address | `ip` (addr/CIDR) | no | P1 | all | `403` |
+| Token-claim predicate | `tok.<claim>` | no | P1 | all (requires JWT) | `403` |
+| Max size | `max_size` | no | P1 | upload | `413` (mid-stream) |
+| Exact size | `exact_size` | no | P1 | upload | `413` over / `400` under |
+| Expected hash | `expected_hash` (`<alg>:<hex>`) | no | P1 | upload | `422` |
+| Max rate | `max_rate` (bytes/s) | no | **P2** | up/down | throttled to ≤ rate |
+| Max connections | `max_conns` | no | **P2** | up/down | `429` |
 
 - **`exp` is mandatory and capped.** It MUST NOT be further out than the configured `max_url_ttl` (recommended **7
-  days**). The cap is enforced by the **control plane at signing** (it refuses to mint a longer URL) — there is no
-  `iat` in the URL, so the sidecar simply rejects when `now > exp`. "Available to everyone for 5 minutes" = only `exp`,
-  no token.
-- **`X-FS-MaxSize` and `X-FS-ExactSize` are mutually exclusive** — both present is a contradiction: the control plane
-  refuses to mint it (`400` at presign), and the sidecar rejects it as malformed (`403`).
-- **`X-FS-ExpectedHash`**: `<alg>` MUST be in the backend's allow-list (P1: `SHA-256`); the digest is lowercase hex.
-  The value is baked by the control plane (it may originate from a client-supplied value in the presign request).
-- **`X-FS-MaxRate` / `X-FS-MaxConns` are P2.** The param shape is declared from P1 (forward-compat) but enforcement is
-  P2. Both are scoped to **a single `(file_id, op)`**. Enforcing them across the multi-instance sidecar fleet (several
-  sidecars on one backend) needs cross-instance coordination (global counter/shaper, per-backend sharding, …); the
-  approach is an open P2 design point, deferred to the P2 FEATURE.
+  days**); the cap is enforced by the **control plane at signing** (it refuses to mint a longer token). The sidecar
+  rejects when `now > exp`. "Available to everyone for 5 minutes" = only `exp`, no token-claim predicate.
+- **`max_size` and `exact_size` are mutually exclusive** — both present is a contradiction the control plane refuses to
+  mint (`400` at presign) and the sidecar rejects (`403`).
+- **`expected_hash`**: `<alg>` MUST be in the backend's allow-list (P1: `SHA-256`), lowercase hex; baked by the control
+  plane (may carry a client-supplied value from the presign request).
+- **`max_rate` / `max_conns` are P2.** The claim shape exists from P1 (forward-compat) but enforcement is P2. Both are
+  scoped to **a single `(file_id, op)`**; cross-instance coordination across the sidecar fleet (global counter/shaper,
+  per-backend sharding, …) is an open P2 design point, deferred to the P2 FEATURE.
 
 **Verification (sidecar).** On each request the sidecar:
 
-1. recomputes the signature over the canonical string using its public key (P1: the single key; P2: the one named by
-   `X-FS-KeyId`); `403` on mismatch;
-2. checks the operation: HTTP method matches `X-FS-Op`; `403` otherwise;
+1. extracts the token from the `fs-token` query param **or** the `X-FS-Token` header (never `Authorization` — that is
+   the platform JWT), and **verifies the PASETO `v4.public` signature** with its public key (P2: selected by the footer
+   `kid`); `403` on failure;
+2. checks the operation: the HTTP method matches the `op` claim; `403` otherwise;
 3. checks expiry: `now ≤ exp`; `403` otherwise (the `max_url_ttl` cap was already enforced at signing);
-4. checks `X-FS-Ip`/CIDR if present; `403` on mismatch;
-5. **token validation** — *if and only if* the URL carries one or more `X-FS-Tok-<claim>` predicates, requires a valid
+4. checks the `ip`/CIDR claim if present; `403` on mismatch;
+5. **token-claim predicates** — *if and only if* the token carries one or more `tok.<claim>` predicates, requires a valid
    platform JWT, validates it the standard way, and matches each `claim == value` (all AND); `403` on any miss;
-6. **resolves the target object** from the version row — download: `(file_id from path, content_id)` → backend,
-   path, size; upload: the backend/path returned by control at pre-register (`404` if the version is gone);
-7. **on upload**, enforces the content constraints on the streaming path (the same pass that runs SHA-256 + magic-bytes):
-   `X-FS-MaxSize` → abort `413` the moment the cap is exceeded; `X-FS-ExactSize` → abort `413` if exceeded, or `400` if
-   the final length is short; `X-FS-ExpectedHash` → compare the computed digest at end-of-stream, `422` on mismatch.
-   Any upload-constraint failure aborts before bind and best-effort deletes the partial object.
+6. **resolves the target object** from the version row — download: `(file_id from path, content_id)` → backend, path,
+   size; upload: the backend/path returned by control at pre-register (`404` if the version is gone);
+7. **on upload**, enforces the content claims on the streaming pass (alongside SHA-256 + magic-bytes): `max_size` → abort
+   `413` the moment the cap is exceeded; `exact_size` → abort `413` if exceeded, or `400` if the final length is short;
+   `expected_hash` → compare the computed digest at end-of-stream, `422` on mismatch. Any failure aborts before bind and
+   best-effort deletes the partial object.
 
-Authorization decisions stay on the control plane (made at presign, encoded into the URL); the sidecar is a pure
-enforcer of what the signed URL and the token assert.
+Verifying the token is DB-free; only object resolution (step 6) touches the DB. Authorization decisions stay on the
+control plane (made at presign, baked into the token); the sidecar is a pure enforcer of what the token asserts.
 
 **No policy or quota in the data plane.** Every limit scoped to a **backend, tenant, or user** — storage quota,
 allowed-types / size policy, retention, per-owner caps — lives in the **control plane** (P2) and is evaluated **at
@@ -1433,12 +1429,18 @@ signature carries. The sole runtime limits it computes itself are the **per-URL 
 `MaxRate`, P2) scoped to a single `(file_id, op)`. This keeps the data plane stateless and policy-free, and concentrates
 all governance where the authoritative tenant/user/backend data already is.
 
-**Keys = the control↔sidecar sync.** Distributing the public key (and the backend registry/config) is the only state
-the control plane "synchronizes" to the sidecar; metadata is not replicated — the sidecar reads the shared DB via SDK.
+**Token opacity (recap).** Only the control plane (minter) and the sidecar (verifier) know the token's claim-set and
+crypto; everyone else forwards it as opaque bytes and never parses it, so the format may evolve without touching
+intermediaries (ADR-0004 "Token Opacity Contract"). Observability is sanitized server-side logging by control/sidecar,
+never by decoding the token at the edge.
 
-**Signing locality & cost.** Minting a signed URL requires the **private key**, which only the control plane holds.
-An Ed25519 signature is a CPU-only operation of tens of microseconds — there is no DB hit and no network in the
-signing step itself. Two cases:
+**Keys = the control↔sidecar sync.** Distributing the **PASETO verification public key** (and, in P2, the `kid` set)
+plus the backend registry/config is the only state the control plane "synchronizes" to the sidecar; metadata is not
+replicated — the sidecar reads the shared DB via SDK.
+
+**Signing locality & cost.** Minting a token requires the **private key**, which only the control plane holds. A PASETO
+`v4.public` sign (Ed25519) is a CPU-only operation of tens of microseconds — no DB hit, no network in the signing step.
+Two cases:
 
 - **SDK in-process (private key local to the caller's control instance):** signing is a direct local call, so a caller
   can mint **many URLs at once essentially for free** — e.g. 100 presigned URLs in single-digit milliseconds, no
@@ -1469,15 +1471,15 @@ while every control decision stays mediated by the LMS.
 
 1. The student picks `answer.png` in the LMS assessment UI. The LMS frontend asks the LMS backend (a gear) for an
    upload target, passing the file's `name`, `mime_type`, and `gts_file_type` (**required**) plus, **optionally**, the
-   `size` and content `hash` it already knows. The optional values let the control plane tighten the signed URL: a
-   declared `size` is baked as the `ExactSize` constraint (otherwise a policy-driven `MaxSize` applies), and a declared
-   `hash` is baked as `ExpectedHash` — so the sidecar verifies the upload against exactly what the client committed up
-   front. (`mime_type` is always required because the sidecar validates it against the content's magic bytes.)
+   `size` and content `hash` it already knows. The optional values let the control plane tighten the token: a declared
+   `size` is baked as the `exact_size` claim (otherwise a policy-driven `max_size` applies), and a declared `hash` is
+   baked as `expected_hash` — so the sidecar verifies the upload against exactly what the client committed up front.
+   (`mime_type` is always required because the sidecar validates it against the content's magic bytes.)
 2. The LMS backend runs its own business checks first (assessment open, attempt ownership, limits, allowed type/size
    for this question), then **proxies** to FSCP via the FileStorage **SDK** (on behalf of the student). The control
    plane runs its own authz (`write` on `gts.cf.fstorage.file.type.v1~x.lms.assessment.image.v1~`), creates the
-   `files` row (`content_id = NULL`), and mints a **signed PUT URL** to the sidecar with constraints baked in (15-min
-   `exp`, 10 MiB `MaxSize`, `ExpectedHash`, owner-token predicate):
+   `files` row (`content_id = NULL`), and mints a **signed PUT token** (PASETO `v4.public`) for the sidecar with claims
+   baked in (15-min `exp`, 10 MiB `max_size`, `expected_hash`, owner-token predicate), returned as an `?fs-token=<token>` URL:
 
    ```http
    POST https://api.example.com/api/file-storage/v1/files
@@ -1490,42 +1492,44 @@ while every control decision stays mediated by the LMS.
    ```json
    201 Created
    { "file_id": "3b1e8c4a",
-     "upload_url": "https://fs-data.example.com/files/3b1e8c4a?X-FS-Algorithm=Ed25519&X-FS-Expires=1750000900&X-FS-Op=PUT&X-FS-MaxSize=10485760&X-FS-ExpectedHash=SHA-256:b94d27...&X-FS-Tok-typ=user&X-FS-Tok-sub=stu_91a2&X-FS-Signature=Q2l0eV..." }
+     "upload_url": "https://fs-data.example.com/files/3b1e8c4a?fs-token=v4.public.eyJvcCI6IlBVVCIsImV4cCI6MTc1MDAwMDkwMCwibWF4X3NpemUiOjEwNDg1NzYwLCJleHBlY3RlZF9oYXNoIjoiU0hBLTI1NjpiOTRkMjcuLi4iLCJ0b2siOnsidHlwIjoidXNlciIsInN1YiI6InN0dV85MWEyIn19.Q2l0eV9zaWduYXR1cmU.eyJraWQiOiJmcy0yMDI2LTA2In0" }
    ```
 
-   `upload_url` query parameters (host `fs-data.example.com`, path `/files/3b1e8c4a` — `file_id` is the path, not a param):
+   On the wire it is **one opaque `fs=` token** (`file_id` is the path). The control plane and the sidecar — and **no
+   one else** — read the claims it carries (per the Token Opacity Contract); decoded, they are:
 
-   | Parameter | Value | Meaning |
+   | Claim | Value | Meaning |
    |---|---|---|
-   | `X-FS-Algorithm` | `Ed25519` | signature algorithm (P1: single key, no key id) |
-   | `X-FS-Expires` | `1750000900` | exp — +15 min (cap `max_url_ttl` enforced at signing) |
-   | `X-FS-Op` | `PUT` | bound operation (also checked against the HTTP method) |
-   | `X-FS-MaxSize` | `10485760` | upload constraint — ≤ 10 MiB (policy default; no client-declared size) |
-   | `X-FS-ExpectedHash` | `SHA-256:b94d27...` | upload constraint — content must hash to this (client-committed) |
-   | `X-FS-Tok-typ` | `user` | token-claim predicate — caller's `typ` must equal `user` |
-   | `X-FS-Tok-sub` | `stu_91a2` | token-claim predicate — caller's `sub` must equal the student |
-   | `X-FS-Signature` | `Q2l0eV...` | Ed25519 signature over `method + host + path + all other X-FS-*` |
+   | `op` | `PUT` | bound operation (also checked against the HTTP method) |
+   | `exp` | `1750000900` | +15 min (the `max_url_ttl` cap is enforced at signing) |
+   | `max_size` | `10485760` | upload constraint — ≤ 10 MiB (policy default; no client-declared size) |
+   | `expected_hash` | `SHA-256:b94d27...` | upload constraint — content must hash to this (client-committed) |
+   | `tok.typ` | `user` | token-claim predicate — caller's `typ` must equal `user` |
+   | `tok.sub` | `stu_91a2` | token-claim predicate — caller's `sub` must equal the student |
+   | *(footer)* `kid` | `fs-2026-06` | key id (P2 rotation; single key in P1) |
 
-   (No `backend_id` in the URL — control picks the backend and returns it to the sidecar at pre-register.)
+   No `backend_id` in the token — control picks the backend and returns it to the sidecar at pre-register. A
+   programmatic caller could instead receive the token to send as an `X-FS-Token` header (same bytes).
 
 3. The LMS hands `upload_url` to the browser, which uploads the bytes straight to the **sidecar** (no extra headers
    needed beyond the platform JWT the predicate requires):
 
    ```http
-   PUT https://fs-data.example.com/files/3b1e8c4a?X-FS-Algorithm=Ed25519&...&X-FS-Signature=Q2l0eV... HTTP/1.1
+   PUT https://fs-data.example.com/files/3b1e8c4a?fs-token=v4.public.eyJvcCI6IlBVVC...fX0.Q2l0eV... HTTP/1.1
    Authorization: Bearer <student JWT>
    Content-Type: image/png
    <binary image bytes>
    ```
-4. The sidecar verifies the Ed25519 signature + constraints: `exp` not passed, method matches `X-FS-Op=PUT`, the JWT
-   is valid and `typ=user`, `sub=stu_91a2`. (It applies no tenant/user/backend quota or policy — those were already
-   checked by the LMS and the control plane at presign; see §4.5 "No policy or quota in the data plane".)
+4. The sidecar **verifies the PASETO token** with its public key, then checks the claims: `exp` not passed, the `op`
+   claim matches the HTTP method (`PUT`), the JWT is valid and `tok.typ=user`, `tok.sub=stu_91a2`. (It applies no
+   tenant/user/backend quota or policy — those were already checked by the LMS and the control plane at presign; see
+   §4.5 "No policy or quota in the data plane".)
 5. Before writing bytes, the sidecar **pre-registers** the version via the SDK (on-behalf-of `stu_91a2`); the control
    plane inserts a `pending` `file_versions` row and allocates `version_id = 7d9f2b10`, object path
    `/3b1e8c4a/7d9f2b10`.
-6. The sidecar **starts accepting data**, streaming to the backend while it (a) counts bytes against `MaxSize`
+6. The sidecar **starts accepting data**, streaming to the backend while it (a) counts bytes against `max_size`
    (aborts `413` if exceeded), (b) sniffs magic bytes vs `image/png` (aborts `415` on mismatch), (c) runs SHA-256.
-7. At end-of-stream the sidecar checks the digest against `ExpectedHash` (`422` on mismatch), then **binds**:
+7. At end-of-stream the sidecar checks the digest against `expected_hash` (`422` on mismatch), then **binds**:
    `POST /files/3b1e8c4a/bind` (on-behalf-of) sets `content_id := 7d9f2b10`, flips the version to `available`
    under optimistic CAS. (First content, so no `If-Match` precondition.)
 8. The sidecar returns `201` to the browser; the LMS stores `file_id = 3b1e8c4a` on the assessment answer. Total: one
@@ -1547,36 +1551,35 @@ while every control decision stays mediated by the LMS.
    ```json
    200 OK
    { "etag": "\"Ox...c4a7d9f\"",
-     "download_url": "https://fs-data.example.com/files/3b1e8c4a?X-FS-Algorithm=Ed25519&X-FS-Expires=1750608400&X-FS-Op=GET&X-FS-ContentId=7d9f2b10&X-FS-Rh-Content-Type=image%2Fpng&X-FS-Rh-Content-Disposition=inline&X-FS-Rh-Cache-Control=private%2C%20max-age%3D604800&X-FS-Signature=bDc4Z2..." }
+     "download_url": "https://fs-data.example.com/files/3b1e8c4a?fs-token=v4.public.eyJvcCI6IkdFVCIsImV4cCI6MTc1MDYwODQwMCwiY29udGVudF9pZCI6IjdkOWYyYjEwIiwicmgiOnsiQ29udGVudC1UeXBlIjoiaW1hZ2UvcG5nIiwiQ29udGVudC1EaXNwb3NpdGlvbiI6ImlubGluZSIsIkNhY2hlLUNvbnRyb2wiOiJwcml2YXRlLCBtYXgtYWdlPTYwNDgwMCJ9fQ.bDc4Z2lnbg.eyJraWQiOiJmcy0yMDI2LTA2In0" }
    ```
 
-   `download_url` query parameters (host `fs-data.example.com`, path `/files/3b1e8c4a` — `file_id` is the path):
+   One opaque `fs=` token (`file_id` is the path). Decoded by control/sidecar only, its claims are:
 
-   | Parameter | Value | Meaning |
+   | Claim | Value | Meaning |
    |---|---|---|
-   | `X-FS-Algorithm` | `Ed25519` | signature algorithm (P1: single key, no key id) |
-   | `X-FS-Expires` | `1750608400` | exp — +7 days (cap `max_url_ttl` enforced at signing) |
-   | `X-FS-Op` | `GET` | bound operation (checked against the HTTP method) |
-   | `X-FS-ContentId` | `7d9f2b10` | **pins this version** — stable, cacheable; "latest" = re-presign. The sidecar resolves backend/path/size from this version row |
-   | `X-FS-Rh-Content-Type` | `image/png` | response header echoed verbatim |
-   | `X-FS-Rh-Content-Disposition` | `inline` | response header — render in page (vs `attachment`) |
-   | `X-FS-Rh-Cache-Control` | `private, max-age=604800` | response header — week-long client/CDN cache |
-   | `X-FS-Signature` | `bDc4Z2...` | Ed25519 signature over `method + host + path + all other X-FS-*` |
+   | `op` | `GET` | bound operation (checked against the HTTP method) |
+   | `exp` | `1750608400` | +7 days (the `max_url_ttl` cap is enforced at signing) |
+   | `content_id` | `7d9f2b10` | **pins this version** — stable, cacheable; "latest" = re-presign. The sidecar resolves backend/path/size from this version row |
+   | `rh.Content-Type` | `image/png` | response header echoed verbatim |
+   | `rh.Content-Disposition` | `inline` | response header — render in page (vs `attachment`) |
+   | `rh.Cache-Control` | `private, max-age=604800` | response header — week-long client/CDN cache |
+   | *(footer)* `kid` | `fs-2026-06` | key id (P2 rotation) |
 
-   No upload-only constraints here (`MaxSize`/`ExactSize`/`ExpectedHash` are PUT-only); this download URL also carries
-   no `ip` or token-claim predicate, so it is usable by anyone who holds it until `exp` — see the domain/auth note below.
+   No upload-only claims here (`max_size`/`exact_size`/`expected_hash` are PUT-only); this token also carries no `ip` or
+   token-claim predicate, so it is usable by anyone who holds it until `exp` — see the domain/auth note below.
 
 10. The LMS drops that URL straight into the page — it is a **bare, shareable URL** (ADR-0004), so no JS/header glue:
 
     ```html
-    <img src="https://fs-data.example.com/files/3b1e8c4a?...&X-FS-Op=GET&X-FS-ContentId=7d9f2b10&...&X-FS-Signature=bDc4Z2...">
+    <img src="https://fs-data.example.com/files/3b1e8c4a?fs-token=v4.public.eyJvcCI6IkdFVC...fX0.bDc4Z2lnbg.eyJraWQ...">
     ```
-11. The browser `GET`s the sidecar URL directly. The sidecar verifies the signature, streams the bytes from
+11. The browser `GET`s the sidecar URL directly. The sidecar verifies the token, streams the bytes from
     `/3b1e8c4a/7d9f2b10`, and emits the baked headers: `Content-Type: image/png`, `Content-Disposition: inline`,
     `Cache-Control: private, max-age=604800`, plus `ETag`, `Accept-Ranges: bytes`. The image **renders inline** in the
     browser; the CDN may cache it for the URL's lifetime.
-12. **Automatic download** is the same call with one baked header changed at presign — `X-FS-Rh-Content-Disposition=
-    attachment%3B%20filename%3D%22answer.png%22` — so the browser saves the file instead of rendering it.
+12. **Automatic download** is the same call with the baked `Content-Disposition` claim set to
+    `attachment; filename="answer.png"` instead of `inline` — so the browser saves the file instead of rendering it.
 13. **Large media (random access).** If the object were a large video instead of a PNG, the same single signed URL
     serves **arbitrary-offset reads**: a `<video>` element (or a downloader) seeks by issuing `Range` requests against
     it, and the sidecar answers each with `206 Partial Content` (§4.1). Because the `Range` header is not part of the
@@ -1587,7 +1590,7 @@ browser authenticates to it:
 
 - **Same site as the app** — the sidecar is a **subdomain** (`fs-data.app.example.com`) or even a **sub-path**
   (`app.example.com/fs-data/...`) of the app's domain. Then the platform **cookies / tokens are sent automatically** by
-  the browser, so a token-claim predicate (`X-FS-Tok-*`) can be enforced on plain `<img>`/`<video>`/navigation with no
+  the browser, so a token-claim predicate (`tok.*`) can be enforced on plain `<img>`/`<video>`/navigation with no
   extra glue. Recommended where possible.
 - **Different domain** — the browser will **not** auto-attach the app's cookies/token. Two options, chosen by the
   operator/configurator: **(a)** authenticate the user on the sidecar domain first (so it obtains a token) and keep the
@@ -1626,15 +1629,15 @@ resumes** without re-uploading what already landed. Same hosts as §4.6. The stu
    200 OK
    { "file_id": "9c2a4f10", "version_id": "5e0db7a2", "upload_id": "u7f1b2c3",
      "part_size": 67108864, "parts": [
-       { "part": 1, "offset": 0,         "size": 67108864, "url": "https://fs-data.example.com/files/9c2a4f10/multipart/u7f1b2c3/parts/1?X-FS-Algorithm=Ed25519&X-FS-Expires=1750007200&X-FS-Op=part&X-FS-Signature=cccp1A..." },
-       { "part": 2, "offset": 67108864,  "size": 67108864, "url": ".../parts/2?...&X-FS-Expires=1750007200&X-FS-Op=part&X-FS-Signature=cccp2B..." },
-       { "part": 3, "offset": 134217728, "size": 67108864, "url": ".../parts/3?...&X-FS-Signature=cccp3C..." },
-       { "part": 4, "offset": 201326592, "size": 67108864, "url": ".../parts/4?...&X-FS-Signature=cccp4D..." },
-       { "part": 5, "offset": 268435456, "size": 67108864, "url": ".../parts/5?...&X-FS-Signature=cccp5E..." } ] }
+       { "part": 1, "offset": 0,         "size": 67108864, "url": "https://fs-data.example.com/files/9c2a4f10/multipart/u7f1b2c3/parts/1?fs-token=v4.public.eyJvcCI6InBhcnQi...fX0.cccp1A" },
+       { "part": 2, "offset": 67108864,  "size": 67108864, "url": ".../parts/2?fs-token=v4.public...cccp2B" },
+       { "part": 3, "offset": 134217728, "size": 67108864, "url": ".../parts/3?fs-token=v4.public...cccp3C" },
+       { "part": 4, "offset": 201326592, "size": 67108864, "url": ".../parts/4?fs-token=v4.public...cccp4D" },
+       { "part": 5, "offset": 268435456, "size": 67108864, "url": ".../parts/5?fs-token=v4.public...cccp5E" } ] }
    ```
-   Each part URL is signed exactly like §4.5: `op=part`, the `file_id`/`upload_id`/part number ride in the **path**
-   (`/files/9c2a4f10/multipart/u7f1b2c3/parts/3`, all signed), and a short `X-FS-Expires` (here ~1 hour). Server-chosen
-   part boundaries are aligned to the BLAKE3 tree so the subtree hashes combine cleanly at completion.
+   Each part URL carries a PASETO token exactly like §4.5: an `op=part` claim, the `file_id`/`upload_id`/part number in
+   the **path** (`/files/9c2a4f10/multipart/u7f1b2c3/parts/3`), and a short `exp` (here ~1 hour). Server-chosen part
+   boundaries are aligned to the BLAKE3 tree so the subtree hashes combine cleanly at completion.
 
 #### Phase B — Upload parts (with durable per-part state)
 
@@ -1666,8 +1669,8 @@ resumes** without re-uploading what already landed. Same hosts as §4.6. The stu
    { "upload_id": "u7f1b2c3", "state": "in_progress", "part_size": 67108864,
      "uploaded": [ { "part": 1, "size": 67108864 }, { "part": 3, "size": 67108864 }, { "part": 4, "size": 67108864 } ],
      "missing": [
-       { "part": 2, "offset": 67108864,  "size": 67108864, "url": "https://fs-data.example.com/files/9c2a4f10/multipart/u7f1b2c3/parts/2?X-FS-Algorithm=Ed25519&X-FS-Expires=1750090000&X-FS-Op=part&X-FS-Signature=rEsuM2..." },
-       { "part": 5, "offset": 268435456, "size": 67108864, "url": ".../parts/5?...&X-FS-Expires=1750090000&X-FS-Op=part&X-FS-Signature=rEsuM5..." } ] }
+       { "part": 2, "offset": 67108864,  "size": 67108864, "url": "https://fs-data.example.com/files/9c2a4f10/multipart/u7f1b2c3/parts/2?fs-token=v4.public.eyJvcCI6InBhcnQi...fX0.rEsuM2" },
+       { "part": 5, "offset": 268435456, "size": 67108864, "url": ".../parts/5?fs-token=v4.public...rEsuM5" } ] }
    ```
    The control plane reads `multipart_upload_parts`, reports parts **1, 3, 4 as already uploaded**, and mints **fresh
    signed URLs only for the missing parts 2 and 5** (new `exp`) — the missing set can be any subset, not just a
@@ -1704,7 +1707,7 @@ resumes** without re-uploading what already landed. Same hosts as §4.6. The stu
 - **API surface**: [api.md](./api.md)
 - **ADRs**:
   - [ADR-0003: Split the Data Plane into a Signed-URL Sidecar](./ADR/0003-cpt-cf-file-storage-adr-sidecar-data-plane.md) — the active architecture
-  - [ADR-0004: Signed-URL Field & Signature Transport](./ADR/0004-cpt-cf-file-storage-adr-signed-url-transport.md) — discrete `X-FS-*` query params
+  - [ADR-0004: Signed-URL Token Format & Transport](./ADR/0004-cpt-cf-file-storage-adr-signed-url-transport.md) — opaque PASETO `v4.public` token, query or header
   - [ADR-0002: Content Integrity Hash — SHA-256 in P1, Configurable in P2](./ADR/0002-cpt-cf-file-storage-adr-content-hash-selection.md)
   - [ADR-0001: Proxy All File Content Traffic Through FileStorage](./ADR/0001-cpt-cf-file-storage-adr-proxy-content-traffic.md) — **superseded by ADR-0003**
 - **Features**: [features/](./features/) (to be created in P2/P3 phases for each declared-only component)
