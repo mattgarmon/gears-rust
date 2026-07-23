@@ -56,6 +56,10 @@ fips = [
 # Database integration (toolkit-db, migrations, DbManager/DbHandle in contexts/runtime)
 db = ["dep:toolkit-db", "dep:sea-orm-migration"]
 
+# Concrete Kubernetes TokenReview platform-plane authenticator, auto-wired into
+# the OoP bootstrap when `oop_http.internal_auth` is configured (Profile 3).
+k8s-auth = ["bootstrap", "dep:toolkit-k8s-auth"]
+
 # OpenTelemetry support for distributed tracing
 otel = [
     "dep:opentelemetry",
@@ -101,6 +105,8 @@ cf-gears-system-sdks = { workspace = true, features = ["directory"] }
 toolkit-security = { workspace = true, optional = true }
 toolkit-http-middleware = { workspace = true, optional = true }
 secrecy = { workspace = true, optional = true }
+# Concrete K8s TokenReview InternalAuthenticator (k8s-auth feature).
+toolkit-k8s-auth = { workspace = true, optional = true }
 
 # Core deps
 anyhow = { workspace = true }

@@ -161,10 +161,25 @@ pub struct OopHttpConfig {
     /// unspecified host (`0.0.0.0`) rewritten to `127.0.0.1`.
     #[serde(default)]
     pub advertise_uri: Option<String>,
+    /// Platform-plane (`InternalAuthenticator`) configuration. When present and
+    /// the `k8s-auth` feature is enabled, the bootstrap installs the Kubernetes
+    /// `TokenReview` authenticator on incoming system calls.
+    #[serde(default)]
+    pub internal_auth: Option<InternalAuthConfig>,
 }
 
 fn default_drain_timeout_secs() -> u64 {
     30
+}
+
+/// Platform-plane authentication configuration for the `OoP` HTTP server.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InternalAuthConfig {
+    /// Expected token audiences for Kubernetes `TokenReview`. When empty, the
+    /// API server's default audience validation applies.
+    #[serde(default)]
+    pub audiences: Vec<String>,
 }
 
 impl ConfigProvider for AppConfig {

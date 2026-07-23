@@ -603,7 +603,8 @@ pub async fn run_oop_with_options(opts: OopRunOptions) -> Result<()> {
             &opts.gear_name,
             instance_id,
             Arc::clone(&directory_api),
-        )?;
+        )
+        .await?;
         run_oop_serving(run_options, serve).await
     } else {
         info!("Starting gear lifecycle (legacy gRPC-only)");
@@ -621,10 +622,11 @@ pub async fn run_oop_with_options(opts: OopRunOptions) -> Result<()> {
 
 /// Build [`OopServeOptions`] from configuration.
 ///
-/// The authenticator injection points are left unset here; the app/gear binary
-/// supplies concrete `BearerAuthenticator` / `InternalAuthenticator` adapters
-/// when it needs the two-plane auth middleware installed.
-fn build_oop_serve_options(
+/// The tenant-plane `BearerAuthenticator` injection point is left unset here;
+/// the app/gear binary supplies that adapter when it needs the tenant-plane
+/// middleware installed. The platform-plane authenticator is constructed from
+/// `oop_http.internal_auth` when the `k8s-auth` feature is enabled.
+async fn build_oop_serve_options(
     cfg: &super::config::OopHttpConfig,
     gear_name: &str,
     instance_id: Uuid,
@@ -649,6 +651,8 @@ fn build_oop_serve_options(
         .clone()
         .unwrap_or_else(|| default_advertise_uri(listen_addr));
 
+    let internal_authenticator = build_internal_authenticator(cfg.internal_auth.as_ref()).await?;
+
     Ok(OopServeOptions {
         gear_name: gear_name.to_owned(),
         instance_id: instance_id.to_string(),
@@ -659,8 +663,45 @@ fn build_oop_serve_options(
         drain_timeout: Duration::from_secs(cfg.drain_timeout_secs),
         directory,
         bearer_authenticator: None,
-        internal_authenticator: None,
+        internal_authenticator,
     })
+}
+
+/// Construct the platform-plane authenticator from configuration.
+///
+/// With the `k8s-auth` feature enabled and `internal_auth` configured, this
+/// initializes the Kubernetes `TokenReview` authenticator. Without the feature,
+/// a configured `internal_auth` is a no-op (with a warning), and the middleware
+/// is not installed.
+#[cfg_attr(not(feature = "k8s-auth"), allow(clippy::unused_async))]
+async fn build_internal_authenticator(
+    cfg: Option<&super::config::InternalAuthConfig>,
+) -> Result<Option<crate::runtime::DynInternalAuthenticator>> {
+    #[cfg(feature = "k8s-auth")]
+    {
+        if let Some(internal_auth) = cfg {
+            info!("Initializing Kubernetes TokenReview platform-plane authenticator");
+            let authenticator = toolkit_k8s_auth::K8sTokenReviewAuthenticator::try_default(
+                internal_auth.audiences.clone(),
+            )
+            .await
+            .context("failed to initialize Kubernetes TokenReview authenticator")?;
+            return Ok(Some(crate::runtime::DynInternalAuthenticator::new(
+                authenticator,
+            )));
+        }
+        Ok(None)
+    }
+    #[cfg(not(feature = "k8s-auth"))]
+    {
+        if cfg.is_some() {
+            warn!(
+                "oop_http.internal_auth is configured but the `k8s-auth` feature is disabled; \
+                 platform-plane authentication will NOT be enforced"
+            );
+        }
+        Ok(None)
+    }
 }
 
 /// Derive a default advertise URI from the bind address, rewriting an
