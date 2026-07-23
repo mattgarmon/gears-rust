@@ -117,6 +117,13 @@ pub struct AppConfig {
     /// Allows vendors to add their own typed configuration sections.
     #[serde(default)]
     pub vendor: VendorConfig,
+    /// Out-of-process HTTP server configuration.
+    ///
+    /// When present, an `OoP` gear starts an Axum HTTP server (probes,
+    /// gear routes, self-registration, dependency resolution, graceful drain)
+    /// instead of the legacy gRPC-only lifecycle (`cpt-cf-component-oop-bootstrap`).
+    #[serde(default)]
+    pub oop_http: Option<OopHttpConfig>,
 }
 
 impl Default for AppConfig {
@@ -130,8 +137,34 @@ impl Default for AppConfig {
             gears_dir: None,
             gears: HashMap::new(),
             vendor: VendorConfig::new(),
+            oop_http: None,
         }
     }
+}
+
+/// Out-of-process HTTP server configuration (`cpt-cf-component-oop-bootstrap`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OopHttpConfig {
+    /// Address the main HTTP server binds to (gear routes + probes),
+    /// e.g. `"0.0.0.0:8080"`.
+    pub listen_addr: String,
+    /// Optional separate bind address for probe endpoints (sidecar port).
+    /// When set, `/healthz` and `/readyz` are also served here.
+    #[serde(default)]
+    pub probe_bind_addr: Option<String>,
+    /// Maximum seconds to wait for in-flight requests to drain on shutdown.
+    #[serde(default = "default_drain_timeout_secs")]
+    pub drain_timeout_secs: u64,
+    /// Base URL other services use to reach this instance (registered as the
+    /// instance's REST endpoint). Defaults to `http://<listen_addr>` with an
+    /// unspecified host (`0.0.0.0`) rewritten to `127.0.0.1`.
+    #[serde(default)]
+    pub advertise_uri: Option<String>,
+}
+
+fn default_drain_timeout_secs() -> u64 {
+    30
 }
 
 impl ConfigProvider for AppConfig {

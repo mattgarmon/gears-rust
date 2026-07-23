@@ -32,4 +32,6 @@ pub use host_runtime::{
 pub use runner::{
     ClientRegistration, OopGearSpawnConfig, OopSpawnOptions, RunOptions, ShutdownOptions, run,
 };
+#[cfg(feature = "bootstrap")]
+pub use runner::run_oop_serving;
 pub use system_context::SystemContext;

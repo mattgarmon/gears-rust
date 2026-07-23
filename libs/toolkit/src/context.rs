@@ -68,6 +68,14 @@ impl GearContextBuilder {
         self
     }
 
+    /// Attach a [`RuntimeHandle`](crate::runtime::RuntimeHandle) in place.
+    ///
+    /// Used by the runtime to inject the `OoP` readiness handle after
+    /// construction but before the `init` phase, so gears observe a live handle.
+    pub fn set_runtime(&mut self, runtime: crate::runtime::RuntimeHandle) {
+        self.runtime = runtime;
+    }
+
     /// Attach a `DbManager` used by [`for_gear`](Self::for_gear) to resolve
     /// per-gear database handles.
     #[cfg(feature = "db")]

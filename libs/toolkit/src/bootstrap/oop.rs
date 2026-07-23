@@ -58,8 +58,8 @@ use super::config::{
 };
 use crate::bootstrap::host::{init_logging_unified, init_panic_tracing};
 use crate::runtime::{
-    ClientRegistration, DbOptions, RunOptions, ShutdownOptions, TOOLKIT_DIRECTORY_ENDPOINT_ENV,
-    run, shutdown,
+    ClientRegistration, DbOptions, OopServeOptions, RunOptions, ShutdownOptions,
+    TOOLKIT_DIRECTORY_ENDPOINT_ENV, run, run_oop_serving, shutdown,
 };
 use cf_system_sdks::directory::{DirectoryClient, DirectoryGrpcClient};
 
@@ -574,27 +574,41 @@ pub async fn run_oop_with_options(opts: OopRunOptions) -> Result<()> {
         }
     });
 
+    // Capture OoP HTTP config (if any) before moving the config into the provider.
+    let oop_http = final_config.oop_http.clone();
+
     // Build config provider for gears
     let config_provider = Arc::new(final_config);
 
-    // Keep a reference to directory_api for deregistration after shutdown
-    // Run the gear lifecycle with the root cancellation token.
-    // Shutdown is driven by the signal handler spawned above, not by ShutdownOptions::Signals.
     // The DirectoryClient (gRPC client) is injected into the ClientHub so gears can access it.
-    info!("Starting gear lifecycle");
     let run_options = RunOptions {
         gears_cfg: config_provider,
         db: db_options,
         shutdown: ShutdownOptions::Token(cancel.clone()),
-        clients: vec![ClientRegistration::new::<dyn DirectoryClient>(
-            directory_api,
-        )],
+        clients: vec![ClientRegistration::new::<dyn DirectoryClient>(Arc::clone(
+            &directory_api,
+        ))],
         instance_id,
         oop: None, // OoP gears don't spawn other OoP gears
         shutdown_deadline: None,
     };
 
-    let result = run(run_options).await;
+    // When `oop_http` is configured, run the HTTP-serving lifecycle (OoP-4):
+    // Axum server + probes + self-registration + dependency resolution + drain.
+    // Otherwise fall back to the legacy gRPC-only lifecycle.
+    let result = if let Some(http_cfg) = oop_http {
+        info!("Starting OoP HTTP-serving lifecycle");
+        let serve = build_oop_serve_options(
+            &http_cfg,
+            &opts.gear_name,
+            instance_id,
+            Arc::clone(&directory_api),
+        )?;
+        run_oop_serving(run_options, serve).await
+    } else {
+        info!("Starting gear lifecycle (legacy gRPC-only)");
+        run(run_options).await
+    };
 
     if let Err(ref e) = result {
         error!(error = %e, "Gear runtime failed");
@@ -603,6 +617,65 @@ pub async fn run_oop_with_options(opts: OopRunOptions) -> Result<()> {
     }
 
     result
+}
+
+/// Build [`OopServeOptions`] from configuration.
+///
+/// The authenticator injection points are left unset here; the app/gear binary
+/// supplies concrete `BearerAuthenticator` / `InternalAuthenticator` adapters
+/// when it needs the two-plane auth middleware installed.
+fn build_oop_serve_options(
+    cfg: &super::config::OopHttpConfig,
+    gear_name: &str,
+    instance_id: Uuid,
+    directory: Arc<dyn DirectoryClient>,
+) -> Result<OopServeOptions> {
+    let listen_addr: std::net::SocketAddr = cfg
+        .listen_addr
+        .parse()
+        .with_context(|| format!("invalid oop_http.listen_addr: {}", cfg.listen_addr))?;
+
+    let probe_bind_addr = cfg
+        .probe_bind_addr
+        .as_deref()
+        .map(|s| {
+            s.parse::<std::net::SocketAddr>()
+                .with_context(|| format!("invalid oop_http.probe_bind_addr: {s}"))
+        })
+        .transpose()?;
+
+    let advertise_uri = cfg
+        .advertise_uri
+        .clone()
+        .unwrap_or_else(|| default_advertise_uri(listen_addr));
+
+    Ok(OopServeOptions {
+        gear_name: gear_name.to_owned(),
+        instance_id: instance_id.to_string(),
+        version: None,
+        advertise_uri,
+        listen_addr,
+        probe_bind_addr,
+        drain_timeout: Duration::from_secs(cfg.drain_timeout_secs),
+        directory,
+        bearer_authenticator: None,
+        internal_authenticator: None,
+    })
+}
+
+/// Derive a default advertise URI from the bind address, rewriting an
+/// unspecified host (`0.0.0.0` / `[::]`) to loopback so the URL is usable.
+fn default_advertise_uri(listen_addr: std::net::SocketAddr) -> String {
+    let host = if listen_addr.ip().is_unspecified() {
+        if listen_addr.is_ipv6() {
+            "[::1]".to_owned()
+        } else {
+            "127.0.0.1".to_owned()
+        }
+    } else {
+        listen_addr.ip().to_string()
+    };
+    format!("http://{host}:{}", listen_addr.port())
 }
 
 #[allow(unknown_lints, de1301_no_print_macros)] // direct stdout config print before exit

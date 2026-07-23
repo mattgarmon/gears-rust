@@ -206,3 +206,72 @@ pub async fn run(opts: RunOptions) -> anyhow::Result<()> {
     // 6. Run full lifecycle
     host.run_gear_phases().await
 }
+
+/// Run an out-of-process gear that serves HTTP (OoP-4).
+///
+/// Mirrors [`run`]'s setup (shutdown wiring, gear discovery, `ClientHub`
+/// construction, client injection) but drives the `OoP` serving lifecycle:
+/// lifecycle phases, then an Axum HTTP server with framework probes,
+/// background self-registration, dependency resolution, and graceful drain.
+///
+/// # Errors
+/// Returns an error if discovery, any lifecycle phase, or the HTTP server fails.
+#[cfg(feature = "bootstrap")]
+pub async fn run_oop_serving(
+    opts: RunOptions,
+    serve: crate::runtime::OopServeOptions,
+) -> anyhow::Result<()> {
+    // 1. Prepare cancellation token based on shutdown options.
+    let cancel = match &opts.shutdown {
+        ShutdownOptions::Token(t) => t.clone(),
+        _ => CancellationToken::new(),
+    };
+
+    // 2. Spawn shutdown waiter (Signals / Future).
+    match opts.shutdown {
+        ShutdownOptions::Signals => {
+            let c = cancel.clone();
+            tokio::spawn(async move {
+                if let Err(e) = shutdown::wait_for_shutdown().await {
+                    tracing::warn!(error = %e, "shutdown: primary waiter failed; falling back to ctrl_c()");
+                    _ = tokio::signal::ctrl_c().await;
+                }
+                c.cancel();
+            });
+        }
+        ShutdownOptions::Future(waiter) => {
+            let c = cancel.clone();
+            tokio::spawn(async move {
+                waiter.await;
+                c.cancel();
+            });
+        }
+        ShutdownOptions::Token(_) => {}
+    }
+
+    // 3. Discover gears.
+    let registry = GearRegistry::discover_and_build()?;
+
+    // 4. Build shared ClientHub and apply pre-registered clients.
+    let hub = Arc::new(ClientHub::default());
+    for registration in opts.clients {
+        registration.apply(&hub);
+    }
+
+    // 5. Instantiate HostRuntime.
+    let mut host = HostRuntime::new(
+        registry,
+        opts.gears_cfg.clone(),
+        opts.db,
+        hub,
+        cancel.clone(),
+        opts.instance_id,
+        opts.oop,
+    );
+    if let Some(deadline) = opts.shutdown_deadline {
+        host = host.with_shutdown_deadline(deadline);
+    }
+
+    // 6. Run the OoP serving lifecycle.
+    host.run_oop_serving(serve).await
+}

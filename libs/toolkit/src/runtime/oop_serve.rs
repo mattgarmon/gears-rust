@@ -35,6 +35,7 @@ use axum::{
 };
 use tokio_util::sync::CancellationToken;
 
+use cf_system_sdks::directory::DirectoryClient;
 use toolkit_http_middleware::{internal_auth_middleware, security_context_middleware};
 use toolkit_security::{
     AuthNError, BearerAuthenticator, InternalAuthNError, InternalAuthenticator, PlatformIdentity,
@@ -154,8 +155,19 @@ impl InternalAuthenticator for DynInternalAuthenticator {
 // Serve options
 // ---------------------------------------------------------------------------
 
-/// Configuration for the `OoP` HTTP server, assembled by the bootstrap layer.
+/// Configuration and collaborators for the `OoP` HTTP runtime, assembled by the
+/// bootstrap layer and consumed by `HostRuntime`'s `OoP` serving path.
 pub struct OopServeOptions {
+    /// Logical gear name (used for registration + OpenAPI title).
+    pub gear_name: String,
+    /// Process instance id (used for registration/deregistration).
+    pub instance_id: String,
+    /// Optional gear version (used for registration + OpenAPI version).
+    pub version: Option<String>,
+    /// Base URL other services use to reach this instance's REST endpoint
+    /// (e.g. `http://billing.default.svc.cluster.local:8080`). Registered with
+    /// `DirectoryService` as the instance's `rest_endpoint`.
+    pub advertise_uri: String,
     /// Address the main HTTP server binds to (gear routes + probes).
     pub listen_addr: std::net::SocketAddr,
     /// Optional separate address for probe endpoints (sidecar port). When set,
@@ -163,6 +175,8 @@ pub struct OopServeOptions {
     pub probe_bind_addr: Option<std::net::SocketAddr>,
     /// Maximum time to wait for in-flight requests to drain on shutdown.
     pub drain_timeout: Duration,
+    /// Directory client used for self-registration and dependency resolution.
+    pub directory: Arc<dyn DirectoryClient>,
     /// Tenant-plane authenticator; when `Some`, `security_context_middleware`
     /// is installed on gear routes.
     pub bearer_authenticator: Option<DynBearerAuthenticator>,
@@ -174,6 +188,10 @@ pub struct OopServeOptions {
 impl std::fmt::Debug for OopServeOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OopServeOptions")
+            .field("gear_name", &self.gear_name)
+            .field("instance_id", &self.instance_id)
+            .field("version", &self.version)
+            .field("advertise_uri", &self.advertise_uri)
             .field("listen_addr", &self.listen_addr)
             .field("probe_bind_addr", &self.probe_bind_addr)
             .field("drain_timeout", &self.drain_timeout)
@@ -272,6 +290,12 @@ impl DrainGuard {
     /// Current number of in-flight gear-route requests.
     pub(crate) fn in_flight(&self) -> usize {
         self.in_flight.load(Ordering::SeqCst)
+    }
+
+    /// Begin draining: flip readiness to `503` so upstreams stop routing new
+    /// traffic and the guard starts rejecting new requests (drain step 1/2).
+    pub(crate) fn begin_drain(&self) {
+        self.readiness.set_draining(true);
     }
 }
 
@@ -392,7 +416,10 @@ pub(crate) async fn serve(
         let guard = drain_guard.clone();
         async move {
             cancel.cancelled().await;
+            // Drain step 1/2: flip readiness to 503 and start rejecting new work.
+            guard.begin_drain();
             tracing::info!("OoP HTTP server draining (graceful shutdown)");
+            // Drain step 3: wait for in-flight requests to complete.
             drain_in_flight(&guard, drain_timeout).await;
         }
     };
@@ -411,6 +438,96 @@ pub(crate) async fn serve(
     }
 
     result
+}
+
+/// Orchestrate the full `OoP` HTTP runtime for a composed gear router.
+///
+/// This is the single entry point `HostRuntime` calls after the gear lifecycle
+/// phases (`pre_init` … `start`) complete and the gear's REST routes have been
+/// composed. It:
+///
+/// 1. builds the probe router and drain guard around `readiness`;
+/// 2. spawns non-blocking self-registration (REST endpoint + OpenAPI) and
+///    per-dependency resolution (gating `/readyz`);
+/// 3. serves until `cancel`, running the graceful drain (readiness flip →
+///    reject new → drain in-flight → close listener);
+/// 4. deregisters from `DirectoryService` once the local drain has completed
+///    (drain step 4 — after in-flight requests finish so consumers don't see
+///    stale "ready" state).
+///
+/// Steps 5–7 of the DESIGN § 3.2 drain order (reverse-dependency wait, stopping
+/// runtime services, process exit) are handled by the caller / operator:
+/// reverse-dependency ordering is a k8s `preStop` / orchestrator responsibility,
+/// and the heartbeat / registration tasks stop when `cancel` fires.
+///
+/// # Errors
+/// Returns an error if binding or serving fails. Registration/deregistration
+/// failures are logged, not propagated (best-effort, self-healing).
+pub(crate) async fn run_oop_http(
+    gear_router: Router,
+    openapi_json: String,
+    readiness: Arc<ReadinessState>,
+    resolved: Arc<super::oop_registration::ResolvedRestEndpoints>,
+    deps: Vec<String>,
+    options: OopServeOptions,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    use cf_system_sdks::directory::{RegisterInstanceInfo, ServiceEndpoint};
+
+    let openapi_arc = Arc::new(openapi_json);
+    let probe_router = build_probe_router(Arc::clone(&readiness), Arc::clone(&openapi_arc));
+    let sidecar_probe = options
+        .probe_bind_addr
+        .map(|_| build_probe_router(Arc::clone(&readiness), Arc::clone(&openapi_arc)));
+
+    let drain_guard = DrainGuard::new(Arc::clone(&readiness));
+    let router = assemble_router(gear_router, probe_router, drain_guard.clone(), &options);
+
+    // Background self-registration: register this instance's REST endpoint +
+    // OpenAPI spec (non-blocking; HTTP server + probes are already coming up).
+    let registration_info = RegisterInstanceInfo {
+        gear: options.gear_name.clone(),
+        instance_id: options.instance_id.clone(),
+        grpc_services: vec![],
+        version: options.version.clone(),
+        rest_endpoint: Some(ServiceEndpoint::new(options.advertise_uri.clone())),
+        openapi_spec: Some((*openapi_arc).clone()),
+    };
+    let registration_task = tokio::spawn(super::oop_registration::registration_loop(
+        Arc::clone(&options.directory),
+        registration_info,
+        cancel.clone(),
+    ));
+
+    // Background dependency resolution (gates /readyz). No-op if `deps` empty.
+    super::oop_registration::resolve_deps(
+        Arc::clone(&options.directory),
+        deps,
+        Arc::clone(&readiness),
+        resolved,
+        cancel.clone(),
+    );
+
+    // Serve until cancelled, then drain in-flight requests.
+    let serve_result = serve(router, drain_guard, sidecar_probe, &options, cancel.clone()).await;
+
+    // Drain step 4: deregister after the local drain has completed.
+    registration_task.abort();
+    if let Err(e) = options
+        .directory
+        .deregister_instance(&options.gear_name, &options.instance_id)
+        .await
+    {
+        tracing::warn!(
+            gear = %options.gear_name,
+            error = %e,
+            "deregistration from DirectoryService failed on shutdown"
+        );
+    } else {
+        tracing::info!(gear = %options.gear_name, "deregistered from DirectoryService");
+    }
+
+    serve_result
 }
 
 /// Wait up to `timeout` for the in-flight counter to reach zero.

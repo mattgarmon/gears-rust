@@ -867,6 +867,134 @@ impl HostRuntime {
     }
 }
 
+/// Out-of-process HTTP serving lifecycle (OoP-4, `cpt-cf-component-oop-bootstrap`).
+#[cfg(feature = "bootstrap")]
+impl HostRuntime {
+    /// Declared dependencies that are **not** satisfied in-process and must be
+    /// resolved via `DirectoryService` (or k8s DNS). In-process deps are already
+    /// guaranteed by the topo-sorted lifecycle, so they are excluded.
+    fn external_deps(&self) -> Vec<String> {
+        use std::collections::{BTreeSet, HashSet};
+
+        let present: HashSet<&str> = self.registry.gears().iter().map(|e| e.name).collect();
+        let mut deps = BTreeSet::new();
+        for entry in self.registry.gears() {
+            for dep in entry.deps() {
+                if !present.contains(dep) {
+                    deps.insert((*dep).to_owned());
+                }
+            }
+        }
+        deps.into_iter().collect()
+    }
+
+    /// Compose a **host-less** REST router from all `RestApiCap` gears, plus the
+    /// gear's generated `OpenAPI` document (serialized JSON).
+    ///
+    /// Unlike [`run_rest_phase`](Self::run_rest_phase), this does not require an
+    /// `ApiGatewayCap` host: `OoP` gears serve their own routes directly.
+    async fn compose_oop_router(
+        &self,
+        options: &crate::runtime::OopServeOptions,
+    ) -> anyhow::Result<(Router, String)> {
+        use anyhow::Context as _;
+        use crate::api::{OpenApiInfo, OpenApiRegistryImpl};
+
+        let registry = OpenApiRegistryImpl::new();
+        let mut router = Router::new();
+
+        for entry in self.registry.gears() {
+            if let Some(rest) = entry.caps.query::<RestApiCap>() {
+                let ctx = self
+                    .ctx_builder
+                    .for_gear(entry.name)
+                    .await
+                    .with_context(|| format!("OoP router: build context for '{}'", entry.name))?;
+                router = rest
+                    .register_rest(&ctx, router, &registry)
+                    .with_context(|| format!("OoP router: register_rest for '{}'", entry.name))?;
+            }
+        }
+
+        let info = OpenApiInfo {
+            title: options.gear_name.clone(),
+            version: options
+                .version
+                .clone()
+                .unwrap_or_else(|| "0.0.0".to_owned()),
+            description: None,
+            servers: vec![],
+        };
+        let openapi = registry
+            .build_openapi(&info)
+            .context("OoP router: build OpenAPI document")?;
+        let json = serde_json::to_string(&openapi).context("OoP router: serialize OpenAPI")?;
+
+        Ok((router, json))
+    }
+
+    /// Run the full `OoP` gear lifecycle: phases (`pre_init` … `start`), then
+    /// serve the composed router with framework probes, background
+    /// self-registration, dependency resolution, and graceful drain, then the
+    /// `stop` phase.
+    ///
+    /// # Errors
+    /// Returns an error if any lifecycle phase or the HTTP server fails.
+    pub async fn run_oop_serving(
+        mut self,
+        options: crate::runtime::OopServeOptions,
+    ) -> anyhow::Result<()> {
+        use crate::runtime::{ReadinessState, ResolvedRestEndpoints, RuntimeHandle};
+
+        tracing::info!("Running OoP serving lifecycle");
+
+        // External deps gate readiness; seed the readiness state and inject the
+        // runtime handle BEFORE init so gears can register readiness checks.
+        let deps = self.external_deps();
+        let readiness = ReadinessState::new(deps.clone());
+        self.ctx_builder
+            .set_runtime(RuntimeHandle::new(Arc::clone(&readiness)));
+
+        // Expose resolved dependency endpoints to gears via the ClientHub.
+        let resolved = Arc::new(ResolvedRestEndpoints::new());
+        self.client_hub
+            .register::<ResolvedRestEndpoints>(Arc::clone(&resolved));
+
+        // Lifecycle phases up to start.
+        self.run_pre_init_phase()?;
+        #[cfg(feature = "db")]
+        self.run_db_phase().await?;
+        self.run_init_phase().await?;
+        self.run_post_init_phase().await?;
+        self.run_grpc_phase().await?;
+        self.run_start_phase().await?;
+
+        // Compose the host-less REST router + OpenAPI spec.
+        let (gear_router, openapi_json) = self.compose_oop_router(&options).await?;
+
+        // Serve: probes up immediately, background registration + dep resolution,
+        // graceful drain on cancellation, then deregister.
+        let cancel = self.cancel.clone();
+        let serve_result = super::oop_serve::run_oop_http(
+            gear_router,
+            openapi_json,
+            readiness,
+            resolved,
+            deps,
+            options,
+            cancel,
+        )
+        .await;
+
+        // Stop phase (reverse order) regardless of serve outcome.
+        if let Err(e) = self.run_stop_phase().await {
+            tracing::warn!(error = %e, "OoP stop phase reported an error");
+        }
+
+        serve_result
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
