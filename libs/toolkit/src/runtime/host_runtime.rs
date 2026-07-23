@@ -996,6 +996,12 @@ impl HostRuntime {
 }
 
 #[cfg(test)]
+#[cfg(feature = "bootstrap")]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[path = "host_runtime_oop_tests.rs"]
+mod host_runtime_oop_tests;
+
+#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
