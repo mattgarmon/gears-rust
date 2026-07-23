@@ -5,7 +5,9 @@
 > PRD: `cpt-cf-fr-rest-primary`, `cpt-cf-fr-eventual-readiness`, `cpt-cf-fr-oop-lifecycle`
 > ADR: `0005-cpt-cf-adr-eventual-readiness`
 > Effort: **Large — the biggest phase.**
-> Status: **PLAN ONLY — not yet implemented.** This doc is context for future sessions.
+> Status: **IMPLEMENTED** on branch `feat/oop4-http-server` (Tasks A–H + G). All toolkit
+> tests pass; clippy clean (default / `bootstrap` / `k8s-auth`); full `cargo check --workspace` green.
+> See commit history on the branch. This doc remains the design reference.
 
 ## Branch / repo state (as of planning)
 
