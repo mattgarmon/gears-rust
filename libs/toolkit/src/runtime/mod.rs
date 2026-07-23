@@ -2,6 +2,8 @@ mod gear_manager;
 mod grpc_installers;
 mod host_runtime;
 #[cfg(feature = "bootstrap")]
+mod oop_registration;
+#[cfg(feature = "bootstrap")]
 mod oop_serve;
 mod readiness;
 mod runner;
@@ -14,6 +16,8 @@ pub mod shutdown;
 mod tests;
 
 pub use gear_manager::{Endpoint, GearInstance, GearManager, InstanceState};
+#[cfg(feature = "bootstrap")]
+pub use oop_registration::ResolvedRestEndpoints;
 #[cfg(feature = "bootstrap")]
 pub use oop_serve::{DynBearerAuthenticator, DynInternalAuthenticator, OopServeOptions};
 pub use readiness::{
