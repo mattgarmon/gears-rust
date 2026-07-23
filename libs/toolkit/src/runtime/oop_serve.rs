@@ -16,7 +16,7 @@
 //!   `503 + Retry-After` once draining begins, while in-flight requests finish.
 //!
 //! The server itself is bound and driven by [`serve`], which is invoked from the
-//! `HostRuntime` OoP path. Self-registration and dependency resolution live in
+//! `HostRuntime` `OoP` path. Self-registration and dependency resolution live in
 //! [`super::oop_registration`].
 
 use std::future::Future;
@@ -158,11 +158,11 @@ impl InternalAuthenticator for DynInternalAuthenticator {
 /// Configuration and collaborators for the `OoP` HTTP runtime, assembled by the
 /// bootstrap layer and consumed by `HostRuntime`'s `OoP` serving path.
 pub struct OopServeOptions {
-    /// Logical gear name (used for registration + OpenAPI title).
+    /// Logical gear name (used for registration + `OpenAPI` title).
     pub gear_name: String,
     /// Process instance id (used for registration/deregistration).
     pub instance_id: String,
-    /// Optional gear version (used for registration + OpenAPI version).
+    /// Optional gear version (used for registration + `OpenAPI` version).
     pub version: Option<String>,
     /// Base URL other services use to reach this instance's REST endpoint
     /// (e.g. `http://billing.default.svc.cluster.local:8080`). Registered with
@@ -200,7 +200,7 @@ impl std::fmt::Debug for OopServeOptions {
                 "internal_authenticator",
                 &self.internal_authenticator.is_some(),
             )
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -212,19 +212,15 @@ impl std::fmt::Debug for OopServeOptions {
 #[derive(Clone)]
 struct ProbeState {
     readiness: Arc<ReadinessState>,
-    openapi_json: Arc<String>,
+    openapi_json: Arc<str>,
 }
 
 /// Build the framework probe router: `/healthz`, `/readyz`, and the
-/// well-known OpenAPI discovery path.
+/// well-known `OpenAPI` discovery path.
 ///
 /// These routes carry no tenant JWT and are never subject to the drain guard or
 /// the auth middlewares (they must respond during startup and drain).
-#[must_use]
-pub(crate) fn build_probe_router(
-    readiness: Arc<ReadinessState>,
-    openapi_json: Arc<String>,
-) -> Router {
+fn build_probe_router(readiness: Arc<ReadinessState>, openapi_json: Arc<str>) -> Router {
     let state = ProbeState {
         readiness,
         openapi_json,
@@ -255,15 +251,12 @@ async fn readyz(State(state): State<ProbeState>) -> Response {
     (status, Json(report)).into_response()
 }
 
-/// Serve the gear's generated OpenAPI document.
+/// Serve the gear's generated `OpenAPI` document.
 async fn openapi(State(state): State<ProbeState>) -> Response {
     (
         StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/json",
-        )],
-        (*state.openapi_json).clone(),
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        state.openapi_json.to_string(),
     )
         .into_response()
 }
@@ -274,13 +267,13 @@ async fn openapi(State(state): State<ProbeState>) -> Response {
 
 /// Tracks in-flight gear-route requests and enforces the drain state.
 #[derive(Clone)]
-pub(crate) struct DrainGuard {
+struct DrainGuard {
     readiness: Arc<ReadinessState>,
     in_flight: Arc<AtomicUsize>,
 }
 
 impl DrainGuard {
-    pub(crate) fn new(readiness: Arc<ReadinessState>) -> Self {
+    fn new(readiness: Arc<ReadinessState>) -> Self {
         Self {
             readiness,
             in_flight: Arc::new(AtomicUsize::new(0)),
@@ -288,13 +281,13 @@ impl DrainGuard {
     }
 
     /// Current number of in-flight gear-route requests.
-    pub(crate) fn in_flight(&self) -> usize {
+    fn in_flight(&self) -> usize {
         self.in_flight.load(Ordering::SeqCst)
     }
 
     /// Begin draining: flip readiness to `503` so upstreams stop routing new
     /// traffic and the guard starts rejecting new requests (drain step 1/2).
-    pub(crate) fn begin_drain(&self) {
+    fn begin_drain(&self) {
         self.readiness.set_draining(true);
     }
 }
@@ -323,8 +316,7 @@ async fn drain_guard_middleware(State(guard): State<DrainGuard>, request: axum::
 
 /// Compose the final `OoP` router: gear routes (with drain guard + auth) merged
 /// with the framework probe router (unguarded).
-#[must_use]
-pub(crate) fn assemble_router(
+fn assemble_router(
     gear_router: Router,
     probe_router: Router,
     drain_guard: DrainGuard,
@@ -371,13 +363,13 @@ pub(crate) fn assemble_router(
 ///    `ReadinessState`), wait up to `drain_timeout` for in-flight to reach zero,
 ///    then let `axum` close the listener.
 ///
-/// The readiness flip and DirectoryService deregistration are orchestrated by
-/// the caller (`HostRuntime` OoP path) around this call so the full drain
+/// The readiness flip and `DirectoryService` deregistration are orchestrated by
+/// the caller (`HostRuntime` `OoP` path) around this call so the full drain
 /// sequence (DESIGN § 3.2) is honored.
 ///
 /// # Errors
 /// Returns an error if a listener cannot be bound or the server task fails.
-pub(crate) async fn serve(
+async fn serve(
     router: Router,
     drain_guard: DrainGuard,
     probe_router_for_sidecar: Option<Router>,
@@ -434,7 +426,11 @@ pub(crate) async fn serve(
 
     if let Some(handle) = sidecar {
         handle.abort();
-        let _ = handle.await;
+        if let Err(e) = handle.await
+            && !e.is_cancelled()
+        {
+            tracing::warn!(error = %e, "OoP probe sidecar task join error");
+        }
     }
 
     result
@@ -447,7 +443,7 @@ pub(crate) async fn serve(
 /// composed. It:
 ///
 /// 1. builds the probe router and drain guard around `readiness`;
-/// 2. spawns non-blocking self-registration (REST endpoint + OpenAPI) and
+/// 2. spawns non-blocking self-registration (REST endpoint + `OpenAPI`) and
 ///    per-dependency resolution (gating `/readyz`);
 /// 3. serves until `cancel`, running the graceful drain (readiness flip →
 ///    reject new → drain in-flight → close listener);
@@ -463,7 +459,7 @@ pub(crate) async fn serve(
 /// # Errors
 /// Returns an error if binding or serving fails. Registration/deregistration
 /// failures are logged, not propagated (best-effort, self-healing).
-pub(crate) async fn run_oop_http(
+pub(super) async fn run_oop_http(
     gear_router: Router,
     openapi_json: String,
     readiness: Arc<ReadinessState>,
@@ -474,7 +470,7 @@ pub(crate) async fn run_oop_http(
 ) -> anyhow::Result<()> {
     use cf_system_sdks::directory::{RegisterInstanceInfo, ServiceEndpoint};
 
-    let openapi_arc = Arc::new(openapi_json);
+    let openapi_arc: Arc<str> = Arc::from(openapi_json);
     let probe_router = build_probe_router(Arc::clone(&readiness), Arc::clone(&openapi_arc));
     let sidecar_probe = options
         .probe_bind_addr
@@ -491,7 +487,7 @@ pub(crate) async fn run_oop_http(
         grpc_services: vec![],
         version: options.version.clone(),
         rest_endpoint: Some(ServiceEndpoint::new(options.advertise_uri.clone())),
-        openapi_spec: Some((*openapi_arc).clone()),
+        openapi_spec: Some(openapi_arc.to_string()),
     };
     let registration_task = tokio::spawn(super::oop_registration::registration_loop(
         Arc::clone(&options.directory),
@@ -501,11 +497,11 @@ pub(crate) async fn run_oop_http(
 
     // Background dependency resolution (gates /readyz). No-op if `deps` empty.
     super::oop_registration::resolve_deps(
-        Arc::clone(&options.directory),
+        &options.directory,
         deps,
-        Arc::clone(&readiness),
-        resolved,
-        cancel.clone(),
+        &readiness,
+        &resolved,
+        &cancel,
     );
 
     // Serve until cancelled, then drain in-flight requests.

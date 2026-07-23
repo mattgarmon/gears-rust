@@ -5,7 +5,7 @@
 //! are up immediately:
 //!
 //! - **Self-registration** ([`registration_loop`]) registers the instance's
-//!   gRPC/REST endpoints and OpenAPI spec with `DirectoryService`, retrying with
+//!   gRPC/REST endpoints and `OpenAPI` spec with `DirectoryService`, retrying with
 //!   exponential backoff (100ms → 30s cap) and periodically re-registering to
 //!   self-heal after a Flight Control restart / connection loss.
 //! - **Dependency resolution** ([`resolve_deps`]) polls
@@ -145,7 +145,7 @@ fn clone_info(info: &RegisterInstanceInfo) -> RegisterInstanceInfo {
 /// Registers `info` (with backoff), then re-registers every
 /// [`RE_REGISTER_INTERVAL`] to self-heal after a directory restart, until
 /// `cancel` fires.
-pub(crate) async fn registration_loop(
+pub(super) async fn registration_loop(
     directory: Arc<dyn DirectoryClient>,
     info: RegisterInstanceInfo,
     cancel: CancellationToken,
@@ -198,19 +198,21 @@ async fn resolve_one_dep(
 
 /// Spawn one resolution task per dependency. Each resolves independently and
 /// gates `/readyz` via `readiness`. A no-op when `deps` is empty (Profile 1).
-pub(crate) fn resolve_deps(
-    directory: Arc<dyn DirectoryClient>,
+pub(super) fn resolve_deps(
+    directory: &Arc<dyn DirectoryClient>,
     deps: Vec<String>,
-    readiness: Arc<ReadinessState>,
-    resolved: Arc<ResolvedRestEndpoints>,
-    cancel: CancellationToken,
+    readiness: &Arc<ReadinessState>,
+    resolved: &Arc<ResolvedRestEndpoints>,
+    cancel: &CancellationToken,
 ) {
     for dep in deps {
-        let directory = Arc::clone(&directory);
-        let readiness = Arc::clone(&readiness);
-        let resolved = Arc::clone(&resolved);
-        let cancel = cancel.clone();
-        tokio::spawn(resolve_one_dep(directory, dep, readiness, resolved, cancel));
+        tokio::spawn(resolve_one_dep(
+            Arc::clone(directory),
+            dep,
+            Arc::clone(readiness),
+            Arc::clone(resolved),
+            cancel.clone(),
+        ));
     }
 }
 

@@ -7,7 +7,7 @@ use tower::ServiceExt; // for `oneshot`
 
 fn probe_router() -> Router {
     let readiness = ReadinessState::new(Vec::<String>::new());
-    build_probe_router(readiness, Arc::new("{\"openapi\":\"3.1.0\"}".to_owned()))
+    build_probe_router(readiness, Arc::from("{\"openapi\":\"3.1.0\"}"))
 }
 
 #[tokio::test]
@@ -23,7 +23,7 @@ async fn healthz_is_always_ok() {
 #[tokio::test]
 async fn readyz_reports_503_until_deps_resolved_then_200() {
     let readiness = ReadinessState::new(["billing"]);
-    let app = build_probe_router(Arc::clone(&readiness), Arc::new(String::new()));
+    let app = build_probe_router(Arc::clone(&readiness), Arc::from(""));
 
     let resp = app
         .clone()
@@ -45,7 +45,7 @@ async fn readyz_reports_503_until_deps_resolved_then_200() {
 async fn readyz_503_when_draining() {
     let readiness = ReadinessState::new(Vec::<String>::new());
     readiness.set_draining(true);
-    let app = build_probe_router(Arc::clone(&readiness), Arc::new(String::new()));
+    let app = build_probe_router(Arc::clone(&readiness), Arc::from(""));
 
     let resp = app
         .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())

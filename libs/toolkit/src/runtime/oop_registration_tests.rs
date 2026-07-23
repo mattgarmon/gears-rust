@@ -125,7 +125,7 @@ async fn resolve_deps_empty_is_noop() {
     let directory: Arc<dyn DirectoryClient> = Arc::new(StubDirectory::new(0, 0));
     let readiness = ReadinessState::new(Vec::<String>::new());
     let resolved = Arc::new(ResolvedRestEndpoints::new());
-    resolve_deps(directory, vec![], Arc::clone(&readiness), resolved, CancellationToken::new());
+    resolve_deps(&directory, vec![], &readiness, &resolved, &CancellationToken::new());
     assert!(readiness.all_deps_resolved());
 }
 
