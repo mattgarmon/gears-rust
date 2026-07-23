@@ -81,6 +81,10 @@ bootstrap = [
     "dep:dsn",
     "dep:supports-color",
     "dep:enable-ansi-support",
+    # OoP HTTP server: two-plane auth middleware + security primitives
+    "dep:toolkit-security",
+    "dep:toolkit-http-middleware",
+    "dep:secrecy",
 ]
 
 [dependencies]
@@ -92,6 +96,11 @@ sea-orm-migration = { workspace = true, optional = true }
 toolkit-odata = { workspace = true }
 toolkit-sdk = { workspace = true }
 cf-gears-system-sdks = { workspace = true, features = ["directory"] }
+
+# OoP HTTP server (bootstrap feature): two-plane auth middleware + primitives
+toolkit-security = { workspace = true, optional = true }
+toolkit-http-middleware = { workspace = true, optional = true }
+secrecy = { workspace = true, optional = true }
 
 # Core deps
 anyhow = { workspace = true }
