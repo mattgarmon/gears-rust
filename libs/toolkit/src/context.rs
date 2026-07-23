@@ -22,6 +22,7 @@ pub struct GearCtx {
     config_provider: Arc<dyn ConfigProvider>,
     client_hub: Arc<crate::client_hub::ClientHub>,
     cancellation_token: CancellationToken,
+    runtime: crate::runtime::RuntimeHandle,
     #[cfg(feature = "db")]
     db: Option<DbProvider>,
 }
@@ -36,6 +37,7 @@ pub struct GearContextBuilder {
     config_provider: Arc<dyn ConfigProvider>,
     client_hub: Arc<crate::client_hub::ClientHub>,
     root_token: CancellationToken,
+    runtime: crate::runtime::RuntimeHandle,
     #[cfg(feature = "db")]
     db_manager: Option<Arc<DbManager>>, // internal only, never exposed to gears
 }
@@ -52,9 +54,18 @@ impl GearContextBuilder {
             config_provider,
             client_hub,
             root_token,
+            runtime: crate::runtime::RuntimeHandle::detached(),
             #[cfg(feature = "db")]
             db_manager: None,
         }
+    }
+
+    /// Attach a live [`RuntimeHandle`](crate::runtime::RuntimeHandle) so gears
+    /// can register readiness checks (`OoP` profiles). When unset, gears receive
+    /// a detached handle and readiness registration is a no-op (Profile 1).
+    pub fn with_runtime(mut self, runtime: crate::runtime::RuntimeHandle) -> Self {
+        self.runtime = runtime;
+        self
     }
 
     /// Attach a `DbManager` used by [`for_gear`](Self::for_gear) to resolve
@@ -88,7 +99,8 @@ impl GearContextBuilder {
             self.config_provider.clone(),
             self.client_hub.clone(),
             self.root_token.child_token(),
-        );
+        )
+        .with_runtime(self.runtime.clone());
         #[cfg(feature = "db")]
         let ctx = if let Some(mgr) = &self.db_manager
             && let Some(handle) = mgr.get(gear_name).await?
@@ -118,9 +130,16 @@ impl GearCtx {
             config_provider,
             client_hub,
             cancellation_token,
+            runtime: crate::runtime::RuntimeHandle::detached(),
             #[cfg(feature = "db")]
             db: None,
         }
+    }
+
+    /// Attach a [`RuntimeHandle`](crate::runtime::RuntimeHandle) to this context.
+    pub fn with_runtime(mut self, runtime: crate::runtime::RuntimeHandle) -> Self {
+        self.runtime = runtime;
+        self
     }
 
     /// Attach the per-gear database entrypoint.
@@ -159,6 +178,20 @@ impl GearCtx {
     #[must_use]
     pub fn client_hub(&self) -> Arc<crate::client_hub::ClientHub> {
         self.client_hub.clone()
+    }
+
+    /// Access runtime services (e.g. readiness-check registration).
+    ///
+    /// ```ignore
+    /// ctx.runtime().register_readiness_check("cache_warm", Arc::new(MyCheck));
+    /// ```
+    ///
+    /// In Profile 1 (in-process) the handle is detached and registration is a
+    /// no-op; in `OoP` profiles the bootstrap threads a live handle.
+    #[inline]
+    #[must_use]
+    pub fn runtime(&self) -> &crate::runtime::RuntimeHandle {
+        &self.runtime
     }
 
     #[inline]
@@ -333,6 +366,7 @@ impl GearCtx {
             config_provider: self.config_provider.clone(),
             client_hub: self.client_hub.clone(),
             cancellation_token: self.cancellation_token.clone(),
+            runtime: self.runtime.clone(),
             #[cfg(feature = "db")]
             db: None,
         }
