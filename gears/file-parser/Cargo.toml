@@ -18,6 +18,19 @@ name = "file_parser"
 [lints]
 workspace = true
 
+[features]
+default = []
+# Build the out-of-process (OoP) binary that serves this gear standalone and
+# self-registers with the platform-host DirectoryService. Enables the
+# `file-parser-oop` bin target. Kept off by default so the library crate stays
+# publishable without the extra bootstrap dependencies.
+oop_module = ["dep:clap", "dep:mimalloc", "toolkit/bootstrap"]
+
+[[bin]]
+name = "file-parser-oop"
+path = "src/bin/oop.rs"
+required-features = ["oop_module"]
+
 [dependencies]
 # Core dependencies
 anyhow = { workspace = true }
@@ -63,6 +76,10 @@ kreuzberg = { workspace = true }
 mime = { workspace = true }
 
 docx-rust = { workspace = true }
+
+# OoP binary only (gated by `oop_module`).
+clap = { workspace = true, optional = true }
+mimalloc = { version = "0.1", optional = true }
 
 # Local dependencies
 toolkit = { workspace = true }
