@@ -94,6 +94,12 @@ pub struct ApiGateway {
     // task and read by the Forwarder fallback; empty/unused when
     // `gateway_proxy` is disabled.
     pub(crate) proxy_registry: Arc<toolkit_gateway::ProxyRegistry>,
+
+    // Base URL other pods use to reach this gateway, published once the main
+    // listener binds (from `serve`). Read by the runtime's directory-register
+    // phase (via `ApiGatewayCapability::bound_endpoint`) to advertise in-process
+    // REST providers. `None` until the server binds.
+    pub(crate) bound_endpoint: Mutex<Option<String>>,
 }
 
 impl Default for ApiGateway {
@@ -110,6 +116,7 @@ impl Default for ApiGateway {
             registered_routes: DashMap::new(),
             registered_handlers: DashMap::new(),
             proxy_registry: Arc::new(toolkit_gateway::ProxyRegistry::new()),
+            bound_endpoint: Mutex::new(None),
         }
     }
 }
@@ -201,6 +208,7 @@ impl ApiGateway {
             registered_routes: DashMap::new(),
             registered_handlers: DashMap::new(),
             proxy_registry: Arc::new(toolkit_gateway::ProxyRegistry::new()),
+            bound_endpoint: Mutex::new(None),
         }
     }
 
@@ -693,7 +701,20 @@ impl ApiGateway {
 
         // Bind the main socket.
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        tracing::info!("HTTP server bound on {}", addr);
+        let bound_addr = listener.local_addr().unwrap_or(addr);
+        tracing::info!("HTTP server bound on {}", bound_addr);
+
+        // Publish the endpoint other pods use to reach this gateway, so the
+        // runtime's directory-register phase can advertise in-process REST
+        // providers (via `#[toolkit::provides]`). Prefer the explicitly
+        // configured `advertise_uri` (required in Kubernetes, where the pod
+        // binds `0.0.0.0`); otherwise fall back to the bound address.
+        let advertised = cfg
+            .advertise_uri
+            .clone()
+            .unwrap_or_else(|| format!("http://{bound_addr}"));
+        *self.bound_endpoint.lock() = Some(advertised.clone());
+        tracing::info!(endpoint = %advertised, "REST host endpoint published for directory registration");
 
         // Bind the separate health listener (if `serve` = separate|both) BEFORE signalling
         // ready, so readiness reflects every listener the pod must accept traffic on.
@@ -1015,6 +1036,10 @@ impl toolkit::Gear for ApiGateway {
 
 // REST host role: prepare/finalize the router, but do not start the server here.
 impl toolkit::contracts::ApiGatewayCapability for ApiGateway {
+    fn bound_endpoint(&self) -> Option<String> {
+        self.bound_endpoint.lock().clone()
+    }
+
     fn rest_prepare(
         &self,
         _ctx: &toolkit::context::GearCtx,

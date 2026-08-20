@@ -1,0 +1,69 @@
+# Local multi-process demo: file-storage OoP gear (authenticated + DB).
+#
+# Run (after the host is up):
+#   TOOLKIT_DIRECTORY_ENDPOINT=http://127.0.0.1:50051 \
+#     cargo run -p file-storage-oop --bin file-storage-oop -- --config config/demo-file-storage.yaml
+#
+# Then (bearer required — any non-empty token is accepted by static-authn
+# accept_all and mapped to the platform-root tenant):
+#   curl -H 'Authorization: Bearer demo' http://127.0.0.1:8087/file-storage/v1/files   # via edge
+#   curl -H 'Authorization: Bearer demo' http://127.0.0.1:9094/file-storage/v1/files   # direct
+#
+# The pod authenticates the bearer locally (embedded authn stack), then calls
+# the platform-host's authz-resolver over REST (resolved via DirectoryService)
+# for every PEP check, and serves metadata from its own SQLite database. File
+# content lands on the local-fs backend under `storage_root` (no sidecar
+# wired up in this loopback demo).
+
+server:
+  home_dir: "~/.cf-gears-demo-file-storage"
+
+database:
+  servers:
+    file_storage_db:
+      engine: "sqlite"
+      params:
+        WAL: "true"
+        synchronous: "NORMAL"
+        busy_timeout: "5000"
+      pool:
+        max_conns: 5
+        acquire_timeout: "30s"
+
+logging:
+  default:
+    console_level: info
+    file: "logs/demo-file-storage.log"
+    file_level: info
+
+# OoP HTTP serving lifecycle: bind a local REST server + register its endpoint
+# with the DirectoryService so the edge can proxy to it.
+oop_http:
+  listen_addr: "127.0.0.1:9094"
+  advertise_uri: "http://127.0.0.1:9094"
+  allow_loopback_advertise: true
+
+gears:
+  # Target gear: needs the db capability + its own config.
+  file-storage:
+    database:
+      server: "file_storage_db"
+      file: "file_storage.db"
+    config:
+      storage_root: "~/.cf-gears-demo-file-storage/files"
+      require_signing_key_seed: false
+      enable_background_sweep: false
+
+  # Embedded tenant-plane authn stack (in-memory; no DB).
+  authn-resolver:
+    config:
+      vendor: "constructorfabric"
+
+  static-authn-plugin:
+    config:
+      vendor: "constructorfabric"
+      priority: 100
+      mode: accept_all
+
+  types-registry:
+    config: {}

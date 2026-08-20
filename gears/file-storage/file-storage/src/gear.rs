@@ -45,9 +45,9 @@ const MEMORY_ID: &str = "memory";
 /// is used only for the cooperative background cleanup sweep.
 #[toolkit::gear(
     name = "file-storage",
-    deps = [authz_resolver],
     capabilities = [db, rest, stateful]
 )]
+#[toolkit::consumes(contract = authz_resolver_sdk::AuthZResolverApi, from = "authz-resolver")]
 pub struct FileStorageGear {
     service: OnceLock<Arc<FileService>>,
     multipart_service: OnceLock<Arc<MultipartService>>,
@@ -144,12 +144,11 @@ impl Gear for FileStorageGear {
         // Per-type access decisions via the platform Authorization Service
         // (`cpt-cf-file-storage-fr-authorization`). Tenant-boundary enforcement
         // is independent of the PDP (point ops prefetch within the tenant;
-        // listing applies the tenant scope).
-        let authz = ctx
-            .client_hub()
-            .get::<dyn authz_resolver_sdk::AuthZResolverClient>()
-            .map_err(|e| anyhow::anyhow!("failed to resolve AuthZ resolver: {e}"))?;
-        let authorizer: Arc<dyn Authorizer> = Arc::new(PolicyEnforcerAuthorizer::new(authz));
+        // listing applies the tenant scope). AuthZ resolver is consumed via
+        // `#[toolkit::consumes]`; resolved lazily by the `PolicyEnforcer`, so
+        // this gear works identically in-process and out-of-process.
+        let authorizer: Arc<dyn Authorizer> =
+            Arc::new(PolicyEnforcerAuthorizer::new(ctx.client_hub()));
 
         let svc_cfg = ServiceConfig {
             default_url_ttl_secs: i64::try_from(cfg.default_url_ttl_secs).unwrap_or(i64::MAX),

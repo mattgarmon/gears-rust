@@ -20,19 +20,35 @@ name = "file_storage"
 name = "sidecar"
 path = "src/bin/sidecar.rs"
 
+[[bin]]
+name = "file-storage-oop"
+path = "src/main.rs"
+required-features = ["oop_module"]
+
 [lints]
 workspace = true
 
 [features]
 default = []
+# OoP binary (file-storage-oop): bootstrap + embedded authn stack.
+oop_module = [
+    "dep:clap",
+    "toolkit/bootstrap",
+    "dep:authn-resolver",
+    "dep:static-authn-plugin",
+    "dep:types-registry",
+]
+# Kubernetes TokenReview platform-plane auth.
+k8s-auth = ["toolkit/k8s-auth"]
 
 [dependencies]
 # SDK - public API, models, and errors
 cf-gears-file-storage-sdk = { path = "../file-storage-sdk" }
 
-# Authorization Service (PEP) — per-type access decisions
-cf-gears-authz-resolver-sdk = { path = "../../system/authz-resolver/authz-resolver-sdk" }
-authz-resolver = { workspace = true }
+# Consumed via `#[toolkit::consumes]`; rest-client for the resolving client.
+cf-gears-authz-resolver-sdk = { path = "../../system/authz-resolver/authz-resolver-sdk", features = [
+    "rest-client",
+] }
 
 # Core dependencies
 anyhow = { workspace = true }
@@ -103,6 +119,12 @@ toolkit-canonical-errors = { workspace = true, features = ["axum", "utoipa"] }
 toolkit-macros = { workspace = true }
 toolkit-gts = { workspace = true }
 gts = { workspace = true }
+
+# OoP-only, gated behind `oop_module`.
+clap = { workspace = true, optional = true }
+authn-resolver = { package = "cf-gears-authn-resolver", path = "../../system/authn-resolver/authn-resolver", optional = true }
+static-authn-plugin = { package = "cf-gears-static-authn-plugin", path = "../../system/authn-resolver/plugins/static-authn-plugin", optional = true }
+types-registry = { package = "cf-gears-types-registry", path = "../../system/types-registry/types-registry", optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

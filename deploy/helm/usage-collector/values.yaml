@@ -1,0 +1,136 @@
+# Default values for the usage-collector (OoP gear) chart.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/cyberfabric/usage-collector
+  tag: "dev"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  automount: true
+  annotations: {}
+
+command: ["/app/gear"]
+args: ["--config", "/app/config/gear.yaml"]
+
+service:
+  type: ClusterIP
+  # OoP REST + probes port (matches oop_http.listen_addr).
+  port: 9096
+
+grpc:
+  enabled: false
+  port: 50051
+
+# DirectoryService (platform-host grpc-hub) this gear registers with and uses to
+# resolve the remote authz-resolver. Injected as TOOLKIT_DIRECTORY_ENDPOINT.
+directoryEndpoint: "http://platform-host:50051"
+
+# SA-token projection for platform-plane auth (mounted; used when
+# oop_http.internal_auth is configured).
+saToken:
+  enabled: true
+  audience: toolkit-internal
+  mountPath: /var/run/secrets/tokens/toolkit-internal
+  fileName: token
+  expirationSeconds: 3600
+
+probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 3
+    periodSeconds: 5
+    # Generous: the gear waits for the platform-host DirectoryService + the
+    # remote authz-resolver dependency to resolve before it reports ready.
+    failureThreshold: 30
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+podLabels: {}
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: ["ALL"]
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
+# ---------------------------------------------------------------------------
+# Gear config mounted at /app/config/gear.yaml (rendered with `tpl`, so Helm
+# template expressions below are evaluated).
+#
+#   * The gear binds 0.0.0.0:9096 and advertises its in-cluster Service DNS so
+#     the api-gateway edge (in the platform-host pod) can reverse-proxy to it.
+#   * No database — durable catalog rows live in the bound storage-plugin
+#     backend (ADR-0012). This chart embeds the dev/demo no-op plugin; swap
+#     for a real backend plugin in production.
+#   * The embedded authn stack (authn-resolver + static-authn-plugin) validates
+#     tenant-plane bearer tokens locally; authz-resolver is resolved remotely.
+# ---------------------------------------------------------------------------
+config:
+  mountPath: /app/config/gear.yaml
+  fileName: gear.yaml
+  content: |
+    server:
+      home_dir: "/app/data"
+
+    logging:
+      default:
+        console_format: "json"
+        console_level: info
+
+    oop_http:
+      listen_addr: "0.0.0.0:9096"
+      advertise_uri: "http://{{ include "toolkit-common.fullname" . }}:9096"
+      internal_auth:
+        provider: kube
+        audiences: ["toolkit-internal"]
+        token_path: /var/run/secrets/tokens/toolkit-internal/token
+
+    gears:
+      usage-collector:
+        config:
+          vendor: "cyberfabric"
+
+      noop-usage-collector-plugin:
+        config:
+          vendor: "cyberfabric"
+          priority: 100
+
+      authn-resolver:
+        config:
+          vendor: "constructorfabric"
+
+      static-authn-plugin:
+        config:
+          vendor: "constructorfabric"
+          priority: 100
+          mode: accept_all
+
+      types-registry:
+        config: {}

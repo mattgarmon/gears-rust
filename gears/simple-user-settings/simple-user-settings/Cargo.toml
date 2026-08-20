@@ -17,12 +17,31 @@ name = "simple_user_settings"
 [lints]
 workspace = true
 
+[features]
+default = []
+# OoP binary (simple-user-settings-oop): bootstrap + embedded authn stack.
+oop_module = [
+    "dep:clap",
+    "toolkit/bootstrap",
+    "dep:authn-resolver",
+    "dep:static-authn-plugin",
+    "dep:types-registry",
+]
+# Kubernetes TokenReview platform-plane auth.
+k8s-auth = ["toolkit/k8s-auth"]
+
+[[bin]]
+name = "simple-user-settings-oop"
+path = "src/main.rs"
+required-features = ["oop_module"]
+
 [dependencies]
 simple-user-settings-sdk = { package = "cf-gears-simple-user-settings-sdk", version = "0.1.0", path = "../simple-user-settings-sdk" }
 
-# AuthZ resolver for authorization (PEP flow)
-authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", path = "../../../gears/system/authz-resolver/authz-resolver-sdk" }
-authz-resolver = { workspace = true }
+# Consumed via `#[toolkit::consumes]`; rest-client for the resolving client.
+authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", path = "../../../gears/system/authz-resolver/authz-resolver-sdk", features = [
+    "rest-client",
+] }
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -40,11 +59,17 @@ sea-orm-migration = { workspace = true }
 thiserror = { workspace = true }
 
 toolkit = { workspace = true }
-toolkit-db = { workspace = true, features = ["sqlite"] }
+toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
 toolkit-db-macros = { workspace = true }
 toolkit-canonical-errors = { workspace = true, features = ["axum"] }
 toolkit-security = { workspace = true }
 toolkit-macros = { workspace = true }
+
+# OoP-only, gated behind `oop_module`.
+clap = { workspace = true, optional = true }
+authn-resolver = { package = "cf-gears-authn-resolver", path = "../../system/authn-resolver/authn-resolver", optional = true }
+static-authn-plugin = { package = "cf-gears-static-authn-plugin", path = "../../system/authn-resolver/plugins/static-authn-plugin", optional = true }
+types-registry = { package = "cf-gears-types-registry", path = "../../system/types-registry/types-registry", optional = true }
 
 [dev-dependencies]
 toolkit-gts = { workspace = true }

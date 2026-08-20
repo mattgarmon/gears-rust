@@ -1,0 +1,6 @@
+dependencies:
+- name: toolkit-common
+  repository: file://../toolkit-common
+  version: 0.1.0
+digest: sha256:ff9db7f56ce93b0fa8ad57044b54ee8e501f39b7b6ffd75f80f3f18f53e2ca59
+generated: "2026-08-19T17:04:52.787936515-07:00"

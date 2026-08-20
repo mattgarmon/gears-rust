@@ -1,0 +1,33 @@
+dependencies:
+- name: platform-host
+  repository: file://../platform-host
+  version: 0.1.0
+- name: postgres
+  repository: file://../postgres
+  version: 0.1.0
+- name: hello
+  repository: file://../hello
+  version: 0.1.0
+- name: users-info
+  repository: file://../users-info
+  version: 0.1.0
+- name: simple-user-settings
+  repository: file://../simple-user-settings
+  version: 0.1.0
+- name: file-storage
+  repository: file://../file-storage
+  version: 0.1.0
+- name: chat-engine
+  repository: file://../chat-engine
+  version: 0.1.0
+- name: usage-collector
+  repository: file://../usage-collector
+  version: 0.1.0
+- name: api-contracts
+  repository: file://../api-contracts
+  version: 0.1.0
+- name: api-contracts-consumer
+  repository: file://../api-contracts-consumer
+  version: 0.1.0
+digest: sha256:27bf3dc756ef9c9d0a329a29aef46cf5e2677bec28fcf0a5f2d32477d02934d3
+generated: "2026-08-20T13:24:36.103448017-07:00"

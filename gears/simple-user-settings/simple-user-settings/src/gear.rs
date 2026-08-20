@@ -8,7 +8,7 @@ use toolkit_db::DBProvider;
 use toolkit_db::DbError;
 use tracing::info;
 
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::PolicyEnforcer;
 
 use simple_user_settings_sdk::SimpleUserSettingsClientV1;
 
@@ -23,9 +23,9 @@ type ConcreteService = Service<SeaOrmSettingsRepository>;
 
 #[toolkit::gear(
     name = "simple-user-settings",
-    deps = [authz_resolver],
     capabilities = [rest, db]
 )]
+#[toolkit::consumes(contract = authz_resolver_sdk::AuthZResolverApi, from = "authz-resolver")]
 pub struct SettingsGear {
     service: OnceLock<Arc<ConcreteService>>,
 }
@@ -56,12 +56,10 @@ impl Gear for SettingsGear {
         // Repository no longer stores connection - uses &impl DBRunner per-method
         let repo = Arc::new(SeaOrmSettingsRepository::new());
 
-        // Fetch AuthZ resolver from ClientHub
-        let authz = ctx
-            .client_hub()
-            .get::<dyn AuthZResolverClient>()
-            .map_err(|e| anyhow::anyhow!("failed to get AuthZ resolver: {e}"))?;
-        let policy_enforcer = PolicyEnforcer::new(authz);
+        // AuthZ resolver is consumed via `#[toolkit::consumes]`; resolved lazily
+        // by the PolicyEnforcer, so this gear works identically in-process and
+        // out-of-process.
+        let policy_enforcer = PolicyEnforcer::from_hub(ctx.client_hub());
 
         let service_config = ServiceConfig {
             max_field_length: cfg.max_field_length,

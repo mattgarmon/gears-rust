@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use authz_resolver_sdk::{
-    AuthZResolverClient, AuthZResolverError,
+    AuthZResolverClient,
     constraints::{Constraint, EqPredicate, InPredicate, Predicate},
     models::{EvaluationRequest, EvaluationResponse, EvaluationResponseContext},
 };
 use sea_orm_migration::MigratorTrait;
 use time::OffsetDateTime;
+use toolkit_canonical_errors::CanonicalError;
 use toolkit_db::migration_runner::run_migrations_for_testing;
 use toolkit_db::secure::DBRunner;
 use toolkit_db::secure::{AccessScope, secure_insert};
@@ -140,8 +141,9 @@ pub struct MockAuthZResolver;
 impl AuthZResolverClient for MockAuthZResolver {
     async fn evaluate(
         &self,
+        _ctx: SecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         // Resolve tenant: explicit context > subject property (like a real PDP)
         // Filter out nil UUIDs — they represent anonymous/unset context.
         let root_id = request
@@ -241,8 +243,9 @@ pub struct DenyAllAuthZResolver;
 impl AuthZResolverClient for DenyAllAuthZResolver {
     async fn evaluate(
         &self,
+        _ctx: SecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: false,
             context: EvaluationResponseContext::default(),
@@ -260,9 +263,10 @@ pub struct FailingAuthZResolver;
 impl AuthZResolverClient for FailingAuthZResolver {
     async fn evaluate(
         &self,
+        _ctx: SecurityContext,
         _request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
-        Err(AuthZResolverError::Internal("PDP unavailable".to_owned()))
+    ) -> Result<EvaluationResponse, CanonicalError> {
+        Err(CanonicalError::internal("PDP unavailable").create())
     }
 }
 
@@ -284,8 +288,9 @@ pub struct OwnerCityAuthZResolver;
 impl AuthZResolverClient for OwnerCityAuthZResolver {
     async fn evaluate(
         &self,
+        _ctx: SecurityContext,
         request: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         if !request.context.require_constraints {
             return Ok(EvaluationResponse {
                 decision: true,

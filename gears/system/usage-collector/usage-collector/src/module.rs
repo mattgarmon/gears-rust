@@ -3,9 +3,8 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use anyhow::Context;
 use async_trait::async_trait;
-use authz_resolver_sdk::{AuthZResolverClient, PolicyEnforcer};
+use authz_resolver_sdk::PolicyEnforcer;
 use tokio_util::sync::CancellationToken;
 use toolkit::api::OpenApiRegistry;
 use toolkit::{Gear, GearCtx, RestApiCapability};
@@ -40,13 +39,20 @@ use crate::domain::{Service, UsageCollectorLocalClient};
 ///
 /// The `UsageCollectorPluginSpecV1` schema itself reaches `types-registry`
 /// automatically via the `toolkit-gts` link-time inventory — no per-init
-/// registration is needed.
+/// registration is needed. `types-registry` is still a hard compile-time
+/// `deps` entry: it has no REST contract (so it cannot be consumed via
+/// `#[toolkit::consumes]`) and the domain [`Service`] resolves a
+/// `dyn TypesRegistryClient` from the `ClientHub` at call time for lazy
+/// storage-plugin discovery — this only works because `types-registry` is
+/// always embedded in-process (including in every OoP binary, alongside the
+/// tenant-plane authn stack it also backs).
 #[toolkit::gear(
     name = "usage-collector",
-    deps = [types_registry, authz_resolver],
+    deps = [types_registry],
     capabilities = [rest, stateful],
     lifecycle(entry = "serve", stop_timeout = "30s")
 )]
+#[toolkit::consumes(contract = authz_resolver_sdk::AuthZResolverApi, from = "authz-resolver")]
 #[derive(Default)]
 pub struct UsageCollectorModule {
     service: OnceLock<Arc<Service>>,
@@ -68,18 +74,15 @@ impl Gear for UsageCollectorModule {
         tracing::Span::current().record("vendor", cfg.vendor.as_str());
         info!(vendor = %cfg.vendor);
 
-        // 2. PEP boundary — resolve the PDP (`authz-resolver`) hard dependency
-        //    from ClientHub. The collector fails init if no resolver client is
-        //    registered; it never serves a permissive or local authorization
-        //    decision per
+        // 2. PEP boundary — the PDP (`authz-resolver`) is consumed via
+        //    `#[toolkit::consumes]` and resolved lazily by the
+        //    `PolicyEnforcer`, so this gear works identically in-process and
+        //    out-of-process. It never serves a permissive or local
+        //    authorization decision per
         //    `cpt-cf-usage-collector-principle-pdp-centric-authorization`.
         // @cpt-dod:cpt-cf-usage-collector-dod-foundation-adr-pdp-centric-authorization:p2
         // @cpt-dod:cpt-cf-usage-collector-dod-foundation-principle-fail-closed:p2
-        let authz: Arc<dyn AuthZResolverClient> = ctx
-            .client_hub()
-            .get::<dyn AuthZResolverClient>()
-            .with_context(|| format!("{} requires an authz-resolver client", Self::MODULE_NAME))?;
-        let enforcer = PolicyEnforcer::new(authz);
+        let enforcer = PolicyEnforcer::from_hub(ctx.client_hub());
         info!(module = Self::MODULE_NAME, "authz-resolver wired");
 
         // 2b. Observability substrate — declare the operational instruments on

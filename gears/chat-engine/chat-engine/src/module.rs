@@ -44,7 +44,6 @@ use toolkit::{DatabaseCapability, Gear, GearCtx, RestApiCapability};
 use toolkit_db::DBProvider;
 use tracing::{error, info, warn};
 
-use authz_resolver_sdk::AuthZResolverClient;
 use authz_resolver_sdk::pep::PolicyEnforcer;
 
 use crate::infra::db::repo::ChatEngineDb;
@@ -108,12 +107,12 @@ const STREAM_BUFFER_SWEEP_PERIOD: Duration = Duration::from_mins(5);
 /// `GearCtx` is available.
 #[toolkit::gear(
     name = "chat-engine",
-    deps = [authz_resolver],
     capabilities = [db, rest, stateful],
     client = chat_engine_sdk::ChatEngineBackendPlugin,
     ctor = ChatEngineModule::new(),
     lifecycle(entry = "serve", stop_timeout = "30s", await_ready)
 )]
+#[toolkit::consumes(contract = authz_resolver_sdk::AuthZResolverApi, from = "authz-resolver")]
 pub struct ChatEngineModule {
     runtime: OnceLock<RuntimeState>,
 }
@@ -348,12 +347,10 @@ impl Gear for ChatEngineModule {
         let client_hub = ctx.client_hub();
 
         // @cpt-cf-chat-engine-component-policy-enforcer
-        // Resolve the AuthZ PDP client and build a single PolicyEnforcer Arc-cloned into
+        // AuthZ resolver is consumed via `#[toolkit::consumes]`; a single
+        // PolicyEnforcer (resolved lazily from the hub) is Arc-cloned into
         // every domain service. No service constructs AccessScope manually.
-        let authz: Arc<dyn AuthZResolverClient> = client_hub
-            .get::<dyn AuthZResolverClient>()
-            .map_err(|e| anyhow::anyhow!("chat-engine: failed to resolve AuthZ client: {e}"))?;
-        let enforcer = PolicyEnforcer::new(authz);
+        let enforcer = PolicyEnforcer::from_hub(client_hub.clone());
         let webhook_compat = Arc::new(
             WebhookCompatPlugin::new(DEFAULT_WEBHOOK_COMPAT_INSTANCE_ID)
                 .map_err(|e| anyhow::anyhow!("failed to build webhook-compat plugin: {e}"))?,

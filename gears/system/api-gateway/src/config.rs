@@ -22,6 +22,16 @@ fn default_gateway_sync_interval_secs() -> u64 {
 #[allow(clippy::struct_excessive_bools)]
 pub struct ApiGatewayConfig {
     pub bind_addr: String,
+
+    /// Base URL other pods use to reach this gateway's REST endpoint
+    /// (e.g. `http://platform-host:8087`). Advertised in the `DirectoryService`
+    /// for in-process REST contract providers (via `#[toolkit::provides]`) so
+    /// out-of-process consumers can resolve them. When unset, falls back to
+    /// `http://<bound_addr>` — fine for loopback/local, but in Kubernetes the
+    /// pod binds `0.0.0.0`, so set this to the Service DNS explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise_uri: Option<String>,
+
     #[serde(default)]
     pub enable_docs: bool,
     #[serde(default)]
@@ -189,6 +199,7 @@ impl Default for ApiGatewayConfig {
     fn default() -> Self {
         Self {
             bind_addr: String::default(),
+            advertise_uri: None,
             enable_docs: false,
             cors_enabled: false,
             cors: None,

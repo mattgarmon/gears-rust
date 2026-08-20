@@ -1,0 +1,142 @@
+# Dev preset: platform-host + hello OoP gear, locally-built images.
+#
+# Intended for a minikube demo where images are loaded into the node (so
+# pullPolicy: Never avoids a registry round-trip).
+#
+#   minikube image load ghcr.io/cyberfabric/platform-host:dev
+#   minikube image load ghcr.io/cyberfabric/hello:dev
+#   helm install demo deploy/helm/toolkit-platform -f deploy/helm/toolkit-platform/values-dev.yaml
+
+platform-host:
+  enabled: true
+  fullnameOverride: platform-host
+  image:
+    repository: ghcr.io/cyberfabric/platform-host
+    tag: "dev"
+    pullPolicy: Never
+  # Connect account-management/resource-group/credstore to the shared Postgres
+  # below (no local SQLite).
+  postgres:
+    host: shared-postgres
+    user: platform
+    password: "platform-demo-pw"
+    databases:
+      accountManagement: accountmanagement
+      resourceGroup: resourcegroup
+      credstore: credstore
+
+# Shared PostgreSQL (one server, a database per OoP gear). Uses the public
+# postgres:17-alpine image, so no local image load is needed.
+postgres:
+  enabled: true
+  fullnameOverride: shared-postgres
+  databases:
+    - accountmanagement
+    - resourcegroup
+    - credstore
+    - usersinfo
+    - simpleusersettings
+    - filestorage
+    - chatengine
+
+hello:
+  enabled: true
+  fullnameOverride: hello
+  image:
+    repository: ghcr.io/cyberfabric/hello
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://platform-host:50051"
+
+users-info:
+  enabled: true
+  fullnameOverride: users-info
+  image:
+    repository: ghcr.io/cyberfabric/users-info
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://platform-host:50051"
+  # Connect to the shared Postgres above (no bundled instance).
+  postgres:
+    enabled: false
+    host: shared-postgres
+    database: usersinfo
+    user: platform
+    password: "platform-demo-pw"
+
+simple-user-settings:
+  enabled: true
+  fullnameOverride: simple-user-settings
+  image:
+    repository: ghcr.io/cyberfabric/simple-user-settings
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://platform-host:50051"
+  # Connect to the shared Postgres above (no bundled instance).
+  postgres:
+    enabled: false
+    host: shared-postgres
+    database: simpleusersettings
+    user: platform
+    password: "platform-demo-pw"
+
+file-storage:
+  enabled: true
+  fullnameOverride: file-storage
+  image:
+    repository: ghcr.io/cyberfabric/file-storage
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://platform-host:50051"
+  # Connect to the shared Postgres above (no bundled instance).
+  postgres:
+    enabled: false
+    host: shared-postgres
+    database: filestorage
+    user: platform
+    password: "platform-demo-pw"
+
+chat-engine:
+  enabled: true
+  fullnameOverride: chat-engine
+  image:
+    repository: ghcr.io/cyberfabric/chat-engine
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://platform-host:50051"
+  # Connect to the shared Postgres above (no bundled instance).
+  postgres:
+    enabled: false
+    host: shared-postgres
+    database: chatengine
+    user: platform
+    password: "platform-demo-pw"
+
+usage-collector:
+  enabled: true
+  fullnameOverride: usage-collector
+  image:
+    repository: ghcr.io/cyberfabric/usage-collector
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://platform-host:50051"
+
+# OoP gear-to-gear REST demo: the consumer pod resolves the PaymentApi contract
+# from the provider pod over REST (via the DirectoryService).
+api-contracts:
+  enabled: true
+  fullnameOverride: api-contracts
+  image:
+    repository: ghcr.io/cyberfabric/api-contracts
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://platform-host:50051"
+
+api-contracts-consumer:
+  enabled: true
+  fullnameOverride: api-contracts-consumer
+  image:
+    repository: ghcr.io/cyberfabric/api-contracts-consumer
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://platform-host:50051"

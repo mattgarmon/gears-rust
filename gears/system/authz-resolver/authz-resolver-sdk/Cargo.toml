@@ -25,16 +25,47 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 secrecy = { workspace = true }
 schemars = { workspace = true }
+utoipa = { workspace = true, features = ["uuid"] }
 
 # GTS types
 gts = { workspace = true }
 toolkit-gts = { workspace = true }
 
+futures-core = { workspace = true }
+
+# GTS types (already declared above)
+
 # ToolKit dependencies
 toolkit = { workspace = true }
+toolkit-contract = { workspace = true }
+toolkit-canonical-errors = { workspace = true }
 toolkit-security = { workspace = true }
 tenant-resolver-sdk = { workspace = true }
 tracing = { workspace = true }
+
+# Direct deps emitted into the generated REST client (rest-client feature).
+toolkit-http = { workspace = true, optional = true }
+async-stream = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+
+# Direct deps emitted into generated server route registration (rest-server).
+axum = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+
+[features]
+# Generated directory-resolving REST client (`AuthZResolverClientRestClient` +
+# `...ResolvingClient`) used by out-of-process PEP consumers.
+rest-client = [
+    "toolkit-contract/rest-client",
+    "dep:toolkit-http",
+    "dep:async-stream",
+    "dep:futures-util",
+]
+# Generated server route registration (`register_..._routes`) used by the
+# authz-resolver gear to host the contract's REST surface.
+rest-server = ["toolkit-contract/rest-server", "dep:axum", "dep:http"]
+# Real OTEL propagation + client metrics in the generated REST client.
+otel = ["rest-client", "toolkit-contract/otel"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

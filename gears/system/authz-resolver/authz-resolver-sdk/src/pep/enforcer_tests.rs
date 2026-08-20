@@ -23,11 +23,12 @@ const RESOURCE: &str = "33333333-3333-3333-3333-333333333333";
 struct AllowAllMock;
 
 #[async_trait]
-impl AuthZResolverClient for AllowAllMock {
+impl AuthZResolverApi for AllowAllMock {
     async fn evaluate(
         &self,
+        _ctx: SecurityContext,
         req: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         // Resolve tenant: explicit context first, then subject fallback.
         let tenant_id = req
             .context
@@ -92,11 +93,12 @@ impl DenyMock {
 }
 
 #[async_trait]
-impl AuthZResolverClient for DenyMock {
+impl AuthZResolverApi for DenyMock {
     async fn evaluate(
         &self,
+        _ctx: SecurityContext,
         _req: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
+    ) -> Result<EvaluationResponse, CanonicalError> {
         Ok(EvaluationResponse {
             decision: false,
             context: EvaluationResponseContext {
@@ -111,12 +113,13 @@ impl AuthZResolverClient for DenyMock {
 struct FailMock;
 
 #[async_trait]
-impl AuthZResolverClient for FailMock {
+impl AuthZResolverApi for FailMock {
     async fn evaluate(
         &self,
+        _ctx: SecurityContext,
         _req: EvaluationRequest,
-    ) -> Result<EvaluationResponse, AuthZResolverError> {
-        Err(AuthZResolverError::Internal("boom".to_owned()))
+    ) -> Result<EvaluationResponse, CanonicalError> {
+        Err(CanonicalError::internal("boom").create())
     }
 }
 
@@ -133,7 +136,7 @@ const TEST_RESOURCE: ResourceType = ResourceType::from_static(
     &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
 );
 
-fn enforcer(mock: impl AuthZResolverClient + 'static) -> PolicyEnforcer {
+fn enforcer(mock: impl AuthZResolverApi + 'static) -> PolicyEnforcer {
     PolicyEnforcer::new(Arc::new(mock))
 }
 

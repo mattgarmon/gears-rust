@@ -17,8 +17,10 @@ use toolkit_security::{AccessScope, SecurityContext};
 use super::IntoPropertyValue;
 use uuid::Uuid;
 
-use crate::api::AuthZResolverClient;
-use crate::error::AuthZResolverError;
+use toolkit::client_hub::ClientHub;
+use toolkit_canonical_errors::CanonicalError;
+
+use crate::api::AuthZResolverApi;
 use crate::models::{
     Action, BarrierMode, Capability, EvaluationRequest, EvaluationRequestContext, Resource,
     Subject, TenantContext, TenantMode,
@@ -35,9 +37,9 @@ pub enum EnforcerError {
         deny_reason: Option<crate::models::DenyReason>,
     },
 
-    /// The `AuthZ` evaluation RPC failed.
+    /// The `AuthZ` evaluation RPC failed (transport/infrastructure error).
     #[error("authorization evaluation failed: {0}")]
-    EvaluationFailed(#[from] AuthZResolverError),
+    EvaluationFailed(#[from] CanonicalError),
 
     /// Constraint compilation failed (missing or unsupported constraints).
     #[error("constraint compilation failed: {0}")]
@@ -242,18 +244,61 @@ impl ResourceType {
 /// let scope = enforcer.access_scope(&ctx, &USER, "get", Some(id)).await?;
 /// let scope = enforcer.access_scope(&ctx, &USER, "create", None).await?;
 /// ```
+/// How the enforcer obtains its `AuthZResolverApi` client.
+///
+/// - `Eager` — a concrete client supplied up front (in-process, tests).
+/// - `Lazy` — resolved from the `ClientHub` at call time. This is what makes a
+///   PEP work out-of-process: the consumed client (registered by the runtime's
+///   proxy-wiring phase, which runs *after* gear `init`) is not available when
+///   the gear builds its services, but it *is* available by the time a request
+///   is served.
+#[derive(Clone)]
+enum AuthzSource {
+    Eager(Arc<dyn AuthZResolverApi>),
+    Lazy(Arc<ClientHub>),
+}
+
 #[derive(Clone)]
 pub struct PolicyEnforcer {
-    authz: Arc<dyn AuthZResolverClient>,
+    authz: AuthzSource,
     capabilities: Vec<Capability>,
 }
 
 impl PolicyEnforcer {
-    /// Create a new enforcer.
-    pub fn new(authz: Arc<dyn AuthZResolverClient>) -> Self {
+    /// Create a new enforcer from a concrete client (in-process / tests).
+    pub fn new(authz: Arc<dyn AuthZResolverApi>) -> Self {
         Self {
-            authz,
+            authz: AuthzSource::Eager(authz),
             capabilities: Vec::new(),
+        }
+    }
+
+    /// Create an enforcer that resolves its `AuthZResolverApi` client lazily
+    /// from the `ClientHub` on each call.
+    ///
+    /// Use this in gears that consume the contract via
+    /// `#[toolkit::consumes(contract = AuthZResolverApi, from = "authz-resolver")]`:
+    /// the client is wired by the proxy-wiring phase after `init`, so eager
+    /// resolution in `init` would fail. Works transparently in-process too (the
+    /// local provider registers the same `dyn AuthZResolverApi`).
+    #[must_use]
+    pub fn from_hub(hub: Arc<ClientHub>) -> Self {
+        Self {
+            authz: AuthzSource::Lazy(hub),
+            capabilities: Vec::new(),
+        }
+    }
+
+    /// Resolve the concrete client, either directly (eager) or from the hub
+    /// (lazy). Returns a transport-level `CanonicalError` if a lazily-consumed
+    /// client is not yet registered.
+    fn resolve_authz(&self) -> Result<Arc<dyn AuthZResolverApi>, CanonicalError> {
+        match &self.authz {
+            AuthzSource::Eager(authz) => Ok(Arc::clone(authz)),
+            AuthzSource::Lazy(hub) => hub.get::<dyn AuthZResolverApi>().map_err(|e| {
+                CanonicalError::internal(format!("authz-resolver client not available: {e}"))
+                    .create()
+            }),
         }
     }
 
@@ -391,7 +436,8 @@ impl PolicyEnforcer {
         let require = request.require_constraints.unwrap_or(true);
         let eval_request =
             self.build_request_with(ctx, resource, action, resource_id, require, request);
-        let response = self.authz.evaluate(eval_request).await?;
+        let authz = self.resolve_authz()?;
+        let response = authz.evaluate(ctx.clone(), eval_request).await?;
 
         // Check decision first: if denied, return error immediately
         // without attempting constraint compilation.

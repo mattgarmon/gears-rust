@@ -17,12 +17,36 @@ name = "usage_collector"
 [lints]
 workspace = true
 
+[features]
+default = []
+# OoP binary (usage-collector-oop): bootstrap, no-op storage plugin, embedded
+# authn stack. `types-registry` is already a hard dep below, so not repeated.
+oop_module = [
+    "dep:clap",
+    "toolkit/bootstrap",
+    "dep:authn-resolver",
+    "dep:static-authn-plugin",
+    "dep:noop-usage-collector-plugin",
+]
+# Kubernetes TokenReview platform-plane auth.
+k8s-auth = ["toolkit/k8s-auth"]
+
+[[bin]]
+name = "usage-collector-oop"
+path = "src/main.rs"
+required-features = ["oop_module"]
+
 [dependencies]
 usage-collector-sdk = { workspace = true }
+# `types-registry` has no REST contract, so unlike authz-resolver it cannot be
+# consumed via `#[toolkit::consumes]` — it stays a hard `deps=[types_registry]`
+# link (see module.rs doc comment): resolved as `dyn TypesRegistryClient` from
+# the ClientHub at call time for lazy storage-plugin discovery, which only
+# works because types-registry is always embedded in-process.
 types-registry-sdk = { workspace = true }
 types-registry = { workspace = true }
-authz-resolver-sdk = { workspace = true }
-authz-resolver = { workspace = true }
+# Consumed via `#[toolkit::consumes]`; rest-client for the resolving client.
+authz-resolver-sdk = { workspace = true, features = ["rest-client"] }
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }
@@ -61,6 +85,12 @@ toolkit-gts = { workspace = true }
 # cannot be resolved.
 gts = { workspace = true }
 inventory = { workspace = true }
+
+# OoP-only, gated behind `oop_module`.
+clap = { workspace = true, optional = true }
+noop-usage-collector-plugin = { package = "cf-gears-noop-usage-collector-plugin", path = "../plugins/noop-usage-collector-plugin", optional = true }
+authn-resolver = { package = "cf-gears-authn-resolver", path = "../../authn-resolver/authn-resolver", optional = true }
+static-authn-plugin = { package = "cf-gears-static-authn-plugin", path = "../../authn-resolver/plugins/static-authn-plugin", optional = true }
 
 [dev-dependencies]
 types-registry-sdk = { workspace = true, features = ["test-util"] }

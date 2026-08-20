@@ -20,14 +20,21 @@ workspace = true
 [dependencies]
 # Trait boundaries of consumed SDKs are `CanonicalError` (ADR 0005).
 toolkit-canonical-errors = { workspace = true }
-# Local dependencies
-authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", version = "0.3.20", path = "../authz-resolver-sdk" }
+# Local dependencies. `rest-server` provides `register_..._rest_routes` for the
+# hosted evaluate route; `rest-client` is pulled in because the generated
+# `#[toolkit::provides]` wiring names the resolving REST client type.
+authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", version = "0.3.20", path = "../authz-resolver-sdk", features = [
+    "rest-client",
+    "rest-server",
+] }
 types-registry-sdk = { package = "cf-gears-types-registry-sdk", version = "0.3.5", path = "../../types-registry/types-registry-sdk" }
 types-registry = { workspace = true }
 
 # ToolKit dependencies
 toolkit = { workspace = true }
 toolkit-macros = { workspace = true }
+toolkit-contract = { workspace = true, features = ["runtime-client", "rest-server"] }
+toolkit-security = { workspace = true }
 
 # Async runtime
 async-trait = { workspace = true }
@@ -37,6 +44,13 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# REST server route registration (generated code paths).
+axum = { workspace = true }
+http = { workspace = true }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
+async-stream = { workspace = true }
 
 # Required by toolkit::gear macro
 inventory = { workspace = true }

@@ -26,6 +26,21 @@ default = []
 # Off by default → single-process noop elector; enable in multi-replica
 # Kubernetes deployments so only one replica runs the per-tenant sweep.
 k8s = ["dep:kube", "dep:k8s-openapi"]
+# OoP binary (chat-engine-oop): bootstrap + embedded authn stack.
+oop_module = [
+    "dep:clap",
+    "toolkit/bootstrap",
+    "dep:authn-resolver",
+    "dep:static-authn-plugin",
+    "dep:types-registry",
+]
+# Kubernetes TokenReview platform-plane auth (distinct from `k8s` above).
+k8s-auth = ["toolkit/k8s-auth"]
+
+[[bin]]
+name = "chat-engine-oop"
+path = "src/main.rs"
+required-features = ["oop_module"]
 
 [dependencies]
 chat-engine-sdk = { package = "cf-chat-engine-sdk", version = "0.1.0", path = "../chat-engine-sdk" }
@@ -60,10 +75,8 @@ reqwest = { workspace = true, features = ["json"] }
 bytes = { workspace = true }
 url = { workspace = true }
 
-authz-resolver-sdk = { workspace = true }
-# The gear crate itself is referenced by `#[toolkit::gear(deps = [authz_resolver])]`
-# (init-ordering dependency); the macro expands to a path into this crate.
-authz-resolver = { workspace = true }
+# Consumed via `#[toolkit::consumes]`; rest-client for the resolving client.
+authz-resolver-sdk = { workspace = true, features = ["rest-client"] }
 
 toolkit = { workspace = true }
 toolkit-db = { workspace = true, features = ["sqlite", "pg"] }
@@ -78,6 +91,12 @@ toolkit-odata-macros = { workspace = true }
 # k8s leader election (optional, behind the `k8s` feature)
 kube = { workspace = true, features = ["client", "rustls-tls", "aws-lc-rs"], optional = true }
 k8s-openapi = { workspace = true, features = ["latest"], optional = true }
+
+# OoP-only, gated behind `oop_module`.
+clap = { workspace = true, optional = true }
+authn-resolver = { package = "cf-gears-authn-resolver", path = "../../system/authn-resolver/authn-resolver", optional = true }
+static-authn-plugin = { package = "cf-gears-static-authn-plugin", path = "../../system/authn-resolver/plugins/static-authn-plugin", optional = true }
+types-registry = { package = "cf-gears-types-registry", path = "../../system/types-registry/types-registry", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

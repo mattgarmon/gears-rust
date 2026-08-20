@@ -50,8 +50,23 @@ pub mod models;
 pub mod pep;
 pub mod plugin_api;
 
-// Re-export main types at crate root
-pub use api::AuthZResolverClient;
+/// REST projection of the [`AuthZResolverClient`] contract (HTTP transport).
+///
+/// The base contract in [`api`] is transport-agnostic; this module carries the
+/// HTTP method/path annotations consumed by `#[toolkit::rest_contract]` and,
+/// under `rest-client`, emits the generated directory-resolving REST client
+/// used by out-of-process PEP consumers.
+pub mod rest;
+
+// Re-export the contract trait and its generated IR builder. The trait name
+// must carry the `Api` suffix (contract-kind convention); `AuthZResolverClient`
+// is kept as a backwards-compatible alias for existing in-process consumers.
+#[doc(hidden)]
+pub use api::AuthZResolverApi as AuthZResolverClient;
+pub use api::{AuthZResolverApi, auth_z_resolver_api_ir};
+
+// REST projection: base projection trait + HTTP binding builder (always), plus
+// the generated clients when `rest-client` is enabled.
 pub use constraints::{
     Constraint, EqPredicate, InGroupPredicate, InGroupSubtreePredicate, InPredicate,
     InTenantSubtreePredicate, Predicate,
@@ -64,3 +79,6 @@ pub use models::{
 };
 pub use pep::{AccessRequest, EnforcerError, IntoPropertyValue, PolicyEnforcer, ResourceType};
 pub use plugin_api::AuthZResolverPluginClient;
+pub use rest::{AuthZResolverApiRest, auth_z_resolver_api_rest_http_binding};
+#[cfg(feature = "rest-client")]
+pub use rest::{AuthZResolverApiRestClient, AuthZResolverApiRestResolvingClient};

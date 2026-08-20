@@ -1,0 +1,58 @@
+# Local multi-process demo: usage-collector OoP gear (authenticated, no DB —
+# durable rows live in the bound storage plugin's own backend per ADR-0012).
+#
+# Run (after the host is up):
+#   TOOLKIT_DIRECTORY_ENDPOINT=http://127.0.0.1:50051 \
+#     cargo run -p usage-collector-oop --bin usage-collector-oop -- --config config/demo-usage-collector.yaml
+#
+# Then (bearer required — any non-empty token is accepted by static-authn
+# accept_all and mapped to the platform-root tenant):
+#   curl -H 'Authorization: Bearer demo' http://127.0.0.1:8087/usage-collector/v1/usage-types   # via edge
+#   curl -H 'Authorization: Bearer demo' http://127.0.0.1:9096/usage-collector/v1/usage-types   # direct
+#
+# The pod authenticates the bearer locally (embedded authn stack), then calls
+# the platform-host's authz-resolver over REST (resolved via DirectoryService)
+# for every PEP check. The catalog itself is served by the embedded no-op
+# storage-plugin backend (dev/demo only — persists nothing).
+
+server:
+  home_dir: "~/.cf-gears-demo-usage-collector"
+
+logging:
+  default:
+    console_level: info
+    file: "logs/demo-usage-collector.log"
+    file_level: info
+
+# OoP HTTP serving lifecycle: bind a local REST server + register its endpoint
+# with the DirectoryService so the edge can proxy to it.
+oop_http:
+  listen_addr: "127.0.0.1:9096"
+  advertise_uri: "http://127.0.0.1:9096"
+  allow_loopback_advertise: true
+
+gears:
+  # Target gear: no db capability (storage is plugin-owned per ADR-0012).
+  usage-collector:
+    config:
+      vendor: "cyberfabric"
+
+  # No-op storage-plugin backend (dev/demo only).
+  noop-usage-collector-plugin:
+    config:
+      vendor: "cyberfabric"
+      priority: 100
+
+  # Embedded tenant-plane authn stack (in-memory; no DB).
+  authn-resolver:
+    config:
+      vendor: "constructorfabric"
+
+  static-authn-plugin:
+    config:
+      vendor: "constructorfabric"
+      priority: 100
+      mode: accept_all
+
+  types-registry:
+    config: {}
