@@ -172,9 +172,7 @@ impl RestApiCapability for RestOnlyGear {
 
 #[derive(Default)]
 #[gear(name = "rest-host", capabilities = [rest_host])]
-struct TestApiGatewayGear {
-    registry: TestOpenApiRegistry,
-}
+struct TestApiGatewayGear;
 
 #[async_trait]
 impl Gear for TestApiGatewayGear {
@@ -197,13 +195,10 @@ impl ApiGatewayCapability for TestApiGatewayGear {
         &self,
         _ctx: &toolkit::context::GearCtx,
         router: axum::Router,
+        _openapi: &toolkit::api::OpenApiRegistryImpl,
         _hc_registry: std::sync::Arc<toolkit::RestHealthcheckRegistry>,
     ) -> anyhow::Result<axum::Router> {
         Ok(router)
-    }
-
-    fn as_registry(&self) -> &dyn OpenApiRegistry {
-        &self.registry
     }
 }
 

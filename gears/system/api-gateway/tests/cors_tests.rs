@@ -136,11 +136,12 @@ async fn test_cors_layer_builds_with_config() {
     let api_gateway = api_gateway::ApiGateway::default();
     let ctx = create_test_gear_ctx_with_cors();
     api_gateway.init(&ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let gear = CorsTestGear;
     let router = Router::new();
     let router = gear
-        .register_rest(&ctx, router, &api_gateway)
+        .register_rest(&ctx, router, &openapi)
         .expect("Failed to register routes");
 
     // Build the final router with CORS middleware
@@ -148,6 +149,7 @@ async fn test_cors_layer_builds_with_config() {
         .rest_finalize(
             &ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize router");
@@ -161,17 +163,19 @@ async fn test_cors_permissive_mode() {
     let api_gateway = api_gateway::ApiGateway::default();
     let ctx = create_test_gear_ctx_permissive_cors();
     api_gateway.init(&ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let gear = CorsTestGear;
     let router = Router::new();
     let router = gear
-        .register_rest(&ctx, router, &api_gateway)
+        .register_rest(&ctx, router, &openapi)
         .expect("Failed to register routes");
 
     let _final_router = api_gateway
         .rest_finalize(
             &ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize router");
@@ -199,17 +203,19 @@ async fn test_cors_disabled() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let gear = CorsTestGear;
     let router = Router::new();
     let router = gear
-        .register_rest(&ctx, router, &api_gateway)
+        .register_rest(&ctx, router, &openapi)
         .expect("Failed to register routes");
 
     let _final_router = api_gateway
         .rest_finalize(
             &ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize router");
@@ -232,15 +238,17 @@ async fn test_cors_default_exposes_etag_header() {
     let api_gateway = api_gateway::ApiGateway::default();
     let ctx = create_test_gear_ctx_permissive_cors();
     api_gateway.init(&ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let gear = CorsTestGear;
     let router = gear
-        .register_rest(&ctx, Router::new(), &api_gateway)
+        .register_rest(&ctx, Router::new(), &openapi)
         .expect("Failed to register routes");
     let app = api_gateway
         .rest_finalize(
             &ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize router");
@@ -301,15 +309,17 @@ async fn test_cors_configured_exposed_headers_reach_response() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let gear = CorsTestGear;
     let router = gear
-        .register_rest(&ctx, Router::new(), &api_gateway)
+        .register_rest(&ctx, Router::new(), &openapi)
         .expect("Failed to register routes");
     let app = api_gateway
         .rest_finalize(
             &ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize router");

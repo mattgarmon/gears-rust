@@ -54,7 +54,6 @@ const PROVIDER_GEAR: &str = "api-contracts";
 // directory-register phases of `run_gear_phases` expect a gateway host.
 
 struct MockGateway {
-    openapi: OpenApiRegistryImpl,
     final_router: Mutex<Option<Router>>,
     bound: Mutex<Option<String>>,
 }
@@ -62,7 +61,6 @@ struct MockGateway {
 impl MockGateway {
     fn new() -> Self {
         Self {
-            openapi: OpenApiRegistryImpl::new(),
             final_router: Mutex::new(None),
             bound: Mutex::new(None),
         }
@@ -90,14 +88,11 @@ impl ApiGatewayCapability for MockGateway {
         &self,
         _ctx: &GearCtx,
         router: Router,
+        _openapi: &OpenApiRegistryImpl,
         _hc_registry: std::sync::Arc<toolkit::RestHealthcheckRegistry>,
     ) -> anyhow::Result<Router> {
         *self.final_router.lock() = Some(router.clone());
         Ok(router)
-    }
-
-    fn as_registry(&self) -> &dyn OpenApiRegistry {
-        &self.openapi
     }
 
     fn bound_endpoint(&self) -> Option<String> {

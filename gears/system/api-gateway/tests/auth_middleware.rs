@@ -218,12 +218,13 @@ async fn test_auth_disabled_mode() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&api_ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     // Register test gear
     let router = Router::new();
     let test_gear = TestAuthGear;
     let router = test_gear
-        .register_rest(&test_ctx, router, &api_gateway)
+        .register_rest(&test_ctx, router, &openapi)
         .expect("Failed to register routes");
 
     // Finalize router (applies middleware)
@@ -231,6 +232,7 @@ async fn test_auth_disabled_mode() {
         .rest_finalize(
             &api_ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize");
@@ -290,6 +292,7 @@ async fn test_public_routes_accessible() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&api_ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     // First call rest_prepare to add built-in routes
     let router = Router::new();
@@ -304,7 +307,7 @@ async fn test_public_routes_accessible() {
     // Then register test gear routes
     let test_gear = TestAuthGear;
     let router = test_gear
-        .register_rest(&test_ctx, router, &api_gateway)
+        .register_rest(&test_ctx, router, &openapi)
         .expect("Failed to register routes");
 
     // Finally finalize
@@ -312,6 +315,7 @@ async fn test_public_routes_accessible() {
         .rest_finalize(
             &api_ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize");
@@ -354,6 +358,7 @@ async fn test_public_routes_with_prefix_accessible() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&api_ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     // First call rest_prepare to add built-in routes
     let router = Router::new();
@@ -368,7 +373,7 @@ async fn test_public_routes_with_prefix_accessible() {
     // Then register test gear routes
     let test_gear = TestAuthGear;
     let router = test_gear
-        .register_rest(&test_ctx, router, &api_gateway)
+        .register_rest(&test_ctx, router, &openapi)
         .expect("Failed to register routes");
 
     // Finally finalize
@@ -376,6 +381,7 @@ async fn test_public_routes_with_prefix_accessible() {
         .rest_finalize(
             &api_ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize");
@@ -435,17 +441,19 @@ async fn test_middleware_always_inserts_security_ctx() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&api_ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let mut router: Router = Router::new();
     let test_gear = TestAuthGear;
     router = test_gear
-        .register_rest(&test_ctx, router, &api_gateway)
+        .register_rest(&test_ctx, router, &openapi)
         .expect("Failed to register routes");
 
     let router = api_gateway
         .rest_finalize(
             &api_ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize");
@@ -488,16 +496,17 @@ async fn test_openapi_includes_security_metadata() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&api_ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let router = Router::new();
     let test_gear = TestAuthGear;
     let _router = test_gear
-        .register_rest(&test_ctx, router, &api_gateway)
+        .register_rest(&test_ctx, router, &openapi)
         .expect("Failed to register routes");
 
     // Build OpenAPI spec
     let openapi = api_gateway
-        .build_openapi()
+        .build_openapi(&openapi)
         .expect("Failed to build OpenAPI");
     let spec = serde_json::to_value(&openapi).expect("Failed to serialize");
 
@@ -550,17 +559,19 @@ async fn test_route_pattern_matching_with_path_params() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&api_ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let mut router = Router::new();
     let test_gear = TestAuthGear;
     router = test_gear
-        .register_rest(&test_ctx, router, &api_gateway)
+        .register_rest(&test_ctx, router, &openapi)
         .expect("Failed to register routes");
 
     let router = api_gateway
         .rest_finalize(
             &api_ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize");
@@ -622,17 +633,19 @@ async fn test_route_pattern_matching_with_prefix_path_params() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&api_ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let mut router = Router::new();
     let test_gear = TestAuthGear;
     router = test_gear
-        .register_rest(&test_ctx, router, &api_gateway)
+        .register_rest(&test_ctx, router, &openapi)
         .expect("Failed to register routes");
 
     let router = api_gateway
         .rest_finalize(
             &api_ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize");
@@ -765,17 +778,19 @@ async fn create_router(config: serde_json::Value, mock: MockAuthNResolverClient)
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&api_ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let mut router = Router::new();
     let test_gear = TestAuthEnabledGear;
     router = test_gear
-        .register_rest(&test_ctx, router, &api_gateway)
+        .register_rest(&test_ctx, router, &openapi)
         .expect("Failed to register routes");
 
     api_gateway
         .rest_finalize(
             &api_ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize")

@@ -1085,12 +1085,10 @@ mod tests {
             &self,
             _ctx: &crate::context::GearCtx,
             router: axum::Router,
+            _openapi: &crate::api::OpenApiRegistryImpl,
             _hc_registry: std::sync::Arc<crate::healthcheck::RestHealthcheckRegistry>,
         ) -> anyhow::Result<axum::Router> {
             Ok(router)
-        }
-        fn as_registry(&self) -> &dyn crate::contracts::OpenApiRegistry {
-            panic!("DummyRestHost::as_registry should not be called in tests")
         }
     }
 }

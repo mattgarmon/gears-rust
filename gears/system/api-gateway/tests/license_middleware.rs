@@ -149,17 +149,19 @@ async fn rejects_non_base_feature_requirement() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&api_ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let mut router = Router::new();
     let test_gear = TestLicenseGear;
     router = test_gear
-        .register_rest(&test_ctx, router, &api_gateway)
+        .register_rest(&test_ctx, router, &openapi)
         .expect("Failed to register routes");
 
     router = api_gateway
         .rest_finalize(
             &api_ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize");
@@ -210,17 +212,19 @@ async fn rejects_non_base_feature_requirement_with_prefix() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&api_ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let mut router = Router::new();
     let test_gear = TestLicenseGear;
     router = test_gear
-        .register_rest(&test_ctx, router, &api_gateway)
+        .register_rest(&test_ctx, router, &openapi)
         .expect("Failed to register routes");
 
     router = api_gateway
         .rest_finalize(
             &api_ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize");
@@ -269,17 +273,19 @@ async fn allows_base_feature_requirement() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&api_ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let router = Router::new();
     let test_gear = TestLicenseGear;
     let router = test_gear
-        .register_rest(&test_ctx, router, &api_gateway)
+        .register_rest(&test_ctx, router, &openapi)
         .expect("Failed to register routes");
 
     let router = api_gateway
         .rest_finalize(
             &api_ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize");
@@ -316,17 +322,19 @@ async fn allows_base_feature_requirement_with_prefix() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&api_ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let router = Router::new();
     let test_gear = TestLicenseGear;
     let router = test_gear
-        .register_rest(&test_ctx, router, &api_gateway)
+        .register_rest(&test_ctx, router, &openapi)
         .expect("Failed to register routes");
 
     let router = api_gateway
         .rest_finalize(
             &api_ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize");
@@ -362,17 +370,19 @@ async fn allows_no_license_requirement() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&api_ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let mut router = Router::new();
     let test_gear = TestLicenseGear;
     router = test_gear
-        .register_rest(&test_ctx, router, &api_gateway)
+        .register_rest(&test_ctx, router, &openapi)
         .expect("Failed to register routes");
 
     let router = api_gateway
         .rest_finalize(
             &api_ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize");

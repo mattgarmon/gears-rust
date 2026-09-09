@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwap;
-use dashmap::DashMap;
 
 use anyhow::Result;
 use axum::error_handling::HandleErrorLayer;
@@ -17,7 +16,7 @@ use parking_lot::Mutex;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use toolkit::api::{OpenApiRegistry, OpenApiRegistryImpl};
+use toolkit::api::OpenApiRegistryImpl;
 use toolkit::lifecycle::ReadySignal;
 use tower::{BoxError, ServiceBuilder};
 use tower_http::{
@@ -72,8 +71,6 @@ use crate::web;
 pub struct ApiGateway {
     // Lock-free config using arc-swap for read-mostly access
     pub(crate) config: ArcSwap<ApiGatewayConfig>,
-    // OpenAPI registry for operations and schemas
-    pub(crate) openapi_registry: Arc<OpenApiRegistryImpl>,
     // Built router cache for zero-lock hot path access
     pub(crate) router_cache: RouterCache<axum::Router>,
     // Store the finalized router from REST phase for serving
@@ -91,10 +88,6 @@ pub struct ApiGateway {
     // `separate`/`both` mode and merged onto the main router in `main`/`both` mode. Cached
     // so repeat `health_router()`/`build_health_router()` calls are cheap.
     pub(crate) health_router: OnceLock<axum::Router>,
-
-    // Duplicate detection (per (method, path) and per handler id)
-    pub(crate) registered_routes: DashMap<(Method, String), ()>,
-    pub(crate) registered_handlers: DashMap<String, ()>,
 
     // Reverse-proxy route table (embedded edge). Populated by the directory-sync
     // task and read by the Forwarder fallback; empty/unused when
@@ -114,15 +107,12 @@ impl Default for ApiGateway {
         let default_router = Router::new();
         Self {
             config: ArcSwap::from_pointee(ApiGatewayConfig::default()),
-            openapi_registry: Arc::new(OpenApiRegistryImpl::new()),
             router_cache: RouterCache::new(default_router),
             final_router: Mutex::new(None),
             authn_client: Mutex::new(None),
             internal_authenticator: Mutex::new(None),
             healthcheck_registry: OnceLock::new(),
             health_router: OnceLock::new(),
-            registered_routes: DashMap::new(),
-            registered_handlers: DashMap::new(),
             proxy_registry: Arc::new(toolkit_gateway::ProxyRegistry::new()),
             bound_endpoint: OnceLock::new(),
         }
@@ -207,15 +197,12 @@ impl ApiGateway {
         let default_router = Router::new();
         Self {
             config: ArcSwap::from_pointee(config),
-            openapi_registry: Arc::new(OpenApiRegistryImpl::new()),
             router_cache: RouterCache::new(default_router),
             final_router: Mutex::new(None),
             authn_client: Mutex::new(None),
             internal_authenticator: Mutex::new(None),
             healthcheck_registry: OnceLock::new(),
             health_router: OnceLock::new(),
-            registered_routes: DashMap::new(),
-            registered_handlers: DashMap::new(),
             proxy_registry: Arc::new(toolkit_gateway::ProxyRegistry::new()),
             bound_endpoint: OnceLock::new(),
         }
@@ -247,7 +234,10 @@ impl ApiGateway {
     }
 
     /// Build route policy from operation specs.
-    fn build_route_policy_from_specs(&self) -> Result<auth::GatewayRoutePolicy> {
+    fn build_route_policy_from_specs(
+        &self,
+        openapi: &OpenApiRegistryImpl,
+    ) -> Result<auth::GatewayRoutePolicy> {
         let mut authenticated_routes = std::collections::HashSet::new();
         // Anonymous (no-auth) routes. This is the *auth* axis: routes here skip
         // bearer-token enforcement. It is NOT external visibility (`exposed`);
@@ -271,7 +261,7 @@ impl ApiGateway {
             }
         }
 
-        for spec in &self.openapi_registry.operation_specs {
+        for spec in &openapi.operation_specs {
             let spec = spec.value();
 
             let route_key = (spec.method.clone(), spec.path.clone());
@@ -362,9 +352,10 @@ impl ApiGateway {
         &self,
         mut router: Router,
         authn_client: Option<Arc<dyn AuthNResolverClient>>,
+        openapi: &OpenApiRegistryImpl,
     ) -> Result<Router> {
         // Build route policy once
-        let route_policy = self.build_route_policy_from_specs()?;
+        let route_policy = self.build_route_policy_from_specs(openapi)?;
 
         // IMPORTANT: `axum::Router::layer(...)` behaves like Tower layers: the **last** added layer
         // becomes the **outermost** layer and therefore runs **first** on the request path.
@@ -388,8 +379,7 @@ impl ApiGateway {
         let config = self.get_cached_config();
 
         // Collect specs once; used by MIME validation + rate limiting maps.
-        let specs: Vec<_> = self
-            .openapi_registry
+        let specs: Vec<_> = openapi
             .operation_specs
             .iter()
             .map(|e| e.value().clone())
@@ -632,7 +622,11 @@ impl ApiGateway {
             router = self.mount_proxy_fallback(router)?;
         }
 
-        let router = self.apply_middleware_stack(router, authn_client)?;
+        // No runtime-owned registry on the standalone/fallback path (no REST
+        // phase ran), so no operations are registered; an empty registry yields
+        // the built-in anonymous routes only, matching prior behavior.
+        let openapi = OpenApiRegistryImpl::new();
+        let router = self.apply_middleware_stack(router, authn_client, &openapi)?;
 
         let prefix = Self::normalize_prefix_path(&config.prefix_path)?;
         let router = Self::apply_prefix(router, &prefix);
@@ -647,7 +641,10 @@ impl ApiGateway {
     ///
     /// # Errors
     /// Returns an error if `OpenAPI` specification building fails.
-    pub fn build_openapi(&self) -> Result<utoipa::openapi::OpenApi> {
+    pub fn build_openapi(
+        &self,
+        openapi: &OpenApiRegistryImpl,
+    ) -> Result<utoipa::openapi::OpenApi> {
         let config = self.get_cached_config();
         let prefix = Self::normalize_prefix_path(&config.prefix_path)?;
         let info = toolkit::api::OpenApiInfo {
@@ -656,7 +653,7 @@ impl ApiGateway {
             description: config.openapi.description,
             servers: (!prefix.is_empty()).then_some(prefix).into_iter().collect(),
         };
-        self.openapi_registry.build_openapi(&info)
+        openapi.build_openapi(&info)
     }
 
     /// Parse bind address from configuration string.
@@ -1009,61 +1006,20 @@ impl ApiGateway {
         tracing::info!("{name} shutting down gracefully (cancellation)");
     }
 
-    /// Check if `handler_id` is already registered (returns true if duplicate)
-    fn check_duplicate_handler(&self, spec: &toolkit::api::OperationSpec) -> bool {
-        if self
-            .registered_handlers
-            .insert(spec.handler_id.clone(), ())
-            .is_some()
-        {
-            tracing::error!(
-                handler_id = %spec.handler_id,
-                method = %spec.method.as_str(),
-                path = %spec.path,
-                "Duplicate handler_id detected; ignoring subsequent registration"
-            );
-            return true;
-        }
-        false
-    }
-
-    /// Check if route (method, path) is already registered (returns true if duplicate)
-    fn check_duplicate_route(&self, spec: &toolkit::api::OperationSpec) -> bool {
-        let route_key = (spec.method.clone(), spec.path.clone());
-        if self.registered_routes.insert(route_key, ()).is_some() {
-            tracing::error!(
-                method = %spec.method.as_str(),
-                path = %spec.path,
-                "Duplicate (method, path) detected; ignoring subsequent registration"
-            );
-            return true;
-        }
-        false
-    }
-
-    /// Log successful operation registration
-    fn log_operation_registration(&self, spec: &toolkit::api::OperationSpec) {
-        let current_count = self.openapi_registry.operation_specs.len();
-        tracing::debug!(
-            handler_id = %spec.handler_id,
-            method = %spec.method.as_str(),
-            path = %spec.path,
-            summary = %spec.summary.as_deref().unwrap_or("No summary"),
-            total_operations = current_count,
-            "Registered API operation"
-        );
-    }
-
     /// Add `OpenAPI` documentation routes to the router
-    fn add_openapi_routes(&self, mut router: axum::Router) -> anyhow::Result<axum::Router> {
+    fn add_openapi_routes(
+        &self,
+        mut router: axum::Router,
+        openapi: &OpenApiRegistryImpl,
+    ) -> anyhow::Result<axum::Router> {
         // Build once, serve as static JSON (no per-request parsing)
-        let op_count = self.openapi_registry.operation_specs.len();
+        let op_count = openapi.operation_specs.len();
         tracing::info!(
             "rest_finalize: emitting OpenAPI with {} operations",
             op_count
         );
 
-        let openapi_doc = Arc::new(self.build_openapi()?);
+        let openapi_doc = Arc::new(self.build_openapi(openapi)?);
         let config = self.get_cached_config();
         let prefix = Self::normalize_prefix_path(&config.prefix_path)?;
         let html_doc = web::serve_docs(&prefix);
@@ -1180,12 +1136,13 @@ impl toolkit::contracts::ApiGatewayCapability for ApiGateway {
         &self,
         _ctx: &toolkit::context::GearCtx,
         mut router: axum::Router,
+        openapi: &OpenApiRegistryImpl,
         hc_registry: Arc<toolkit::RestHealthcheckRegistry>,
     ) -> anyhow::Result<axum::Router> {
         let config = self.get_cached_config();
 
         if config.enable_docs {
-            router = self.add_openapi_routes(router)?;
+            router = self.add_openapi_routes(router, openapi)?;
         }
 
         // Health probes (`main`/`both` mode): merge them onto the main router BEFORE the
@@ -1218,7 +1175,7 @@ impl toolkit::contracts::ApiGatewayCapability for ApiGateway {
         // unprefixed OperationBuilder paths; layers run before nest() strips the prefix).
         tracing::debug!("Applying middleware stack to finalized router");
         let authn_client = self.authn_client.lock().clone();
-        router = self.apply_middleware_stack(router, authn_client)?;
+        router = self.apply_middleware_stack(router, authn_client, openapi)?;
 
         let prefix = Self::normalize_prefix_path(&config.prefix_path)?;
         router = Self::apply_prefix(router, &prefix);
@@ -1228,10 +1185,6 @@ impl toolkit::contracts::ApiGatewayCapability for ApiGateway {
 
         tracing::info!("REST host finalized router with OpenAPI endpoints and auth middleware");
         Ok(router)
-    }
-
-    fn as_registry(&self) -> &dyn toolkit::contracts::OpenApiRegistry {
-        self
     }
 }
 
@@ -1245,39 +1198,6 @@ impl toolkit::contracts::RestApiCapability for ApiGateway {
         // This gear acts as both rest_host and rest, but actual REST endpoints
         // are handled in the host methods above.
         Ok(router)
-    }
-}
-
-impl OpenApiRegistry for ApiGateway {
-    fn register_operation(&self, spec: &toolkit::api::OperationSpec) {
-        // Reject duplicates with "first wins" policy (second registration = programmer error).
-        if self.check_duplicate_handler(spec) {
-            return;
-        }
-
-        if self.check_duplicate_route(spec) {
-            return;
-        }
-
-        // Delegate to the internal registry
-        self.openapi_registry.register_operation(spec);
-        self.log_operation_registration(spec);
-    }
-
-    fn ensure_schema_raw(
-        &self,
-        root_name: &str,
-        schemas: Vec<(
-            String,
-            utoipa::openapi::RefOr<utoipa::openapi::schema::Schema>,
-        )>,
-    ) -> String {
-        // Delegate to the internal registry
-        self.openapi_registry.ensure_schema_raw(root_name, schemas)
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 
@@ -1348,7 +1268,7 @@ mod tests {
         let api = ApiGateway::new(config);
 
         // Test that we can build OpenAPI without any operations
-        let doc = api.build_openapi().unwrap();
+        let doc = api.build_openapi(&OpenApiRegistryImpl::new()).unwrap();
         let json = serde_json::to_value(&doc).unwrap();
 
         // Verify it's valid OpenAPI document structure
@@ -1416,7 +1336,7 @@ mod tests {
         };
         let api = ApiGateway::new(config);
         let _router = api
-            .apply_middleware_stack(Router::new(), None)
+            .apply_middleware_stack(Router::new(), None, &OpenApiRegistryImpl::new())
             .expect("stack builds without a platform-plane authenticator");
     }
 
@@ -1440,7 +1360,7 @@ mod tests {
         *api.internal_authenticator.lock() = Some(auth);
 
         let _router = api
-            .apply_middleware_stack(Router::new(), None)
+            .apply_middleware_stack(Router::new(), None, &OpenApiRegistryImpl::new())
             .expect("stack builds with the platform-plane layer");
     }
 
@@ -1707,7 +1627,7 @@ mod tests {
         };
         let api = ApiGateway::new(config);
 
-        let doc = api.build_openapi().unwrap();
+        let doc = api.build_openapi(&OpenApiRegistryImpl::new()).unwrap();
         let json = serde_json::to_value(&doc).unwrap();
 
         let servers = json
@@ -1723,7 +1643,7 @@ mod tests {
         let config = ApiGatewayConfig::default(); // prefix_path is ""
         let api = ApiGateway::new(config);
 
-        let doc = api.build_openapi().unwrap();
+        let doc = api.build_openapi(&OpenApiRegistryImpl::new()).unwrap();
         let json = serde_json::to_value(&doc).unwrap();
 
         // When prefix is empty, servers should be absent (None → omitted from JSON)
@@ -1850,17 +1770,18 @@ mod problem_openapi_tests {
     #[tokio::test]
     async fn openapi_includes_problem_schema_and_response() {
         let api = ApiGateway::default();
+        let reg = OpenApiRegistryImpl::new();
         let router = axum::Router::new();
 
         // Build a route with a problem+json response
         let _router = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/problem-demo")
             .anonymous()
             .summary("Problem demo")
-            .problem_response(&api, http::StatusCode::BAD_REQUEST, "Bad Request") // <-- registers Problem + sets content type
+            .problem_response(&reg, http::StatusCode::BAD_REQUEST, "Bad Request") // <-- registers Problem + sets content type
             .handler(dummy_handler)
-            .register(router, &api);
+            .register(router, &reg);
 
-        let doc = api.build_openapi().expect("openapi");
+        let doc = api.build_openapi(&reg).expect("openapi");
         let v = serde_json::to_value(&doc).expect("json");
 
         // 1) Problem exists in components.schemas
@@ -1922,16 +1843,17 @@ mod sse_openapi_tests {
     #[tokio::test]
     async fn openapi_has_sse_content() {
         let api = ApiGateway::default();
+        let reg = OpenApiRegistryImpl::new();
         let router = axum::Router::new();
 
         let _router = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/demo/sse")
             .summary("Demo SSE")
             .handler(sse_handler)
             .anonymous()
-            .sse_json::<UserEvent>(&api, "SSE of UserEvent")
-            .register(router, &api);
+            .sse_json::<UserEvent>(&reg, "SSE of UserEvent")
+            .register(router, &reg);
 
-        let doc = api.build_openapi().expect("openapi");
+        let doc = api.build_openapi(&reg).expect("openapi");
         let v = serde_json::to_value(&doc).expect("json");
 
         // schema is materialized
@@ -1955,6 +1877,7 @@ mod sse_openapi_tests {
         }
 
         let api = ApiGateway::default();
+        let reg = OpenApiRegistryImpl::new();
         let router = axum::Router::new();
 
         let _router = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/demo/mixed")
@@ -1962,10 +1885,10 @@ mod sse_openapi_tests {
             .anonymous()
             .handler(mixed_handler)
             .json_response(http::StatusCode::OK, "Success response")
-            .sse_json::<UserEvent>(&api, "Additional SSE stream")
-            .register(router, &api);
+            .sse_json::<UserEvent>(&reg, "Additional SSE stream")
+            .register(router, &reg);
 
-        let doc = api.build_openapi().expect("openapi");
+        let doc = api.build_openapi(&reg).expect("openapi");
         let v = serde_json::to_value(&doc).expect("json");
 
         // Check that both response types are present
@@ -1995,6 +1918,7 @@ mod sse_openapi_tests {
         }
 
         let api = ApiGateway::default();
+        let reg = OpenApiRegistryImpl::new();
         let router = axum::Router::new();
 
         let _router = OperationBuilder::<Missing, Missing, ()>::get("/tests/v1/users/{id}")
@@ -2003,11 +1927,10 @@ mod sse_openapi_tests {
             .path_param("id", "User ID")
             .handler(user_handler)
             .json_response(http::StatusCode::OK, "User details")
-            .register(router, &api);
+            .register(router, &reg);
 
         // Verify the operation was stored with {id} path (same for Axum 0.8 and OpenAPI)
-        let ops: Vec<_> = api
-            .openapi_registry
+        let ops: Vec<_> = reg
             .operation_specs
             .iter()
             .map(|e| e.value().clone())
@@ -2016,7 +1939,7 @@ mod sse_openapi_tests {
         assert_eq!(ops[0].path, "/tests/v1/users/{id}");
 
         // Verify OpenAPI doc also has {id} (no conversion needed for regular params)
-        let doc = api.build_openapi().expect("openapi");
+        let doc = api.build_openapi(&reg).expect("openapi");
         let v = serde_json::to_value(&doc).expect("json");
 
         let paths = v.get("paths").expect("paths");
@@ -2033,6 +1956,7 @@ mod sse_openapi_tests {
         }
 
         let api = ApiGateway::default();
+        let reg = OpenApiRegistryImpl::new();
         let router = axum::Router::new();
 
         let _router = OperationBuilder::<Missing, Missing, ()>::get(
@@ -2044,11 +1968,10 @@ mod sse_openapi_tests {
         .path_param("item_id", "Item ID")
         .handler(item_handler)
         .json_response(http::StatusCode::OK, "Item details")
-        .register(router, &api);
+        .register(router, &reg);
 
         // Verify storage and OpenAPI both use {param} syntax
-        let ops: Vec<_> = api
-            .openapi_registry
+        let ops: Vec<_> = reg
             .operation_specs
             .iter()
             .map(|e| e.value().clone())
@@ -2058,7 +1981,7 @@ mod sse_openapi_tests {
             "/tests/v1/projects/{project_id}/items/{item_id}"
         );
 
-        let doc = api.build_openapi().expect("openapi");
+        let doc = api.build_openapi(&reg).expect("openapi");
         let v = serde_json::to_value(&doc).expect("json");
         let paths = v.get("paths").expect("paths");
         assert!(
@@ -2075,6 +1998,7 @@ mod sse_openapi_tests {
         }
 
         let api = ApiGateway::default();
+        let reg = OpenApiRegistryImpl::new();
         let router = axum::Router::new();
 
         // Axum 0.8 uses {*path} for wildcards
@@ -2083,11 +2007,10 @@ mod sse_openapi_tests {
             .anonymous()
             .handler(static_handler)
             .json_response(http::StatusCode::OK, "File content")
-            .register(router, &api);
+            .register(router, &reg);
 
         // Verify internal storage keeps Axum wildcard syntax {*path}
-        let ops: Vec<_> = api
-            .openapi_registry
+        let ops: Vec<_> = reg
             .operation_specs
             .iter()
             .map(|e| e.value().clone())
@@ -2095,7 +2018,7 @@ mod sse_openapi_tests {
         assert_eq!(ops[0].path, "/tests/v1/static/{*path}");
 
         // Verify OpenAPI converts wildcard to {path} (without asterisk)
-        let doc = api.build_openapi().expect("openapi");
+        let doc = api.build_openapi(&reg).expect("openapi");
         let v = serde_json::to_value(&doc).expect("json");
         let paths = v.get("paths").expect("paths");
         assert!(
@@ -2115,6 +2038,7 @@ mod sse_openapi_tests {
         }
 
         let api = ApiGateway::default();
+        let reg = OpenApiRegistryImpl::new();
         let router = axum::Router::new();
 
         let _router = OperationBuilder::<Missing, Missing, ()>::post("/tests/v1/files/upload")
@@ -2124,10 +2048,10 @@ mod sse_openapi_tests {
             .multipart_file_request("file", Some("File to upload"))
             .handler(upload_handler)
             .json_response(http::StatusCode::OK, "Upload successful")
-            .register(router, &api);
+            .register(router, &reg);
 
         // Build OpenAPI and verify multipart schema
-        let doc = api.build_openapi().expect("openapi");
+        let doc = api.build_openapi(&reg).expect("openapi");
         let v = serde_json::to_value(&doc).expect("json");
 
         let paths = v.get("paths").expect("paths");

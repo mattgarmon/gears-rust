@@ -164,11 +164,12 @@ async fn test_rate_limit_enforcement() {
     let api_gateway = api_gateway::ApiGateway::default();
     let ctx = create_test_gear_ctx_with_config(&config);
     api_gateway.init(&ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let gear = RateLimitedGear;
     let router = Router::new();
     let router = gear
-        .register_rest(&ctx, router, &api_gateway)
+        .register_rest(&ctx, router, &openapi)
         .expect("Failed to register routes");
 
     // Build the final router with middleware
@@ -176,6 +177,7 @@ async fn test_rate_limit_enforcement() {
         .rest_finalize(
             &ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize router");
@@ -195,16 +197,17 @@ async fn test_openapi_includes_rate_limit_extensions() {
     let api_gateway = api_gateway::ApiGateway::default();
     let ctx = create_test_gear_ctx_with_config(&config);
     api_gateway.init(&ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let gear = RateLimitedGear;
     let router = Router::new();
     let _router = gear
-        .register_rest(&ctx, router, &api_gateway)
+        .register_rest(&ctx, router, &openapi)
         .expect("Failed to register routes");
 
     // Build OpenAPI spec
     let openapi = api_gateway
-        .build_openapi()
+        .build_openapi(&openapi)
         .expect("Failed to build OpenAPI");
     let json = serde_json::to_value(&openapi).expect("Failed to serialize OpenAPI");
 
@@ -237,6 +240,7 @@ async fn test_openapi_includes_rate_limit_extensions() {
 #[tokio::test]
 async fn test_rate_limit_metadata_stored() {
     let api_gateway = api_gateway::ApiGateway::default();
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
     let router = Router::<()>::new();
 
     let mut builder = OperationBuilder::get("/tests/v1/test");
@@ -255,11 +259,11 @@ async fn test_rate_limit_metadata_stored() {
         .anonymous()
         .json_response(http::StatusCode::OK, "OK")
         .handler(get(normal_handler))
-        .register(router, &api_gateway);
+        .register(router, &openapi);
 
     // The operation should be registered with rate limit metadata
     let openapi = api_gateway
-        .build_openapi()
+        .build_openapi(&openapi)
         .expect("Failed to build OpenAPI");
     let json = serde_json::to_value(&openapi).expect("Failed to serialize");
 
@@ -287,17 +291,19 @@ async fn test_rate_limit_returns_canonical_problem_with_headers() {
     let api_gateway = api_gateway::ApiGateway::default();
     let ctx = create_test_gear_ctx_with_config(&config);
     api_gateway.init(&ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let gear = RateLimitedGear;
     let router = Router::new();
     let router = gear
-        .register_rest(&ctx, router, &api_gateway)
+        .register_rest(&ctx, router, &openapi)
         .expect("Failed to register routes");
 
     let app = api_gateway
         .rest_finalize(
             &ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize router");
@@ -386,6 +392,7 @@ async fn test_in_flight_limit_returns_canonical_service_unavailable() {
     let api_gateway = api_gateway::ApiGateway::default();
     let ctx = create_test_gear_ctx_with_config(&config);
     api_gateway.init(&ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     // Register a route that uses the gateway defaults (no per-route override).
     let router = OperationBuilder::get("/tests/v1/inflight")
@@ -394,12 +401,13 @@ async fn test_in_flight_limit_returns_canonical_service_unavailable() {
         .anonymous()
         .json_response(http::StatusCode::OK, "Success")
         .handler(get(slow_handler))
-        .register(Router::new(), &api_gateway);
+        .register(Router::new(), &openapi);
 
     let app = api_gateway
         .rest_finalize(
             &ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize router");

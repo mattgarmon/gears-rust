@@ -69,6 +69,7 @@ async fn real_middlewares_observe_documented_order() -> Result<()> {
 
     let api = api_gateway::ApiGateway::default();
     api.init(&ctx).await?;
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     // Register an endpoint that enables both MIME validation and rate limiting.
     let mut router = Router::new();
@@ -81,12 +82,13 @@ async fn real_middlewares_observe_documented_order() -> Result<()> {
         .allow_content_types(&["application/json"]) // turns on MIME validation
         .json_response(StatusCode::OK, "OK")
         .handler(axum::routing::post(handler))
-        .register(router, &api);
+        .register(router, &openapi);
 
     // Apply the real gateway middleware stack.
     let app = api.rest_finalize(
         &ctx,
         router,
+        &openapi,
         Arc::new(toolkit::RestHealthcheckRegistry::new()),
     )?;
 
@@ -192,6 +194,7 @@ async fn real_middlewares_observe_documented_order_with_prefix() -> Result<()> {
 
     let api = api_gateway::ApiGateway::default();
     api.init(&ctx).await?;
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     // Register an endpoint that enables both MIME validation and rate limiting.
     let mut router = Router::new();
@@ -204,12 +207,13 @@ async fn real_middlewares_observe_documented_order_with_prefix() -> Result<()> {
         .allow_content_types(&["application/json"]) // turns on MIME validation
         .json_response(StatusCode::OK, "OK")
         .handler(axum::routing::post(handler))
-        .register(router, &api);
+        .register(router, &openapi);
 
     // Apply the real gateway middleware stack.
     let app = api.rest_finalize(
         &ctx,
         router,
+        &openapi,
         Arc::new(toolkit::RestHealthcheckRegistry::new()),
     )?;
 

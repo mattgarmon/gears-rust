@@ -63,7 +63,7 @@ fn build_router_with(gears: &[GearSpec], manager: Arc<GearManager>) -> Router {
     let registry = b.build_topo_sorted().unwrap();
 
     let svc = Arc::new(GearsService::new(&registry, manager));
-    let openapi = api_gateway::ApiGateway::default();
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
     rest::routes::register_routes(Router::new(), &openapi, svc)
 }
 

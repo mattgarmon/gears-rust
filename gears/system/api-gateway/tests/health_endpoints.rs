@@ -86,8 +86,9 @@ async fn finalize_main_router(
 
     let gw = ApiGateway::default();
     gw.init(&ctx).await?;
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
     let router = gw.rest_prepare(&ctx, Router::new(), registry.clone())?;
-    gw.rest_finalize(&ctx, router, registry)
+    gw.rest_finalize(&ctx, router, &openapi, registry)
 }
 
 /// Build the standalone health router (`rest_prepare` + `health_router`). This is the router
@@ -411,11 +412,12 @@ async fn both_mode_serves_health_on_main_and_separate_router() {
 
     let gw = ApiGateway::default();
     gw.init(&ctx).await.expect("init failed");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
     let base = gw
         .rest_prepare(&ctx, Router::new(), registry.clone())
         .expect("rest_prepare failed");
     let main = gw
-        .rest_finalize(&ctx, base, registry.clone())
+        .rest_finalize(&ctx, base, &openapi, registry.clone())
         .expect("rest_finalize failed");
     let separate = gw.health_router().expect("health_router failed");
 

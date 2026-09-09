@@ -108,17 +108,19 @@ async fn test_body_limit_configured() {
     let api_gateway = api_gateway::ApiGateway::default();
     let ctx = create_test_gear_ctx_with_body_limit(limit);
     api_gateway.init(&ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let gear = BodyLimitTestGear;
     let router = Router::new();
     let router = gear
-        .register_rest(&ctx, router, &api_gateway)
+        .register_rest(&ctx, router, &openapi)
         .expect("Failed to register routes");
 
     let _final_router = api_gateway
         .rest_finalize(
             &ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize router");
@@ -137,17 +139,19 @@ async fn test_body_limit_with_cors() {
     let api_gateway = api_gateway::ApiGateway::default();
     let ctx = create_test_gear_ctx_with_body_limit(16 * 1024 * 1024);
     api_gateway.init(&ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let gear = BodyLimitTestGear;
     let router = Router::new();
     let router = gear
-        .register_rest(&ctx, router, &api_gateway)
+        .register_rest(&ctx, router, &openapi)
         .expect("Failed to register routes");
 
     let _final_router = api_gateway
         .rest_finalize(
             &ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize router");
@@ -180,17 +184,19 @@ async fn test_default_body_limit() {
 
     let api_gateway = api_gateway::ApiGateway::default();
     api_gateway.init(&ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let gear = BodyLimitTestGear;
     let router = Router::new();
     let router = gear
-        .register_rest(&ctx, router, &api_gateway)
+        .register_rest(&ctx, router, &openapi)
         .expect("Failed to register routes");
 
     let _final_router = api_gateway
         .rest_finalize(
             &ctx,
             router,
+            &openapi,
             Arc::new(toolkit::RestHealthcheckRegistry::new()),
         )
         .expect("Failed to finalize router");
@@ -209,15 +215,16 @@ async fn test_openapi_includes_413_response() {
     let api_gateway = api_gateway::ApiGateway::default();
     let ctx = create_test_gear_ctx_with_body_limit(1024);
     api_gateway.init(&ctx).await.expect("Failed to init");
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let gear = BodyLimitTestGear;
     let router = Router::new();
     let _router = gear
-        .register_rest(&ctx, router, &api_gateway)
+        .register_rest(&ctx, router, &openapi)
         .expect("Failed to register routes");
 
     let openapi = api_gateway
-        .build_openapi()
+        .build_openapi(&openapi)
         .expect("Failed to build OpenAPI");
     let json = serde_json::to_value(&openapi).expect("Failed to serialize");
 

@@ -175,7 +175,7 @@ async fn create_user_handler(Json(req): Json<CreateUserRequest>) -> Json<User> {
 #[tokio::test]
 async fn test_operation_builder_integration() {
     // Test that our new OperationBuilder works with the registry
-    let registry = api_gateway::ApiGateway::default();
+    let registry = toolkit::api::OpenApiRegistryImpl::new();
     let router = Router::new();
 
     let test_gear = TestUsersGear;
@@ -192,7 +192,7 @@ async fn test_operation_builder_integration() {
 #[tokio::test]
 async fn test_schema_registration() {
     // Test that schemas are properly registered
-    let registry = api_gateway::ApiGateway::default();
+    let registry = toolkit::api::OpenApiRegistryImpl::new();
     let router = Router::new();
 
     let test_gear = TestUsersGear;

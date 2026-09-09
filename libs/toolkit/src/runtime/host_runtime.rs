@@ -718,8 +718,13 @@ impl HostRuntime {
                 source: e,
             })?;
 
-        // use host as the registry
-        let registry: &dyn crate::contracts::OpenApiRegistry = host.as_registry();
+        // The runtime owns the aggregate OpenAPI registry (mirroring the OoP
+        // path's `compose_oop_router`); the host is no longer an
+        // `OpenApiRegistry` itself. Every gear's `register_rest` populates this
+        // registry, and the host reads it back in `rest_finalize` to emit the
+        // aggregate document — keeping the gateway a pure edge.
+        let openapi_registry = crate::api::OpenApiRegistryImpl::new();
+        let registry: &dyn crate::contracts::OpenApiRegistry = &openapi_registry;
 
         // Healthcheck registry, passed explicitly to the REST host and providers below
         // (not via ClientHub). Seeded with the host's shutdown token so in-flight checks
@@ -774,9 +779,10 @@ impl HostRuntime {
             }
         }
 
-        // 3) Host finalize: attach /openapi.json and /docs, persist Router if needed (no server start)
+        // 3) Host finalize: attach /openapi.json and /docs, persist Router if needed (no server start).
+        // The runtime-owned registry is handed to the host so it can emit the aggregate document.
         router = host
-            .rest_finalize(&host_ctx, router, hc_registry)
+            .rest_finalize(&host_ctx, router, &openapi_registry, hc_registry)
             .map_err(|source| RegistryError::RestFinalize {
                 gear: host_entry.name,
                 source,

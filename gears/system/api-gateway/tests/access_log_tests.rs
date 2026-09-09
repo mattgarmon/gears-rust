@@ -340,6 +340,7 @@ async fn e2e_full_middleware_stack_logs_remote_addr() -> anyhow::Result<()> {
 
     let api = api_gateway::ApiGateway::default();
     api.init(&ctx).await?;
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let router = OperationBuilder::get("/tests/v1/access-log-e2e")
         .operation_id("test:access-log-e2e")
@@ -347,11 +348,12 @@ async fn e2e_full_middleware_stack_logs_remote_addr() -> anyhow::Result<()> {
         .anonymous()
         .json_response(StatusCode::OK, "OK")
         .handler(get(e2e_handler))
-        .register(Router::new(), &api);
+        .register(Router::new(), &openapi);
 
     let app = api.rest_finalize(
         &ctx,
         router,
+        &openapi,
         Arc::new(toolkit::RestHealthcheckRegistry::new()),
     )?;
 

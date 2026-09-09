@@ -168,6 +168,7 @@ async fn metrics_capture_successful_request() -> Result<()> {
     let ctx = create_api_gateway_ctx(base_config());
     let api = api_gateway::ApiGateway::default();
     api.init(&ctx).await?;
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let router = OperationBuilder::get("/tests/v1/items")
         .operation_id("test:list-items")
@@ -175,10 +176,11 @@ async fn metrics_capture_successful_request() -> Result<()> {
         .anonymous()
         .json_response(StatusCode::OK, "OK")
         .handler(axum::routing::get(ok_handler))
-        .register(Router::new(), &api);
+        .register(Router::new(), &openapi);
     let app = api.rest_finalize(
         &ctx,
         router,
+        &openapi,
         Arc::new(toolkit::RestHealthcheckRegistry::new()),
     )?;
 
@@ -223,6 +225,7 @@ async fn metrics_capture_mime_rejection() -> Result<()> {
     let ctx = create_api_gateway_ctx(base_config());
     let api = api_gateway::ApiGateway::default();
     api.init(&ctx).await?;
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let mut builder = OperationBuilder::post("/tests/v1/items");
     builder.require_rate_limit(1000, 1000, 64);
@@ -233,10 +236,11 @@ async fn metrics_capture_mime_rejection() -> Result<()> {
         .allow_content_types(&["application/json"])
         .json_response(StatusCode::OK, "OK")
         .handler(axum::routing::post(ok_handler))
-        .register(Router::new(), &api);
+        .register(Router::new(), &openapi);
     let app = api.rest_finalize(
         &ctx,
         router,
+        &openapi,
         Arc::new(toolkit::RestHealthcheckRegistry::new()),
     )?;
 
@@ -291,6 +295,7 @@ async fn metrics_capture_rate_limit() -> Result<()> {
     let ctx = create_api_gateway_ctx(cfg);
     let api = api_gateway::ApiGateway::default();
     api.init(&ctx).await?;
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let mut builder = OperationBuilder::get("/tests/v1/limited");
     builder.require_rate_limit(1, 1, 64);
@@ -300,10 +305,11 @@ async fn metrics_capture_rate_limit() -> Result<()> {
         .anonymous()
         .json_response(StatusCode::OK, "OK")
         .handler(axum::routing::get(ok_handler))
-        .register(Router::new(), &api);
+        .register(Router::new(), &openapi);
     let app = api.rest_finalize(
         &ctx,
         router,
+        &openapi,
         Arc::new(toolkit::RestHealthcheckRegistry::new()),
     )?;
 
@@ -357,6 +363,7 @@ async fn metrics_route_attribute_uses_template() -> Result<()> {
     let ctx = create_api_gateway_ctx(base_config());
     let api = api_gateway::ApiGateway::default();
     api.init(&ctx).await?;
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let router = OperationBuilder::get("/tests/v1/items/{id}")
         .operation_id("test:get-item")
@@ -364,10 +371,11 @@ async fn metrics_route_attribute_uses_template() -> Result<()> {
         .anonymous()
         .json_response(StatusCode::OK, "OK")
         .handler(axum::routing::get(ok_handler))
-        .register(Router::new(), &api);
+        .register(Router::new(), &openapi);
     let app = api.rest_finalize(
         &ctx,
         router,
+        &openapi,
         Arc::new(toolkit::RestHealthcheckRegistry::new()),
     )?;
 
@@ -413,6 +421,7 @@ async fn metrics_unmatched_route() -> Result<()> {
     let ctx = create_api_gateway_ctx(base_config());
     let api = api_gateway::ApiGateway::default();
     api.init(&ctx).await?;
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let router = OperationBuilder::get("/tests/v1/items")
         .operation_id("test:list-items")
@@ -420,10 +429,11 @@ async fn metrics_unmatched_route() -> Result<()> {
         .anonymous()
         .json_response(StatusCode::OK, "OK")
         .handler(axum::routing::get(ok_handler))
-        .register(Router::new(), &api);
+        .register(Router::new(), &openapi);
     let app = api.rest_finalize(
         &ctx,
         router,
+        &openapi,
         Arc::new(toolkit::RestHealthcheckRegistry::new()),
     )?;
 
@@ -467,6 +477,7 @@ async fn metrics_duration_uses_second_scale_bucket_boundaries() -> Result<()> {
     let ctx = create_api_gateway_ctx(base_config());
     let api = api_gateway::ApiGateway::default();
     api.init(&ctx).await?;
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let router = OperationBuilder::get("/tests/v1/items")
         .operation_id("test:list-items")
@@ -474,10 +485,11 @@ async fn metrics_duration_uses_second_scale_bucket_boundaries() -> Result<()> {
         .anonymous()
         .json_response(StatusCode::OK, "OK")
         .handler(axum::routing::get(ok_handler))
-        .register(Router::new(), &api);
+        .register(Router::new(), &openapi);
     let app = api.rest_finalize(
         &ctx,
         router,
+        &openapi,
         Arc::new(toolkit::RestHealthcheckRegistry::new()),
     )?;
 
@@ -530,6 +542,7 @@ async fn metrics_prefix_applied_to_instrument_names() -> Result<()> {
     let ctx = create_api_gateway_ctx(prefixed_config());
     let api = api_gateway::ApiGateway::default();
     api.init(&ctx).await?;
+    let openapi = toolkit::api::OpenApiRegistryImpl::new();
 
     let router = OperationBuilder::get("/tests/v1/items")
         .operation_id("test:list-items")
@@ -537,10 +550,11 @@ async fn metrics_prefix_applied_to_instrument_names() -> Result<()> {
         .anonymous()
         .json_response(StatusCode::OK, "OK")
         .handler(axum::routing::get(ok_handler))
-        .register(Router::new(), &api);
+        .register(Router::new(), &openapi);
     let app = api.rest_finalize(
         &ctx,
         router,
+        &openapi,
         Arc::new(toolkit::RestHealthcheckRegistry::new()),
     )?;
 

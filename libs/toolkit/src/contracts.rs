@@ -100,17 +100,20 @@ pub trait ApiGatewayCapability: Send + Sync + 'static {
     ///
     /// `hc_registry` is the same registry instance passed to [`rest_prepare`](Self::rest_prepare).
     ///
+    /// `openapi` is the runtime-owned registry that every gear's `register_rest` populated
+    /// during this REST phase; the host reads it to emit the aggregate `OpenAPI` document.
+    /// The runtime owns the registry (the host is no longer an `OpenApiRegistry` itself),
+    /// which keeps the gateway a pure edge and lets an external gateway consume the same spec.
+    ///
     /// # Errors
     /// Returns an error if router finalization fails.
     fn rest_finalize(
         &self,
         ctx: &crate::context::GearCtx,
         router: Router,
+        openapi: &crate::api::OpenApiRegistryImpl,
         hc_registry: std::sync::Arc<crate::healthcheck::RestHealthcheckRegistry>,
     ) -> anyhow::Result<Router>;
-
-    // Return OpenAPI registry of the gear, e.g., to register endpoints
-    fn as_registry(&self) -> &dyn OpenApiRegistry;
 
     /// The bound REST base URL (e.g. `http://127.0.0.1:8080`) once the gateway's
     /// server is listening, or `None` before the listener binds.
