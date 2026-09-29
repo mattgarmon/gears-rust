@@ -17,6 +17,36 @@ name = "authz_resolver"
 [lints]
 workspace = true
 
+# OoP binary: only built with the `oop_module` feature (async runtime + bootstrap
+# entrypoint). The library stays available for in-process linking (Profile 1)
+# without the binary.
+[[bin]]
+name = "authz-resolver-oop"
+path = "src/main.rs"
+required-features = ["oop_module"]
+
+[features]
+default = []
+# Build the standalone OoP binary. It embeds the dependent gears needed to
+# resolve authorization in-process — tenant-resolver plus the plugins that wire
+# the chain (tr-authz -> tenant-resolver, static-tr for config-driven tenants) —
+# so the chain's `SecurityContext::anonymous()` calls stay in-process. Tenant
+# hierarchy is config-driven here; a resource-group-backed hierarchy is a
+# separate unit (resource-group depends on authz-resolver, so it cannot be
+# embedded here without a dependency cycle). See docs/arch/toolkit-oop/DESIGN.md
+# § Flight Control Composition.
+oop_module = [
+    "dep:tokio",
+    "dep:clap",
+    "dep:mimalloc",
+    "toolkit/bootstrap",
+    "dep:tenant-resolver",
+    "dep:tr-authz-plugin",
+    "dep:static-tr-plugin",
+]
+# Kubernetes TokenReview platform-plane auth for the OoP HTTP server.
+k8s-auth = ["toolkit/k8s-auth"]
+
 [dependencies]
 # Trait boundaries of consumed SDKs are `CanonicalError` (ADR 0005).
 toolkit-canonical-errors = { workspace = true }
@@ -52,6 +82,23 @@ inventory = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+
+# --- OoP binary only (gated behind `oop_module`) ---
+# Async runtime, CLI, and allocator for the standalone OoP entrypoint.
+tokio = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+mimalloc = { workspace = true, optional = true }
+
+# Dependent gears + wiring plugins, embedded in the OoP binary so the chain
+# (authz-resolver -> tr-authz -> tenant-resolver, tenants from static-tr) runs in
+# one process. Linked purely to pull in their `#[toolkit::gear]` inventory
+# registrations; the library never references them. resource-group is
+# deliberately NOT embedded — it depends on authz-resolver, which would form a
+# Cargo dependency cycle; a resource-group-backed tenant hierarchy is its own
+# OoP unit.
+tenant-resolver = { package = "cf-gears-tenant-resolver", path = "../../tenant-resolver/tenant-resolver", optional = true }
+tr-authz-plugin = { package = "cf-gears-tr-authz-plugin", path = "../plugins/tr-authz-plugin", optional = true }
+static-tr-plugin = { package = "cf-gears-static-tr-plugin", path = "../../tenant-resolver/plugins/static-tr-plugin", optional = true }
 
 [dev-dependencies]
 # Async test harness + supporting types for the gear/local-client unit tests.

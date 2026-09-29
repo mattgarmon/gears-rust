@@ -1,0 +1,57 @@
+# Local multi-process AuthZ plane: authz-resolver (PDP) OoP unit.
+#
+# Embeds the dependent gears the PDP needs to resolve authorization in-process:
+# tenant-resolver plus the plugins that wire the chain (tr-authz -> tenant-resolver,
+# static-tr for config-driven tenants). resource-group is not embedded here — a
+# resource-group-backed tenant hierarchy is a separate unit.
+#
+# Run (after Flight Control is up, serving the directory on :50051):
+#   TOOLKIT_DIRECTORY_ENDPOINT=http://127.0.0.1:50051 \
+#     cargo run -p cf-gears-authz-resolver --features oop_module --bin authz-resolver-oop \
+#       -- --config config/oop-authz-resolver.yaml
+#
+# PEPs then resolve `authz-resolver` via the directory and call:
+#   POST http://127.0.0.1:9092/authz-resolver/v1/evaluate
+
+server:
+  home_dir: "~/.cf-gears-authz-resolver"
+
+logging:
+  default:
+    console_level: info
+    file: "logs/oop-authz-resolver.log"
+    file_level: info
+
+# OoP HTTP serving lifecycle: bind a local REST server + register `authz-resolver`
+# with the DirectoryService so out-of-process PEPs can resolve and call it.
+oop_http:
+  listen_addr: "127.0.0.1:9092"
+  advertise_uri: "http://127.0.0.1:9092"
+  allow_loopback_advertise: true
+
+gears:
+  # --- PDP ---
+  authz-resolver:
+    config:
+      vendor: "constructorfabric"
+
+  tr-authz-plugin:
+    config:
+      vendor: "constructorfabric"
+      priority: 50
+
+  # --- Tenant resolution (config-driven, static) ---
+  tenant-resolver:
+    config:
+      vendor: "constructorfabric"
+
+  static-tr-plugin:
+    config:
+      vendor: "constructorfabric"
+      priority: 20
+      tenants:
+        # Structural root; must match DEFAULT_TENANT_ID in toolkit-security.
+        - id: "00000000-df51-5b42-9538-d2b56b7ee953"
+          name: "platform-root"
+          parent_id: null
+          status: active
