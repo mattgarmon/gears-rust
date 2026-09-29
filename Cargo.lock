@@ -2579,6 +2579,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-gears-flight-control"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cf-gears-api-gateway",
+ "cf-gears-authn-resolver",
+ "cf-gears-gear-orchestrator",
+ "cf-gears-grpc-hub",
+ "cf-gears-oidc-authn-plugin",
+ "cf-gears-static-authn-plugin",
+ "cf-gears-toolkit",
+ "cf-gears-types-registry",
+ "clap",
+ "mimalloc",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "cf-gears-gear-orchestrator"
 version = "0.2.3"
 dependencies = [
