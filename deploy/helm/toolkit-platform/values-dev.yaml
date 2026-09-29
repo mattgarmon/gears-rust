@@ -1,0 +1,97 @@
+# Dev preset: flight-control + shared Postgres + 5 OoP gears, locally-built images.
+#
+# Intended for a minikube demo where images are loaded into the node (so
+# pullPolicy: Never avoids a registry round-trip). The Postgres image is public,
+# so only flight-control and the gear images need loading:
+#
+#   for img in flight-control authz-resolver hello users-info api-contracts api-contracts-consumer; do
+#     minikube image load "ghcr.io/constructorfabric/${img}:dev"
+#   done
+#   helm install demo deploy/helm/toolkit-platform -f deploy/helm/toolkit-platform/values-dev.yaml
+
+flight-control:
+  enabled: true
+  fullnameOverride: flight-control
+  image:
+    repository: ghcr.io/constructorfabric/flight-control
+    tag: "dev"
+    pullPolicy: Never
+  # External entry point via the minikube nginx ingress addon
+  # (`minikube addons enable ingress`). Reach it without editing /etc/hosts:
+  #   curl --resolve flight-control.local:80:$(minikube ip) \
+  #        http://flight-control.local/hello/v1/ping
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-buffering: "off"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+    hosts:
+      - host: flight-control.local
+        paths:
+          - path: /
+            pathType: Prefix
+
+# Shared PostgreSQL for the OoP gears that need it (currently users-info). Flight
+# Control itself is stateless — no database. Uses the public postgres:17-alpine
+# image, so no local image load is needed.
+postgres:
+  enabled: true
+  fullnameOverride: shared-postgres
+  databases:
+    - usersinfo
+
+authz-resolver:
+  enabled: true
+  fullnameOverride: authz-resolver
+  image:
+    repository: ghcr.io/constructorfabric/authz-resolver
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://flight-control:50051"
+
+hello:
+  enabled: true
+  fullnameOverride: hello
+  image:
+    repository: ghcr.io/constructorfabric/hello
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://flight-control:50051"
+
+users-info:
+  enabled: true
+  fullnameOverride: users-info
+  image:
+    repository: ghcr.io/constructorfabric/users-info
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://flight-control:50051"
+  # Connect to the shared Postgres above (no bundled instance).
+  postgres:
+    host: shared-postgres
+    database: usersinfo
+    user: platform
+    password: "platform-demo-pw"
+
+# OoP gear-to-gear REST demo: the consumer pod resolves the PaymentApi contract
+# from the provider pod over REST (via the DirectoryService).
+api-contracts:
+  enabled: true
+  fullnameOverride: api-contracts
+  image:
+    repository: ghcr.io/constructorfabric/api-contracts
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://flight-control:50051"
+
+api-contracts-consumer:
+  enabled: true
+  fullnameOverride: api-contracts-consumer
+  image:
+    repository: ghcr.io/constructorfabric/api-contracts-consumer
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://flight-control:50051"

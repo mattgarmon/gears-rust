@@ -10,7 +10,7 @@
 // It deliberately does NOT link api-gateway, grpc-hub, tenant-resolver, or
 // authz-resolver: the HTTP surface comes from the OoP bootstrap, the directory
 // is dialed remotely (`TOOLKIT_DIRECTORY_ENDPOINT`), and authorization is
-// resolved over REST from the platform-host via `#[toolkit::consumes]`.
+// resolved over REST from the authz-resolver OoP unit via `#[toolkit::consumes]`.
 #![allow(unused_imports)]
 
 // Target gear (this crate's library target).

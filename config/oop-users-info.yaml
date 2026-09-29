@@ -1,4 +1,4 @@
-# Local multi-process platform-host: users-info OoP gear (authenticated + DB).
+# Local multi-process: users-info OoP gear (authenticated + DB).
 #
 # Run (after the host is up):
 #   TOOLKIT_DIRECTORY_ENDPOINT=http://127.0.0.1:50051 \
@@ -10,8 +10,8 @@
 #   curl -H 'Authorization: Bearer test-token' http://127.0.0.1:9092/users-info/v1/users   # direct
 #
 # The pod authenticates the bearer locally (embedded authn stack), then calls
-# the platform-host's authz-resolver over REST (resolved via DirectoryService)
-# for every PEP check, and serves from its own SQLite database.
+# the authz-resolver OoP unit over REST (resolved via DirectoryService) for
+# every PEP check, and serves from its own SQLite database.
 
 server:
   home_dir: "~/.cf-gears-users-info"

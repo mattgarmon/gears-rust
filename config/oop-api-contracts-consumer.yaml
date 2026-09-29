@@ -1,4 +1,4 @@
-# Local multi-process platform-host: api-contracts-consumer OoP gear.
+# Local multi-process: api-contracts-consumer OoP gear.
 #
 # Run (after the host + the api-contracts provider are up):
 #   TOOLKIT_DIRECTORY_ENDPOINT=http://127.0.0.1:50051 \

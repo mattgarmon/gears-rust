@@ -1,0 +1,51 @@
+# Default values for the toolkit-platform umbrella chart.
+#
+# Subchart values are nested under the subchart name. The flight-control is given
+# a stable fullnameOverride ("flight-control") so its Service DNS is predictable
+# and every OoP gear can reference it for TOOLKIT_DIRECTORY_ENDPOINT and the edge.
+
+flight-control:
+  enabled: true
+  fullnameOverride: flight-control
+  image:
+    repository: ghcr.io/constructorfabric/flight-control
+    tag: "dev"
+    pullPolicy: IfNotPresent
+
+postgres:
+  enabled: true
+  fullnameOverride: shared-postgres
+  databases:
+    - usersinfo
+
+authz-resolver:
+  enabled: true
+  fullnameOverride: authz-resolver
+  image:
+    repository: ghcr.io/constructorfabric/authz-resolver
+    tag: "dev"
+    pullPolicy: IfNotPresent
+  directoryEndpoint: "http://flight-control:50051"
+
+hello:
+  enabled: true
+  fullnameOverride: hello
+  image:
+    repository: ghcr.io/constructorfabric/hello
+    tag: "dev"
+    pullPolicy: IfNotPresent
+  directoryEndpoint: "http://flight-control:50051"
+
+users-info:
+  enabled: true
+  fullnameOverride: users-info
+  image:
+    repository: ghcr.io/constructorfabric/users-info
+    tag: "dev"
+    pullPolicy: IfNotPresent
+  directoryEndpoint: "http://flight-control:50051"
+  postgres:
+    host: shared-postgres
+    database: usersinfo
+    user: platform
+    password: "platform-demo-pw"

@@ -1,0 +1,22 @@
+# Minimal preset: flight-control only (no OoP gears).
+#
+#   helm install platform deploy/helm/toolkit-platform -f deploy/helm/toolkit-platform/values-minimal.yaml
+
+flight-control:
+  enabled: true
+  fullnameOverride: flight-control
+
+authz-resolver:
+  enabled: false
+
+hello:
+  enabled: false
+
+users-info:
+  enabled: false
+
+api-contracts:
+  enabled: false
+
+api-contracts-consumer:
+  enabled: false

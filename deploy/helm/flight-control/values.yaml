@@ -1,0 +1,187 @@
+# Default values for the flight-control chart.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/constructorfabric/flight-control
+  # Defaults to the chart's appVersion when unset.
+  tag: "dev"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  automount: true
+  annotations: {}
+
+# Override the container command/args to point at the Helm-mounted config.
+command: ["/app/flight-control"]
+args: ["--config", "/app/config/flight-control.yaml", "run"]
+
+service:
+  type: ClusterIP
+  # HTTP edge (api-gateway) + probes.
+  port: 8087
+
+# gRPC DirectoryService (grpc-hub) exposed so OoP gear pods can register/resolve
+# across pods via this Service's DNS name.
+grpc:
+  enabled: true
+  port: 50051
+
+# Optional external HTTP entry point in front of the api-gateway edge.
+# Disabled by default; the umbrella dev/prod presets enable it. OoP gears are
+# reached through this gateway by path prefix, not via their own Ingress
+# (ADR-0007).
+ingress:
+  enabled: false
+  className: ""
+  # When fronted by nginx-ingress, the edge benefits from controller tuning so
+  # it can proxy streaming responses and larger request bodies without the
+  # default 60s stream timeout / 1MB body cap. The umbrella dev/prod presets set
+  # these; enable them here if using this chart standalone:
+  #   nginx.ingress.kubernetes.io/proxy-buffering: "off"
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  #   nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  #   nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+  annotations: {}
+  hosts:
+    - host: flight-control.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Flight Control hosts the DirectoryService, so it does not itself dial one.
+directoryEndpoint: ""
+
+# SA-token projection: Flight Control is BOTH the receiver/validator of
+# platform-plane tokens (grpc-hub TokenReview) AND a caller — its api-gateway
+# reverse-proxy polls the DirectoryService over gRPC and must present its own
+# projected token. A ClusterRoleBinding to `system:auth-delegator` (see
+# templates/rbac.yaml) grants this SA permission to submit TokenReviews.
+saToken:
+  enabled: true
+  audience: toolkit-internal
+  mountPath: /var/run/secrets/tokens/toolkit-internal
+  fileName: token
+  expirationSeconds: 3600
+
+probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 5
+    periodSeconds: 15
+    failureThreshold: 3
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 3
+    periodSeconds: 5
+    failureThreshold: 6
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 2Gi
+
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+podLabels: {}
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: ["ALL"]
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
+# ---------------------------------------------------------------------------
+# Gear configuration mounted at /app/config/flight-control.yaml.
+#
+# This is the Kubernetes variant of config/flight-control.yaml:
+#   * grpc-hub listens on TCP 0.0.0.0:50051 (reachable cross-pod via Service DNS)
+#     instead of a Unix domain socket.
+#   * api-gateway runs the embedded-edge reverse proxy (gateway_proxy), polling
+#     the in-pod DirectoryService and proxying external requests to OoP gears.
+#   * tenant-plane auth is enforced at the edge: `.authenticated()` routes
+#     require a bearer token, validated by authn-resolver + the static-authn
+#     plugin (accept_all maps any non-empty bearer to the platform-root tenant).
+#
+# Only the minimal control plane is configured here. The AuthZ plane
+# (authz-resolver + tenant-resolver + resource-group) and application gears run
+# as their own OoP units and register with this DirectoryService.
+# ---------------------------------------------------------------------------
+config:
+  mountPath: /app/config/flight-control.yaml
+  fileName: flight-control.yaml
+  # Structured gear config (see toolkit-common configmap): any leaf is overridable
+  # via Helm merge. Keep template-bearing scalars single-quoted so `tpl` resolves.
+  data:
+    server:
+      home_dir: "/app/data"
+
+    logging:
+      default:
+        console_format: "json"
+        console_level: info
+        file_level: info
+
+    gears:
+      api-gateway:
+        config:
+          bind_addr: "0.0.0.0:8087"
+          # In-cluster Service DNS other pods use to reach this gateway; derived
+          # from the Service fullname + port so it stays correct if
+          # fullnameOverride changes.
+          advertise_uri: 'http://{{ include "toolkit-common.fullname" . }}:{{ .Values.service.port }}'
+          enable_docs: true
+          cors_enabled: false
+          openapi:
+            title: "CF/Gears Flight Control API"
+            version: "0.1.0"
+            description: "CF/Gears Flight Control API Documentation"
+          defaults:
+            body_limit_bytes: 64000000
+          auth_disabled: false
+          require_auth_by_default: true
+          internal_auth:
+            provider: kube
+            audiences: ["toolkit-internal"]
+            token_path: /var/run/secrets/tokens/toolkit-internal/token
+          gateway_proxy:
+            enabled: true
+            directory_endpoint: "http://127.0.0.1:50051"
+            sync_interval_secs: 5
+
+      gear-orchestrator:
+        config: {}
+
+      grpc-hub:
+        config:
+          listen_addr: "0.0.0.0:50051"
+          internal_auth:
+            provider: kube
+            audiences: ["toolkit-internal"]
+          internal_auth_enforcement: required
+
+      authn-resolver:
+        config:
+          vendor: "constructorfabric"
+
+      static-authn-plugin:
+        config:
+          vendor: "constructorfabric"
+          priority: 100
+          mode: accept_all

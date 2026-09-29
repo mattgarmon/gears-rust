@@ -1,4 +1,4 @@
-# Local multi-process platform-host: hello OoP gear.
+# Local multi-process: hello OoP gear.
 #
 # Run (after the host is up):
 #   TOOLKIT_DIRECTORY_ENDPOINT=http://127.0.0.1:50051 \

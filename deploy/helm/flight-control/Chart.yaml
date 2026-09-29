@@ -1,0 +1,15 @@
+apiVersion: v2
+name: flight-control
+description: >-
+  CF/Gears Flight Control - the minimal platform control plane
+  (gear-orchestrator, grpc-hub, api-gateway, types-registry, authn-resolver),
+  deployed as a single pod. Serves the edge api-gateway and the DirectoryService
+  (grpc-hub) that out-of-process gear pods register with and discover through.
+  Application gears and the AuthZ plane run as their own OoP units.
+type: application
+version: 0.1.0
+appVersion: "dev"
+dependencies:
+  - name: toolkit-common
+    version: 0.1.0
+    repository: "file://../toolkit-common"

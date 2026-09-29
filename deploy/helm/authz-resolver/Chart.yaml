@@ -1,0 +1,17 @@
+apiVersion: v2
+name: authz-resolver
+description: >-
+  AuthZ resolver - the out-of-process policy decision point (PDP). Deploys as its
+  own pod embedding the dependent gears it needs to resolve authorization
+  in-process (tenant-resolver plus the tr-authz and static-tr plugins), so the
+  chain's anonymous-context calls never cross the wire. Registers its REST
+  endpoint with the Flight Control's DirectoryService; out-of-process PEPs reach
+  /authz-resolver/v1/evaluate via directory resolution. Profile 3 out-of-process
+  path.
+type: application
+version: 0.1.0
+appVersion: "dev"
+dependencies:
+  - name: toolkit-common
+    version: 0.1.0
+    repository: "file://../toolkit-common"

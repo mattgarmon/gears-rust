@@ -5,7 +5,7 @@ publish = false
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "CF/Gears Flight Control - the minimal platform control-plane deployment unit (orchestration + edge + AuthN) for distributed Profile 2/3 deployments"
+description = "CF/Gears Flight Control - the minimal platform control-plane deployment unit (orchestration + edge + AuthN) for distributed deployments"
 
 [lints]
 workspace = true
