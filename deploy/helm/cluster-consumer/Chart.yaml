@@ -1,0 +1,14 @@
+apiVersion: v2
+name: cluster-consumer
+description: >-
+  cluster-consumer - a demo gear that resolves ClusterCacheV1 from the cluster
+  pod over gRPC and does a cache round-trip. Its `.exposed()` REST route is
+  reverse-proxied by the api-gateway edge. Demonstrates a Profile 3 consumer of
+  the cluster coordination plane.
+type: application
+version: 0.1.0
+appVersion: "dev"
+dependencies:
+  - name: toolkit-common
+    version: 0.1.0
+    repository: "file://../toolkit-common"

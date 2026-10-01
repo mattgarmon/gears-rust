@@ -32,3 +32,11 @@ dependencies:
     version: 0.1.0
     repository: "file://../api-contracts-consumer"
     condition: api-contracts-consumer.enabled
+  - name: cluster
+    version: 0.1.0
+    repository: "file://../cluster"
+    condition: cluster.enabled
+  - name: cluster-consumer
+    version: 0.1.0
+    repository: "file://../cluster-consumer"
+    condition: cluster-consumer.enabled

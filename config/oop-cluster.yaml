@@ -1,0 +1,46 @@
+# Local multi-process platform-host: cluster OoP gear (standalone backend).
+#
+# Run (after the host is up):
+#   TOOLKIT_DIRECTORY_ENDPOINT=http://127.0.0.1:50051 \
+#     cargo run -p cf-gears-cluster --bin cluster-oop -- --config config/oop-cluster.yaml
+#
+# Serves its coordination gRPC plane on 127.0.0.1:50061 (its own grpc-hub) and
+# the OoP HTTP probes on 127.0.0.1:9092. It registers presence with the
+# platform-host DirectoryService (TOOLKIT_DIRECTORY_ENDPOINT), NOT on :50051.
+#
+# NOTE (loopback): a cluster *consumer* derives the cluster endpoint from
+# Kubernetes DNS convention (cluster.{POD_NAMESPACE}.svc.cluster.local:50051,
+# see cluster_sdk::wiring) — there is no client-side endpoint key by design
+# (invariant I9). On plain loopback that name does not resolve, so a consumer's
+# round-trip returns a typed ConnectionLost. The successful round-trip is the
+# Kubernetes demo's job. This gear still boots, serves its probes, and registers.
+ 
+server:
+  home_dir: "~/.cf-gears-cluster"
+ 
+logging:
+  default:
+    console_level: info
+    file: "logs/oop-cluster.log"
+    file_level: info
+ 
+# OoP HTTP serving lifecycle: bind the local probe/REST server + register with
+# the DirectoryService so the edge and consumers can discover this instance.
+oop_http:
+  listen_addr: "127.0.0.1:9092"
+  advertise_uri: "http://127.0.0.1:9092"
+  allow_loopback_advertise: true
+ 
+gears:
+  # cluster's own gRPC hub hosts its coordination plane. Required — without a
+  # configured, linked hub the registry fails with GrpcRequiresHub.
+  grpc-hub:
+    config:
+      listen_addr: "127.0.0.1:50061"
+  # One standalone profile named `demo`, matched by the consumer's DemoProfile
+  # marker (NAME = "demo"). standalone is in-memory: no infrastructure needed.
+  cluster:
+    config:
+      profiles:
+        demo:
+          cache: { provider: standalone }

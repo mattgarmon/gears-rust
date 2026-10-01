@@ -1,0 +1,60 @@
+[package]
+name = "cluster-consumer"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Cluster-consuming demo gear (Profile 3): a seat-reservation service built on the cluster cache (CAS), distributed lock, and leader election"
+
+[lints]
+workspace = true
+
+# OoP binary: only built with `oop_module` (adds the bootstrap entrypoint). The
+# library is always available for in-process linking (Profile 1) without the
+# binary; its coordination + sweeper logic uses Tokio unconditionally, so `tokio`
+# is a normal (non-optional) dependency.
+[[bin]]
+name = "cluster-consumer-oop"
+path = "src/main.rs"
+required-features = ["oop_module"]
+
+[features]
+default = []
+# Build the standalone OoP binary (adds the bootstrap entrypoint).
+oop_module = ["toolkit/bootstrap"]
+# Kubernetes TokenReview platform-plane auth.
+k8s-auth = ["toolkit/k8s-auth"]
+
+[dependencies]
+# ToolKit
+toolkit = { workspace = true }
+toolkit-macros = { workspace = true }
+toolkit-canonical-errors = { workspace = true }
+
+# The cluster contract. `grpc-client` is REQUIRED: it compiles the SDK's
+# hand-written `ConsumerRegistration` + `RemoteClusterClient`, which is what the
+# framework's proxy-wiring phase replays to put a remote `dyn ClusterClient` in
+# the hub. Without it, nothing wires a client and `resolve()` finds no binding.
+cluster-sdk = { workspace = true, features = ["grpc-client"] }
+
+# Axum & HTTP
+axum = { workspace = true }
+http = { workspace = true }
+
+# Serialization (REST DTOs / OpenAPI + the JSON seat records stored in the cache)
+serde = { workspace = true }
+serde_json = { workspace = true }
+utoipa = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+# Utils
+anyhow = { workspace = true }
+tracing = { workspace = true }
+inventory = { workspace = true }
+clap = { workspace = true }
+mimalloc = { version = "0.1" }

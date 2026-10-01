@@ -17,6 +17,7 @@ postgres:
   fullnameOverride: shared-postgres
   databases:
     - usersinfo
+    - cluster
 
 hello:
   enabled: true
@@ -40,3 +41,29 @@ users-info:
     database: usersinfo
     user: platform
     password: "platform-demo-pw"
+
+# Coordination system gear. fullnameOverride MUST be `cluster` so its Service DNS
+# is the endpoint (cluster.{namespace}.svc.cluster.local:50051) that consumers
+# derive by convention. Backed by the shared Postgres `cluster` database.
+cluster:
+  enabled: true
+  fullnameOverride: cluster
+  image:
+    repository: ghcr.io/constructorfabric/cluster
+    tag: "dev"
+    pullPolicy: IfNotPresent
+  directoryEndpoint: "http://platform-host:50051"
+  postgres:
+    host: shared-postgres
+    database: cluster
+    user: platform
+    password: "platform-demo-pw"
+
+cluster-consumer:
+  enabled: true
+  fullnameOverride: cluster-consumer
+  image:
+    repository: ghcr.io/constructorfabric/cluster-consumer
+    tag: "dev"
+    pullPolicy: IfNotPresent
+  directoryEndpoint: "http://platform-host:50051"

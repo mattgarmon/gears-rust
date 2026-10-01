@@ -1,0 +1,146 @@
+platform-host:
+  enabled: true
+  fullnameOverride: platform-host
+  image:
+    repository: bg-g3.perf.corp.acronis.com:5000/platform-host
+    tag: "release"
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      memory: 4Gi
+  service:
+    type: NodePort
+    port: 8087
+    nodePort: 30087
+  ingress:
+    enabled: false
+  postgres:
+    host: shared-postgres
+    user: platform
+    password: "platform-demo-pw"
+    databases:
+      accountManagement: accountmanagement
+      resourceGroup: resourcegroup
+      credstore: credstore
+
+hello:
+  enabled: true
+  fullnameOverride: hello
+  image:
+    repository: bg-g3.perf.corp.acronis.com:5000/hello
+    tag: "release"
+    pullPolicy: Always
+  directoryEndpoint: "http://platform-host:50051"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 1Gi
+
+users-info:
+  enabled: true
+  fullnameOverride: users-info
+  image:
+    repository: bg-g3.perf.corp.acronis.com:5000/users-info
+    tag: "release"
+    pullPolicy: Always
+  directoryEndpoint: "http://platform-host:50051"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 1Gi
+  postgres:
+    host: shared-postgres
+    database: usersinfo
+    user: platform
+    password: "platform-demo-pw"
+
+api-contracts:
+  enabled: true
+  fullnameOverride: api-contracts
+  image:
+    repository: bg-g3.perf.corp.acronis.com:5000/api-contracts
+    tag: "release"
+    pullPolicy: Always
+  directoryEndpoint: "http://platform-host:50051"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 1Gi
+
+api-contracts-consumer:
+  enabled: true
+  fullnameOverride: api-contracts-consumer
+  image:
+    repository: bg-g3.perf.corp.acronis.com:5000/api-contracts-consumer
+    tag: "release"
+    pullPolicy: Always
+  directoryEndpoint: "http://platform-host:50051"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 1Gi
+
+# Coordination system gear. fullnameOverride MUST be `cluster` so its Service DNS
+# is the endpoint (cluster.{namespace}.svc.cluster.local:50051) consumers derive
+# by convention. Backed by the shared Postgres `cluster` database below.
+cluster:
+  enabled: true
+  fullnameOverride: cluster
+  image:
+    repository: bg-g3.perf.corp.acronis.com:5000/cluster
+    tag: "release"
+    pullPolicy: Always
+  directoryEndpoint: "http://platform-host:50051"
+  postgres:
+    host: shared-postgres
+    database: cluster
+    user: platform
+    password: "platform-demo-pw"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 1Gi
+
+cluster-consumer:
+  enabled: true
+  fullnameOverride: cluster-consumer
+  image:
+    repository: bg-g3.perf.corp.acronis.com:5000/cluster-consumer
+    tag: "release"
+    pullPolicy: Always
+  directoryEndpoint: "http://platform-host:50051"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 1Gi
+
+postgres:
+  enabled: true
+  fullnameOverride: shared-postgres
+  databases:
+    - accountmanagement
+    - resourcegroup
+    - credstore
+    - usersinfo
+    - cluster
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 1Gi

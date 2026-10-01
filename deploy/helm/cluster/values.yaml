@@ -1,0 +1,155 @@
+# Default values for the cluster (OoP system gear) chart.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/constructorfabric/cluster
+  tag: "dev"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  automount: true
+  annotations: {}
+
+command: ["/app/gear"]
+args: ["--config", "/app/config/gear.yaml"]
+
+service:
+  type: ClusterIP
+  # OoP HTTP probe port (matches oop_http.listen_addr).
+  port: 9092
+
+# cluster's coordination gRPC plane. A consumer derives its endpoint by DNS
+# convention as cluster.{namespace}.svc.cluster.local:50051 (cluster_sdk::wiring,
+# CLUSTER_GRPC_PORT) — so this Service MUST publish :50051 and this chart MUST be
+# named `cluster` (set fullnameOverride: cluster). The container binds it via
+# gears.grpc-hub.config.listen_addr below.
+grpc:
+  enabled: true
+  port: 50051
+
+# DirectoryService (platform host grpc-hub) this gear registers presence with.
+directoryEndpoint: "http://platform-host:50051"
+
+# Backing store for the `demo` profile. The postgres backend is what makes
+# coordination correct across replicas (all pods share state through Postgres),
+# so it is the default here and pairs with replicaCount > 1. Point this at the
+# shared Postgres and add `cluster` to the umbrella `postgres.databases` list so
+# the database is created. The postgres-cluster-plugin runs its own migrations on
+# startup. For a single-pod, infrastructure-free run, set provider to standalone
+# in config.content below instead (in-memory; does NOT coordinate across pods).
+postgres:
+  host: shared-postgres
+  user: platform
+  password: "platform-demo-pw"
+  database: cluster
+
+# SA-token projection for platform-plane auth (audience toolkit-internal),
+# mounted so the gear can (a) present it when registering with the platform-host
+# DirectoryService and (b) validate inbound coordination calls via TokenReview.
+saToken:
+  enabled: true
+  audience: toolkit-internal
+  mountPath: /var/run/secrets/tokens/toolkit-internal
+  fileName: token
+  expirationSeconds: 3600
+
+probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 3
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    failureThreshold: 6
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+podLabels: {}
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: ["ALL"]
+nodeSelector: {}
+affinity: {}
+tolerations: []
+
+# Gear config mounted at /app/config/gear.yaml (rendered with `tpl`, so the Helm
+# expressions below are evaluated).
+#
+#   * Probes bind 0.0.0.0:9092 (http). advertise_uri uses the in-cluster Service
+#     DNS so the platform-host edge can reach it.
+#   * cluster's grpc-hub binds 0.0.0.0:50051 (the coordination plane) and enforces
+#     inbound X-ToolKit-Internal-Token via TokenReview. To disable enforcement for
+#     a first light-up, drop the grpc-hub `internal_auth` block and the
+#     `internal_auth_enforcement` key (the rbac.yaml binding then goes unused).
+#   * One profile named `demo`, matched by the consumer's DemoProfile marker, on
+#     the postgres backend (shared state across replicas). See the `postgres`
+#     value block above; swap to `{ provider: standalone }` for a single-pod run.
+config:
+  mountPath: /app/config/gear.yaml
+  fileName: gear.yaml
+  data:
+    server:
+      home_dir: "/app/data"
+
+    logging:
+      default:
+        console_format: "json"
+        console_level: info
+
+    oop_http:
+      listen_addr: "0.0.0.0:9092"
+      advertise_uri: 'http://{{ include "toolkit-common.fullname" . }}:9092'
+      internal_auth:
+        provider: kube
+        audiences: ["toolkit-internal"]
+        token_path: /var/run/secrets/tokens/toolkit-internal/token
+
+    gears:
+      grpc-hub:
+        config:
+          listen_addr: "0.0.0.0:50051"
+          internal_auth:
+            provider: kube
+            audiences: ["toolkit-internal"]
+          internal_auth_enforcement: required
+      cluster:
+        config:
+          profiles:
+            demo:
+              # Postgres backend: correct across replicas (shared state). For a
+              # single-pod infra-free run, replace with: cache: { provider: standalone }
+              cache:
+                provider: postgres
+                connection_string: "postgres://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:5432/{{ .Values.postgres.database }}"
+              # Native Postgres distributed lock (pg_advisory_lock + the
+              # `cluster_lock` table). Declaring it explicitly uses
+              # `PostgresLockProvider` instead of the SDK CAS-over-cache default.
+              lock:
+                provider: postgres
+                connection_string: "postgres://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:5432/{{ .Values.postgres.database }}"
+              # leader_election is omitted: no native provider exists, so it uses
+              # the SDK CAS-based default layered over the postgres cache above.

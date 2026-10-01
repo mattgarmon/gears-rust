@@ -17,3 +17,9 @@ api-contracts:
 
 api-contracts-consumer:
   enabled: false
+
+cluster:
+  enabled: false
+
+cluster-consumer:
+  enabled: false

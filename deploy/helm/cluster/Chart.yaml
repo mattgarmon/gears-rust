@@ -1,0 +1,14 @@
+apiVersion: v2
+name: cluster
+description: >-
+  cluster - the coordination system gear (cache / distributed lock / leader
+  election) as its own pod. Serves its gRPC coordination plane on :50051 (the
+  port consumers derive by DNS convention) and registers presence with the
+  platform host's DirectoryService. Deploys the Profile 3 out-of-process path.
+type: application
+version: 0.1.0
+appVersion: "dev"
+dependencies:
+  - name: toolkit-common
+    version: 0.1.0
+    repository: "file://../toolkit-common"

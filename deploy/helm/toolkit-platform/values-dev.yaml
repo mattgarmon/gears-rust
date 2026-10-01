@@ -4,7 +4,7 @@
 # pullPolicy: Never avoids a registry round-trip). The Postgres image is public,
 # so only platform-host and the 4 gear images need loading:
 #
-#   for img in platform-host hello users-info api-contracts api-contracts-consumer; do
+#   for img in platform-host hello users-info api-contracts api-contracts-consumer cluster cluster-consumer; do
 #     minikube image load "ghcr.io/constructorfabric/${img}:dev"
 #   done
 #   helm install demo deploy/helm/toolkit-platform -f deploy/helm/toolkit-platform/values-dev.yaml
@@ -54,6 +54,7 @@ postgres:
     - resourcegroup
     - credstore
     - usersinfo
+    - cluster
 
 hello:
   enabled: true
@@ -95,6 +96,36 @@ api-contracts-consumer:
   fullnameOverride: api-contracts-consumer
   image:
     repository: ghcr.io/constructorfabric/api-contracts-consumer
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://platform-host:50051"
+
+# Coordination-plane demo: the cluster system gear (cache / lock / leader) as its
+# own pod. fullnameOverride MUST be `cluster` so its Service DNS is
+# cluster.{namespace}.svc.cluster.local:50051 — the endpoint the consumer derives
+# by convention. Backed by the shared Postgres `cluster` database above.
+cluster:
+  enabled: true
+  fullnameOverride: cluster
+  image:
+    repository: ghcr.io/constructorfabric/cluster
+    tag: "dev"
+    pullPolicy: Never
+  directoryEndpoint: "http://platform-host:50051"
+  postgres:
+    host: shared-postgres
+    database: cluster
+    user: platform
+    password: "platform-demo-pw"
+
+# The cluster consumer pod: resolves ClusterCacheV1 from the cluster pod over
+# gRPC (DNS convention) and does seat-reservation round-trips. Its REST route is
+# reverse-proxied by the edge.
+cluster-consumer:
+  enabled: true
+  fullnameOverride: cluster-consumer
+  image:
+    repository: ghcr.io/constructorfabric/cluster-consumer
     tag: "dev"
     pullPolicy: Never
   directoryEndpoint: "http://platform-host:50051"

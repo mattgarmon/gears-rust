@@ -1,0 +1,39 @@
+# Local multi-process platform-host: cluster-consumer OoP gear.
+#
+# Run (after the host + the cluster provider are up):
+#   TOOLKIT_DIRECTORY_ENDPOINT=http://127.0.0.1:50051 \
+#     cargo run -p cluster-consumer --features oop_module --bin cluster-consumer-oop \
+#       -- --config config/oop-cluster-consumer.yaml
+#
+# Then:
+#   curl http://127.0.0.1:8087/cluster-consumer/v1/ping        # proxied via the edge
+#   curl http://127.0.0.1:9093/cluster-consumer/v1/ping        # direct to the OoP pod
+#
+# NOTE (loopback): the coordination routes (/inventory, /reservations, ...) drive
+# the cluster gRPC plane, whose endpoint the consumer derives by the Kubernetes
+# DNS convention (cluster.{POD_NAMESPACE}.svc.cluster.local:50051, see
+# cluster_sdk::wiring) — there is no client-side endpoint key by design
+# (invariant I9). On plain loopback that name does not resolve, so those routes
+# return a typed ConnectionLost (HTTP 503). The cluster-free `/ping` and
+# `/status` routes still work, proving the pod boots and is reachable through the
+# edge. The successful coordination round-trip is the Kubernetes demo's job.
+
+server:
+  home_dir: "~/.cf-gears-cluster-consumer"
+
+logging:
+  default:
+    console_level: info
+    file: "logs/oop-cluster-consumer.log"
+    file_level: info
+
+# OoP HTTP serving lifecycle: bind the local REST server + register its endpoint
+# with the DirectoryService so the edge can proxy to it.
+oop_http:
+  listen_addr: "127.0.0.1:9093"
+  advertise_uri: "http://127.0.0.1:9093"
+  allow_loopback_advertise: true
+
+gears:
+  cluster-consumer:
+    config: {}
