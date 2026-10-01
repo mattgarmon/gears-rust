@@ -938,7 +938,7 @@ direct call to gRPC. Platform REST exists for callers that are not gears — hum
 external workloads authenticated by `X-ToolKit-Internal-Token` or mTLS SPIFFE. The repository
 shows the split: `examples/oop-gears/calculator` carries `proto/`, `client.rs` and `wiring.rs`
 in its SDK plus `api/grpc/server.rs` in the gear, and has no REST surface at all, while
-`gear-orchestrator` declares `capabilities = [grpc, system, rest]` and carries both.
+`service-discovery` declares `capabilities = [grpc, system, rest]` and carries both.
 
 Two P0 properties make the later gRPC surface cheap rather than a redesign. The async protocol
 is transport-neutral by construction — submit, get an id, poll — with no streaming or

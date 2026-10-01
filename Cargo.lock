@@ -2417,7 +2417,6 @@ dependencies = [
  "cf-gears-credstore",
  "cf-gears-file-parser",
  "cf-gears-file-storage",
- "cf-gears-gear-orchestrator",
  "cf-gears-github-mirror",
  "cf-gears-grpc-hub",
  "cf-gears-license-resolver",
@@ -2426,6 +2425,7 @@ dependencies = [
  "cf-gears-oagw",
  "cf-gears-resource-group",
  "cf-gears-rg-tr-plugin",
+ "cf-gears-service-discovery",
  "cf-gears-settings-service",
  "cf-gears-simple-user-settings",
  "cf-gears-single-tenant-tr-plugin",
@@ -2574,9 +2574,9 @@ dependencies = [
  "anyhow",
  "cf-gears-api-gateway",
  "cf-gears-authn-resolver",
- "cf-gears-gear-orchestrator",
  "cf-gears-grpc-hub",
  "cf-gears-oidc-authn-plugin",
+ "cf-gears-service-discovery",
  "cf-gears-static-authn-plugin",
  "cf-gears-toolkit",
  "cf-gears-types-registry",
@@ -2585,34 +2585,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "cf-gears-gear-orchestrator"
-version = "0.2.3"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "cf-gears-api-gateway",
- "cf-gears-system-sdks",
- "cf-gears-toolkit",
- "cf-gears-toolkit-macros",
- "cf-gears-toolkit-security",
- "cf-gears-toolkit-transport-grpc",
- "http",
- "inventory",
- "secrecy",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tonic",
- "tower",
- "tracing",
- "tracing-test",
- "utoipa",
- "uuid",
 ]
 
 [[package]]
@@ -3192,6 +3164,34 @@ version = "0.1.2"
 dependencies = [
  "hyper-rustls",
  "rustls",
+]
+
+[[package]]
+name = "cf-gears-service-discovery"
+version = "0.2.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "cf-gears-api-gateway",
+ "cf-gears-system-sdks",
+ "cf-gears-toolkit",
+ "cf-gears-toolkit-macros",
+ "cf-gears-toolkit-security",
+ "cf-gears-toolkit-transport-grpc",
+ "http",
+ "inventory",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-test",
+ "utoipa",
+ "uuid",
 ]
 
 [[package]]

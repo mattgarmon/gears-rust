@@ -1,21 +1,21 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! End-to-end tests for the `GET /gear-orchestrator/v1/gears` REST endpoint.
+//! End-to-end tests for the `GET /service-discovery/v1/gears` REST endpoint.
 //!
-//! These tests build a real axum `Router` with the gear orchestrator's routes
+//! These tests build a real axum `Router` with the directory service's routes
 //! registered via `OperationBuilder`, then send HTTP requests using `tower::ServiceExt::oneshot`.
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use gear_orchestrator::api::rest;
+use service_discovery::api::rest;
 use std::sync::Arc;
 use toolkit::registry::RegistryBuilder;
 use toolkit::runtime::{Endpoint, GearInstance, GearManager};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use gear_orchestrator::domain::service::GearsService;
+use service_discovery::domain::service::GearsService;
 
 // ---- Test helpers ----
 
@@ -72,7 +72,7 @@ async fn get_gears(router: Router) -> (StatusCode, serde_json::Value) {
         .oneshot(
             Request::builder()
                 .method(Method::GET)
-                .uri("/gear-orchestrator/v1/gears")
+                .uri("/service-discovery/v1/gears")
                 .body(Body::empty())
                 .unwrap(),
         )

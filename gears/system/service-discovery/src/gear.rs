@@ -1,4 +1,4 @@
-//! Gear definition for `GearOrchestrator`
+//! Gear definition for `ServiceDiscoveryGear`
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -17,12 +17,12 @@ use toolkit::runtime::GearManager;
 use cf_system_sdks::directory::DIRECTORY_SERVICE_NAME;
 use cf_system_sdks::directory::labels::is_valid_label_segment;
 
-use crate::config::OrchestratorConfig;
+use crate::config::ServiceDiscoveryConfig;
 use crate::domain::authz::RegistrationPolicy;
 use crate::domain::service::GearsService;
 use crate::server;
 
-/// Gear Orchestrator - system gear for service discovery
+/// Service Discovery - system gear for service discovery
 ///
 /// This gear:
 /// - Provides `DirectoryClient` to the `ClientHub` for in-process gears
@@ -30,18 +30,18 @@ use crate::server;
 /// - Tracks gear instances and provides service resolution
 /// - Exposes REST API to list all registered gears
 #[toolkit::gear(
-    name = "gear-orchestrator",
+    name = "service-discovery",
     capabilities = [grpc, system, rest],
     client = cf_system_sdks::directory::DirectoryClient
 )]
-pub struct GearOrchestrator {
+pub struct ServiceDiscoveryGear {
     directory_api: OnceLock<Arc<dyn DirectoryClient>>,
     gear_manager: OnceLock<Arc<GearManager>>,
     gears_service: OnceLock<Arc<GearsService>>,
     policy: OnceLock<RegistrationPolicy>,
 }
 
-impl Default for GearOrchestrator {
+impl Default for ServiceDiscoveryGear {
     fn default() -> Self {
         Self {
             directory_api: OnceLock::new(),
@@ -53,7 +53,7 @@ impl Default for GearOrchestrator {
 }
 
 #[async_trait]
-impl SystemCapability for GearOrchestrator {
+impl SystemCapability for ServiceDiscoveryGear {
     fn pre_init(&self, sys: &toolkit::runtime::SystemContext) -> anyhow::Result<()> {
         self.gear_manager
             .set(Arc::clone(&sys.gear_manager))
@@ -63,7 +63,7 @@ impl SystemCapability for GearOrchestrator {
 }
 
 #[async_trait]
-impl toolkit::Gear for GearOrchestrator {
+impl toolkit::Gear for ServiceDiscoveryGear {
     async fn init(&self, ctx: &GearCtx) -> Result<()> {
         // Read the (optional) authorization config: which peers may act on any
         // gear's registration, plus the namespace / trust-domain allowlists.
@@ -72,7 +72,7 @@ impl toolkit::Gear for GearOrchestrator {
         // here: it is decided per-request from the `PlatformAuthEnforced` marker
         // the enforcement layer stamps (see `DirectoryServiceImpl`), so it stays
         // in lockstep with the listener without a drift-prone knob.
-        let cfg: OrchestratorConfig = ctx.config_or_default()?;
+        let cfg: ServiceDiscoveryConfig = ctx.config_or_default()?;
         self.policy
             .set(RegistrationPolicy {
                 trusted_registrars: cfg.trusted_registrars.into_iter().collect(),
@@ -86,11 +86,10 @@ impl toolkit::Gear for GearOrchestrator {
             GearRegistry::discover_and_build().context("failed to build gear registry")?;
 
         // Use the injected GearManager to create the DirectoryClient
-        let manager = self
-            .gear_manager
-            .get()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("GearManager not wired into GearOrchestrator"))?;
+        let manager =
+            self.gear_manager.get().cloned().ok_or_else(|| {
+                anyhow::anyhow!("GearManager not wired into ServiceDiscoveryGear")
+            })?;
 
         // Pin gRPC-service-name ownership from config so a name can only be
         // advertised by its configured owner, regardless of registration order.
@@ -129,13 +128,13 @@ impl toolkit::Gear for GearOrchestrator {
             .set(gears_service)
             .map_err(|_| anyhow::anyhow!("GearsService already set (init called twice?)"))?;
 
-        tracing::info!("GearOrchestrator initialized");
+        tracing::info!("ServiceDiscoveryGear initialized");
 
         Ok(())
     }
 }
 
-impl RestApiCapability for GearOrchestrator {
+impl RestApiCapability for ServiceDiscoveryGear {
     fn register_rest(
         &self,
         _ctx: &GearCtx,
@@ -150,14 +149,14 @@ impl RestApiCapability for GearOrchestrator {
 
         let router = crate::api::rest::routes::register_routes(router, openapi, service);
 
-        tracing::info!("GearOrchestrator REST routes registered");
+        tracing::info!("ServiceDiscoveryGear REST routes registered");
         Ok(router)
     }
 }
 
 /// Export gRPC services to `grpc-hub`
 #[async_trait]
-impl GrpcServiceCapability for GearOrchestrator {
+impl GrpcServiceCapability for ServiceDiscoveryGear {
     async fn get_grpc_services(&self, _ctx: &GearCtx) -> Result<Vec<RegisterGrpcServiceFn>> {
         let api = self
             .directory_api
@@ -194,23 +193,23 @@ mod tests {
     struct StaticConfigProvider(serde_json::Value);
     impl ConfigProvider for StaticConfigProvider {
         fn get_gear_config(&self, gear_name: &str) -> Option<&serde_json::Value> {
-            (gear_name == "gear-orchestrator").then_some(&self.0)
+            (gear_name == "service-discovery").then_some(&self.0)
         }
     }
 
     /// Run `init` against a config section, returning the gear so tests can
     /// inspect the policy it built.
-    async fn init_with_config(config: serde_json::Value) -> Result<GearOrchestrator> {
+    async fn init_with_config(config: serde_json::Value) -> Result<ServiceDiscoveryGear> {
         let mut wrapped = serde_json::Map::new();
         wrapped.insert("config".to_owned(), config);
         let ctx = GearCtx::new(
-            "gear-orchestrator",
+            "service-discovery",
             Uuid::new_v4(),
             Arc::new(StaticConfigProvider(serde_json::Value::Object(wrapped))),
             Arc::new(ClientHub::default()),
             CancellationToken::new(),
         );
-        let gear = GearOrchestrator::default();
+        let gear = ServiceDiscoveryGear::default();
         let gear_manager = Arc::new(GearManager::new());
         gear.gear_manager
             .set(gear_manager)
@@ -344,6 +343,123 @@ mod tests {
         assert!(
             empty_owner.to_string().contains("owner"),
             "expected the error to flag the empty owner, got {empty_owner}"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_fails_without_a_wired_gear_manager() {
+        // `init` builds the gear catalog and then needs the `GearManager` that
+        // `pre_init` injects. If that wiring is skipped, `init` must surface a
+        // clear error rather than panic on the empty `OnceLock`.
+        let mut wrapped = serde_json::Map::new();
+        wrapped.insert("config".to_owned(), serde_json::json!({}));
+        let ctx = GearCtx::new(
+            "service-discovery",
+            Uuid::new_v4(),
+            Arc::new(StaticConfigProvider(serde_json::Value::Object(wrapped))),
+            Arc::new(ClientHub::default()),
+            CancellationToken::new(),
+        );
+
+        // Note: no `gear_manager` wired, unlike `init_with_config`.
+        let gear = ServiceDiscoveryGear::default();
+        let err = toolkit::Gear::init(&gear, &ctx)
+            .await
+            .expect_err("init must fail when the GearManager was never wired");
+        assert!(
+            err.to_string().contains("GearManager not wired"),
+            "expected the missing-GearManager error, got {err}"
+        );
+    }
+
+    /// A bare `GearCtx` for the capability methods that ignore their context
+    /// (`get_grpc_services`, `register_rest`); config is irrelevant here.
+    fn ignored_ctx() -> GearCtx {
+        GearCtx::new(
+            "service-discovery",
+            Uuid::new_v4(),
+            Arc::new(StaticConfigProvider(serde_json::Value::Object(
+                serde_json::Map::new(),
+            ))),
+            Arc::new(ClientHub::default()),
+            CancellationToken::new(),
+        )
+    }
+
+    #[test]
+    fn pre_init_wires_the_gear_manager() {
+        use toolkit::runtime::{GrpcInstallerStore, SystemContext};
+
+        let gear = ServiceDiscoveryGear::default();
+        let sys = SystemContext::new(
+            Uuid::new_v4(),
+            Arc::new(GearManager::new()),
+            Arc::new(GrpcInstallerStore::new()),
+        );
+
+        gear.pre_init(&sys)
+            .expect("pre_init must wire the injected GearManager");
+        assert!(
+            gear.gear_manager.get().is_some(),
+            "pre_init must store the GearManager for init to use"
+        );
+
+        // A second wiring must fail loudly rather than silently swallow the
+        // duplicate; the OnceLock is set-once by contract.
+        gear.pre_init(&sys)
+            .expect_err("pre_init must reject a second call");
+    }
+
+    #[tokio::test]
+    async fn get_grpc_services_advertises_the_directory_service() {
+        let gear = init_with_config(serde_json::json!({}))
+            .await
+            .expect("init must succeed so directory_api and policy are set");
+
+        let services = GrpcServiceCapability::get_grpc_services(&gear, &ignored_ctx())
+            .await
+            .expect("get_grpc_services must succeed once init has run");
+
+        assert_eq!(services.len(), 1, "exactly one gRPC service is exported");
+        assert_eq!(
+            services[0].service_name, DIRECTORY_SERVICE_NAME,
+            "the exported service must be the directory service"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_grpc_services_fails_before_init() {
+        // Without init, neither directory_api nor policy is set, so the export
+        // must fail rather than panic on a missing OnceLock.
+        let gear = ServiceDiscoveryGear::default();
+        assert!(
+            GrpcServiceCapability::get_grpc_services(&gear, &ignored_ctx())
+                .await
+                .is_err(),
+            "get_grpc_services must fail before init wires the client"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_rest_mounts_routes() {
+        let gear = init_with_config(serde_json::json!({}))
+            .await
+            .expect("init must succeed so the GearsService is set");
+
+        let openapi = toolkit::api::OpenApiRegistryImpl::new();
+        let _router =
+            RestApiCapability::register_rest(&gear, &ignored_ctx(), axum::Router::new(), &openapi)
+                .expect("register_rest must succeed once init has built the GearsService");
+    }
+
+    #[test]
+    fn register_rest_fails_before_init() {
+        let gear = ServiceDiscoveryGear::default();
+        let openapi = toolkit::api::OpenApiRegistryImpl::new();
+        assert!(
+            RestApiCapability::register_rest(&gear, &ignored_ctx(), axum::Router::new(), &openapi)
+                .is_err(),
+            "register_rest must fail before init builds the GearsService"
         );
     }
 }

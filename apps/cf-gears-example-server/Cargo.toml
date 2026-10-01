@@ -66,7 +66,7 @@ toolkit = { workspace = true, features = ["bootstrap"] }
 api_gateway = { package = "cf-gears-api-gateway", path = "../../gears/system/api-gateway" }
 api_egress = { package = "cf-gears-oagw", path = "../../gears/system/oagw/oagw", optional = true }
 grpc_hub = { package = "cf-gears-grpc-hub", path = "../../gears/system/grpc-hub", optional = true }
-gear_orchestrator = { package = "cf-gears-gear-orchestrator", path = "../../gears/system/gear-orchestrator" }
+service_discovery = { package = "cf-gears-service-discovery", path = "../../gears/system/service-discovery" }
 types_registry = { package = "cf-gears-types-registry", path = "../../gears/system/types-registry/types-registry" }
 tenant-resolver = { package = "cf-gears-tenant-resolver", path = "../../gears/system/tenant-resolver/tenant-resolver" }
 authn-resolver = { package = "cf-gears-authn-resolver", path = "../../gears/system/authn-resolver/authn-resolver" }

@@ -112,7 +112,7 @@ members = [
     "gears/system/nodes-registry/nodes-registry-sdk",
     "gears/system/resource-group/resource-group-sdk",
     "gears/system/resource-group/resource-group",
-    "gears/system/gear-orchestrator",
+    "gears/system/service-discovery",
     "examples/toolkit/users-info/users-info-sdk",
     "examples/toolkit/users-info/users-info",
     "examples/toolkit/users-info/users-info-server",

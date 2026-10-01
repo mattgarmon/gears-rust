@@ -15,7 +15,6 @@ use credstore as _;
 use file_parser as _;
 #[cfg(feature = "file-storage")]
 use file_storage as _;
-use gear_orchestrator as _;
 #[cfg(feature = "github-mirror")]
 use github_mirror as _;
 #[cfg(feature = "grpc-hub")]
@@ -25,6 +24,7 @@ use license_resolver as _;
 use nodes_registry as _;
 #[cfg(feature = "resource-group")]
 use resource_group as _;
+use service_discovery as _;
 #[cfg(feature = "settings-service")]
 use settings_service as _;
 #[cfg(all(feature = "simple-user-settings", not(feature = "oop-example")))]

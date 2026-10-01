@@ -1,10 +1,10 @@
-# Gear Orchestrator Gear
+# Service Discovery Gear
 
 System gear for service discovery.
 
 ## Overview
 
-The `cf-gears-ochestrator` crate implements the `gear_orchestrator` gear.
+The `cf-gears-service-discovery` crate implements the `service-discovery` gear.
 
 It:
 
@@ -29,7 +29,7 @@ mechanism.
 A request with no `PlatformSecurityContext` is handled per the listener's auth
 posture, which rides the request itself: the platform-plane enforcement layer
 (`grpc-hub`'s `InternalAuthGrpcLayer`) stamps a `PlatformAuthEnforced` marker on
-every non-exempt request whenever enforcement is active. There is no orchestrator
+every non-exempt request whenever enforcement is active. There is no service-discovery
 knob to keep in sync, and it never reads another gear's config:
 
 - **Marker present** (the hub enforces platform auth and lets an anonymous caller
@@ -79,7 +79,7 @@ everywhere keep first-registration ownership.
 
 ```yaml
 gears:
-  gear-orchestrator:
+  service-discovery:
     config:
       trusted_registrars:
         - flight-control

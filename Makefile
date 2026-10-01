@@ -666,7 +666,7 @@ GEAR_COVERAGE_ARGS := $(if $(GEAR),--package $(firstword $(subst -p ,,$(GEAR_PKG
 # Base features always enabled when running a focused server.
 GEAR_SERVER_BASE_FEATURES ?= static-tenants,static-authn,static-authz
 # System gears that are non-optional deps of the example server (always linked).
-GEAR_SERVER_ALWAYS_LINKED ?= api-gateway gear-orchestrator types-registry tenant-resolver authn-resolver authz-resolver
+GEAR_SERVER_ALWAYS_LINKED ?= api-gateway service-discovery types-registry tenant-resolver authn-resolver authz-resolver
 # Check whether GEAR is a valid example-server feature or an always-linked gear.
 # When GEAR has no server feature (e.g. toolkit-db, toolkit-http), server-dependent
 # targets (run, openapi, e2e-local) are skipped; library-safe targets still work.

@@ -1,14 +1,14 @@
-//! Operator-facing configuration schema for the gear-orchestrator gear.
+//! Operator-facing configuration schema for the service-discovery gear.
 
 use std::collections::HashMap;
 
-/// The gear's config section (`gears.gear-orchestrator.config`).
+/// The gear's config section (`gears.service-discovery.config`).
 ///
 /// `deny_unknown_fields` so a misspelled key (e.g. `trusted_registrar`) fails at
 /// startup instead of silently deserializing to an empty set.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OrchestratorConfig {
+pub struct ServiceDiscoveryConfig {
     /// Peer identities permitted to act on any gear's registration (see
     /// [`crate::server::make_directory_service`]). Empty by default.
     #[serde(default)]

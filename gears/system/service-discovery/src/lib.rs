@@ -1,4 +1,4 @@
-//! Gear Orchestrator
+//! Service Discovery
 //!
 //! System gear for service discovery.
 //! This gear provides `DirectoryService` for gRPC service registration and discovery.
@@ -6,7 +6,7 @@
 
 // === MODULE DEFINITION ===
 pub mod gear;
-pub use gear::GearOrchestrator;
+pub use gear::ServiceDiscoveryGear;
 
 // === INTERNAL MODULES (pub for integration tests) ===
 pub mod api;
