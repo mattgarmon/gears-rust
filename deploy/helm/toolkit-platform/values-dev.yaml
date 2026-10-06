@@ -1,0 +1,155 @@
+# Development preset with OTel Collector and Prometheus. Ensure dev images are available, then:
+#   bash deploy/helm/build-dependencies.sh
+#   helm install demo deploy/helm/toolkit-platform -f deploy/helm/toolkit-platform/values-dev.yaml
+#   kubectl -n cf-gears port-forward svc/prometheus-server 9090:80
+# Traces are available in the OTel Collector pod logs.
+
+global:
+  opentelemetry:
+    enabled: true
+    exporterKind: otlp_grpc
+    endpoint: "http://otel-collector:4317"
+
+flight-control:
+  enabled: true
+  fullnameOverride: flight-control
+  image:
+    repository: bg-g3.perf.corp.acronis.com:5000/flight-control
+    tag: "dev"
+    pullPolicy: Always
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-buffering: "off"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+    hosts:
+      - host: flight-control.local
+        paths:
+          - path: /
+            pathType: Prefix
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      memory: 4Gi
+
+hello:
+  enabled: true
+  fullnameOverride: hello
+  image:
+    repository: bg-g3.perf.corp.acronis.com:5000/hello
+    tag: "dev"
+    pullPolicy: Always
+  directoryEndpoint: "http://flight-control:50051"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 1Gi
+
+api-contracts:
+  enabled: true
+  fullnameOverride: api-contracts
+  image:
+    repository: bg-g3.perf.corp.acronis.com:5000/api-contracts
+    tag: "dev"
+    pullPolicy: Always
+  directoryEndpoint: "http://flight-control:50051"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 1Gi
+
+api-contracts-consumer:
+  enabled: true
+  fullnameOverride: api-contracts-consumer
+  image:
+    repository: bg-g3.perf.corp.acronis.com:5000/api-contracts-consumer
+    tag: "dev"
+    pullPolicy: Always
+  directoryEndpoint: "http://flight-control:50051"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 1Gi
+
+opentelemetry-collector:
+  enabled: true
+  ports:
+    prometheus:
+      enabled: true
+      containerPort: 9464
+      servicePort: 9464
+      protocol: TCP
+  config:
+    exporters:
+      prometheus:
+        endpoint: "0.0.0.0:9464"
+        namespace: cf_gears
+    service:
+      pipelines:
+        metrics:
+          exporters: [prometheus]
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+prometheus:
+  enabled: true
+  alertmanager:
+    enabled: false
+  kube-state-metrics:
+    enabled: false
+  prometheus-node-exporter:
+    enabled: false
+  prometheus-pushgateway:
+    enabled: false
+  scrapeConfigs:
+    kubernetes-api-servers:
+      enabled: false
+    kubernetes-nodes:
+      enabled: false
+    kubernetes-nodes-cadvisor:
+      enabled: false
+    kubernetes-service-endpoints:
+      enabled: false
+    kubernetes-service-endpoints-slow:
+      enabled: false
+    kubernetes-services:
+      enabled: false
+    kubernetes-pods:
+      enabled: false
+    kubernetes-pods-slow:
+      enabled: false
+    prometheus-pushgateway:
+      enabled: false
+  rbac:
+    create: false
+  server:
+    automountServiceAccountToken: false
+    persistentVolume:
+      enabled: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
+  serverFiles:
+    prometheus.yml:
+      scrape_configs:
+        - job_name: otel-collector
+          static_configs:
+            - targets: ["otel-collector:9464"]

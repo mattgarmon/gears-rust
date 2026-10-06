@@ -79,7 +79,7 @@ chart), while remaining publishable to OCI registries.
 ### Confirmation
 
 * CI validation: `helm lint` and `helm template` pass for every gear chart and the umbrella chart.
-* Integration test: `helm install toolkit-platform` with `values-minimal.yaml` successfully deploys the Flight Control
+* Integration test: `helm install toolkit-platform` with default values successfully deploys the Flight Control
   control plane (directory + edge + authn) in a test k8s cluster.
 * New gear check: a newly scaffolded gear's chart renders correctly with only `Chart.yaml`, `values.yaml`, and 2-3
   template files that include `toolkit-common` helpers.

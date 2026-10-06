@@ -1,0 +1,43 @@
+# Default profile: Flight Control only.
+
+global:
+  opentelemetry:
+    enabled: false
+    exporterKind: otlp_grpc
+    endpoint: "http://otel-collector:4317"
+
+flight-control:
+  enabled: true
+  fullnameOverride: flight-control
+  image:
+    repository: ghcr.io/constructorfabric/flight-control
+    tag: "dev"
+    pullPolicy: IfNotPresent
+
+hello:
+  enabled: false
+  fullnameOverride: hello
+  image:
+    repository: ghcr.io/constructorfabric/hello
+    tag: "dev"
+    pullPolicy: IfNotPresent
+  directoryEndpoint: "http://flight-control:50051"
+
+api-contracts:
+  enabled: false
+
+api-contracts-consumer:
+  enabled: false
+
+opentelemetry-collector:
+  enabled: false
+  fullnameOverride: otel-collector
+  mode: deployment
+  image:
+    repository: otel/opentelemetry-collector-contrib
+    tag: "0.161.0"
+  command:
+    name: otelcol-contrib
+
+prometheus:
+  enabled: false

@@ -1434,10 +1434,8 @@ deploy/
         _serviceaccount.tpl           # Optional ServiceAccount
     toolkit-platform/                  # Umbrella chart (type: application)
       Chart.yaml                      # Dependencies: all unit charts (conditional)
-      values.yaml                     # Global defaults
-      values-minimal.yaml             # Flight Control control plane only
-      values-production.yaml          # All gears, resource limits, HPA, PDB
-      values-dev.yaml                 # All gears, minimal resources, debug logging
+      values.yaml                     # Flight Control only
+      values-dev.yaml                 # Full dev deployment
       templates/
         NOTES.txt                     # Post-install instructions
 
@@ -1492,18 +1490,18 @@ dependencies:
 
 **Preset values files** provide tested combinations:
 
-| Preset                   | Enabled units                 | Resources      | Autoscaling | Use case                   |
-|--------------------------|-------------------------------|----------------|-------------|----------------------------|
-| `values-minimal.yaml`    | flight-control (control plane)| Low            | Off         | Quick start, CI, demo      |
-| `values-production.yaml` | All                           | Tuned per unit | HPA + PDB   | Production deployment      |
-| `values-dev.yaml`        | All                           | Minimal        | Off         | Local k8s (minikube, kind) |
+| Preset            | Enabled units                  | Use case                   |
+|-------------------|--------------------------------|----------------------------|
+| `values.yaml`     | flight-control only            | Control-plane smoke test    |
+| `values-dev.yaml` | All demo gears                 | Local development cluster   |
+
+There is no production preset yet. The current image/config defaults include development authentication and must not be used as a production profile.
 
 **User installation**:
 
 ```bash
-# Minimal platform
-helm install my-platform oci://ghcr.io/constructorfabric/charts/toolkit-platform \
-  -f values-minimal.yaml
+# Control plane only (default values)
+helm install my-platform oci://ghcr.io/constructorfabric/charts/toolkit-platform
 
 # Custom overrides
 helm install my-platform oci://ghcr.io/constructorfabric/charts/toolkit-platform \

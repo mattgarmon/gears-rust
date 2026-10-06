@@ -1,0 +1,31 @@
+apiVersion: v2
+name: toolkit-platform
+description: Deploys the CF/Gears platform.
+type: application
+version: 0.1.0
+appVersion: "dev"
+dependencies:
+  - name: flight-control
+    version: 0.1.0
+    repository: "file://../flight-control"
+    condition: flight-control.enabled
+  - name: hello
+    version: 0.1.0
+    repository: "file://../hello"
+    condition: hello.enabled
+  - name: api-contracts
+    version: 0.1.0
+    repository: "file://../api-contracts"
+    condition: api-contracts.enabled
+  - name: api-contracts-consumer
+    version: 0.1.0
+    repository: "file://../api-contracts-consumer"
+    condition: api-contracts-consumer.enabled
+  - name: opentelemetry-collector
+    version: 0.175.1
+    repository: "https://open-telemetry.github.io/opentelemetry-helm-charts"
+    condition: opentelemetry-collector.enabled
+  - name: prometheus
+    version: 29.35.0
+    repository: "oci://ghcr.io/prometheus-community/charts"
+    condition: prometheus.enabled
