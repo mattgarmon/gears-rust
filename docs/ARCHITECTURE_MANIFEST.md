@@ -381,7 +381,7 @@ The default mode is in-process composition: gears share one runtime, communicate
 
 Gears can also run as separate processes communicating via REST by default, with gRPC available as an opt-in transport.
 
-- [x] `HostRuntime` contains explicit OoP orchestration hooks.
+- [x] Standalone OoP bootstrap runs a gear process and connects it to DirectoryService.
 - [x] `toolkit-transport-grpc` exists as a transport library.
 - [x] `docs/toolkit_unified_system/09_oop_grpc_sdk_pattern.md` documents the pattern.
 - [x] `examples/toolkit/hello/` and `examples/toolkit/api-contracts/` demonstrate out-of-process gears.

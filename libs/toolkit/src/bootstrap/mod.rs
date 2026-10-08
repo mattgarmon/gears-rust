@@ -22,8 +22,8 @@ pub mod oop;
 
 // Re-export commonly used config types at crate root for convenience
 pub use config::{
-    AppConfig, CliArgs, ConsoleFormat, GearConfig, GearRuntime, LoggingConfig, RenderedGearConfig,
-    RuntimeKind, Section, ServerConfig, TOOLKIT_MODULE_CONFIG_ENV, VendorConfig, VendorConfigError,
+    AppConfig, CliArgs, ConsoleFormat, GearConfig, LoggingConfig, RenderedGearConfig, Section,
+    ServerConfig, TOOLKIT_MODULE_CONFIG_ENV, VendorConfig, VendorConfigError,
     dump_effective_gears_config_json, dump_effective_gears_config_yaml, list_gear_names,
     render_effective_gears_config,
 };

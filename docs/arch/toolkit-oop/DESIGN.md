@@ -277,19 +277,20 @@ standalone HTTP-serving process.
 The existing implementation (`libs/toolkit/src/bootstrap/oop.rs`, `OopRunOptions` / `run_oop_with_options`) already
 handles:
 
-- Configuration loading and merging (master-rendered config via `TOOLKIT_MODULE_CONFIG` env var, merged with local config
-  field-by-field for DB, key-by-key for logging).
-- Logging initialization with OpenTelemetry support (tracing config from master).
+- Configuration loading and merging (worker-local config, optionally combined with
+  `TOOLKIT_MODULE_CONFIG` supplied by an external launcher).
+- Logging initialization with OpenTelemetry support.
 - gRPC connection to DirectoryService (via `DirectoryGrpcClient::connect`).
 - Heartbeat loop using a child `CancellationToken`.
 - Gear lifecycle execution via `run(RunOptions { ... })`.
 - Graceful shutdown driven by a root `CancellationToken` hooked to OS signals.
 
-The host side (`libs/toolkit/src/runtime/host_runtime.rs`, `run_oop_spawn_phase`) spawns OoP processes using
-`OopBackend.spawn(OopSpawnConfig)` after grpc-hub is ready, passing `TOOLKIT_DIRECTORY_ENDPOINT` and
-`TOOLKIT_MODULE_CONFIG` env vars.
+Host-managed child-process spawning through `HostRuntime` has been removed. The deployment
+environment launches each standalone worker binary; `run_oop_with_options` starts the gear and
+connects it to DirectoryService using the worker's local config and `TOOLKIT_DIRECTORY_ENDPOINT`.
 
-What is **missing** and needs to be added:
+The following gap list records the original design state and is retained for traceability; use the
+current OoP guide and implementation tests for shipped behavior:
 
 - Starting an Axum HTTP server from the gear's OperationBuilder routes.
 - Framework-managed `/healthz` (liveness), `/readyz` (readiness), and `/health` (diagnostics) probe endpoints.

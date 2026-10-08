@@ -28,15 +28,13 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::backends::OopSpawnConfig;
 use crate::client_hub::ClientHub;
 use crate::config::ConfigProvider;
 use crate::context::GearContextBuilder;
 use crate::registry::{
-    ApiGatewayCap, GearEntry, GearRegistry, GrpcHubCap, RegistryError, RestApiCap, RunnableCap,
-    SystemCap,
+    ApiGatewayCap, GearEntry, GearRegistry, RegistryError, RestApiCap, RunnableCap, SystemCap,
 };
-use crate::runtime::{GearManager, GrpcInstallerStore, OopSpawnOptions, SystemContext};
+use crate::runtime::{GearManager, GrpcInstallerStore, SystemContext};
 
 #[cfg(feature = "db")]
 use crate::registry::DatabaseCap;
@@ -100,8 +98,6 @@ pub struct HostRuntime {
     cancel: CancellationToken,
     #[allow(dead_code)]
     db_options: DbOptions,
-    /// `OoP` gear spawn configuration and backend
-    oop_options: Option<OopSpawnOptions>,
     /// Maximum time allowed for graceful shutdown before hard-stop signal is sent.
     shutdown_deadline: std::time::Duration,
 }
@@ -117,7 +113,6 @@ impl HostRuntime {
         client_hub: Arc<ClientHub>,
         cancel: CancellationToken,
         instance_id: Uuid,
-        oop_options: Option<OopSpawnOptions>,
     ) -> Self {
         // Create runtime-owned components for system gears
         let gear_manager = Arc::new(GearManager::new());
@@ -154,7 +149,6 @@ impl HostRuntime {
             rest_providers_registered: std::sync::atomic::AtomicBool::new(false),
             cancel,
             db_options,
-            oop_options,
             shutdown_deadline: DEFAULT_SHUTDOWN_DEADLINE,
         }
     }
@@ -1013,103 +1007,6 @@ impl HostRuntime {
         stop_result
     }
 
-    /// `OoP` SPAWN phase: spawn out-of-process gears after start phase.
-    ///
-    /// This phase runs after `grpc-hub` is already listening, so we can pass
-    /// the real directory endpoint to `OoP` gears.
-    async fn run_oop_spawn_phase(&self) -> Result<(), RegistryError> {
-        let oop_opts = match &self.oop_options {
-            Some(opts) if !opts.gears.is_empty() => opts,
-            _ => return Ok(()),
-        };
-
-        tracing::info!("Phase: oop_spawn");
-
-        // Wait for grpc_hub to publish its endpoint (it runs async in start phase)
-        let directory_endpoint = self.wait_for_grpc_hub_endpoint().await;
-
-        for gear_cfg in &oop_opts.gears {
-            // Build environment with directory endpoint and rendered config
-            // Note: User controls --config via execution.args in master config
-            let mut env = gear_cfg.env.clone();
-            env.insert(
-                TOOLKIT_MODULE_CONFIG_ENV.to_owned(),
-                gear_cfg.rendered_config_json.clone(),
-            );
-            if let Some(ref endpoint) = directory_endpoint {
-                env.insert(TOOLKIT_DIRECTORY_ENDPOINT_ENV.to_owned(), endpoint.clone());
-            }
-
-            // Use args from execution config as-is (user controls --config via args)
-            let args = gear_cfg.args.clone();
-
-            let spawn_config = OopSpawnConfig {
-                gear_name: gear_cfg.gear_name.clone(),
-                binary: gear_cfg.binary.clone(),
-                args,
-                env,
-                working_directory: gear_cfg.working_directory.clone(),
-            };
-
-            oop_opts
-                .backend
-                .spawn(spawn_config)
-                .await
-                .map_err(|e| RegistryError::OopSpawn {
-                    gear: gear_cfg.gear_name.clone(),
-                    source: e,
-                })?;
-
-            tracing::info!(
-                gear =  %gear_cfg.gear_name,
-                directory_endpoint = ?directory_endpoint,
-                "Spawned OoP gear via backend"
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Wait for `grpc-hub` to publish its bound endpoint.
-    ///
-    /// Polls the `GrpcHubGear::bound_endpoint()` with a short interval until available or timeout.
-    /// Returns None if no `grpc-hub` is running or if it times out.
-    async fn wait_for_grpc_hub_endpoint(&self) -> Option<String> {
-        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
-        const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-
-        // Find grpc_hub in registry
-        let grpc_hub = self
-            .registry
-            .gears()
-            .iter()
-            .find_map(|e| e.caps.query::<GrpcHubCap>());
-
-        let Some(hub) = grpc_hub else {
-            return None; // No grpc_hub registered
-        };
-
-        let start = std::time::Instant::now();
-
-        loop {
-            if let Some(endpoint) = hub.bound_endpoint() {
-                tracing::debug!(
-                    endpoint = %endpoint,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    "gRPC hub endpoint available"
-                );
-                return Some(endpoint);
-            }
-
-            if start.elapsed() > MAX_WAIT {
-                tracing::warn!("Timed out waiting for gRPC hub to bind");
-                return None;
-            }
-
-            tokio::time::sleep(POLL_INTERVAL).await;
-        }
-    }
-
     /// Wait for the REST host gateway to publish its bound endpoint.
     ///
     /// The gateway binds its listener asynchronously in the start phase, so the
@@ -1381,13 +1278,10 @@ impl HostRuntime {
         //     the directory once the gateway has bound its listener.
         self.run_directory_register_phase().await?;
 
-        // 8. OoP spawn phase (after grpc_hub is running)
-        self.run_oop_spawn_phase().await?;
-
-        // 9. Wait for cancellation
+        // 8. Wait for cancellation
         self.cancel.cancelled().await;
 
-        // 10. Stop phase with hard timeout.
+        // 9. Stop phase with hard timeout.
         //     Blocking stop implementations are guarded by a watchdog thread so
         //     a hang cannot block shutdown, whether in the in-process or OoP path.
         self.run_stop_phase_guarded().await?;
@@ -1692,7 +1586,6 @@ mod tests {
             client_hub,
             cancel.clone(),
             Uuid::new_v4(),
-            None,
         );
 
         // Run stop phase
@@ -1768,7 +1661,6 @@ mod tests {
             client_hub,
             cancel.clone(),
             Uuid::new_v4(),
-            None,
         );
 
         // Run stop phase - should not fail even though gear_b fails
@@ -2010,7 +1902,6 @@ mod tests {
             Arc::new(ClientHub::new()),
             CancellationToken::new(),
             Uuid::new_v4(),
-            None,
         );
 
         let reg = test_registration();
@@ -2069,7 +1960,6 @@ mod tests {
             Arc::new(ClientHub::new()),
             CancellationToken::new(),
             Uuid::new_v4(),
-            None,
         );
 
         let reg = test_registration();
@@ -2123,7 +2013,6 @@ mod tests {
             Arc::new(ClientHub::new()),
             CancellationToken::new(),
             Uuid::new_v4(),
-            None,
         )
         .with_internal_token_provider(Some(provider));
 
@@ -2166,7 +2055,6 @@ mod tests {
             Arc::new(ClientHub::new()),
             CancellationToken::new(),
             Uuid::new_v4(),
-            None,
         );
 
         let reg = test_registration();
@@ -2272,7 +2160,6 @@ mod tests {
             client_hub,
             cancel,
             Uuid::new_v4(),
-            None,
         );
 
         // Run init phase for all gears, then post_init as a separate barrier phase.
@@ -2360,7 +2247,6 @@ mod tests {
             Arc::new(ClientHub::new()),
             CancellationToken::new(),
             Uuid::new_v4(),
-            None,
         );
 
         runtime.run_init_wiring_post_init().await.unwrap();
@@ -2421,7 +2307,6 @@ mod tests {
             client_hub,
             cancel.clone(),
             Uuid::new_v4(),
-            None,
         );
 
         // Run stop phase - the deadline token should NOT be cancelled
@@ -2499,7 +2384,6 @@ mod tests {
             client_hub,
             cancel.clone(),
             Uuid::new_v4(),
-            None,
         )
         .with_shutdown_deadline(Duration::from_secs(5));
 
@@ -2575,7 +2459,6 @@ mod tests {
             client_hub,
             cancel.clone(),
             Uuid::new_v4(),
-            None,
         )
         .with_shutdown_deadline(Duration::from_millis(100));
 

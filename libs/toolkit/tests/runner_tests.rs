@@ -326,7 +326,6 @@ async fn test_db_phase_failure_stops_lifecycle() {
         Arc::new(toolkit::client_hub::ClientHub::default()),
         cancel,
         Uuid::new_v4(),
-        None,
     );
 
     let err = hr.run_gear_phases().await.unwrap_err();

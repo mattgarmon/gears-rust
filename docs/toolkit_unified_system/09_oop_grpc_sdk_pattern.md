@@ -11,19 +11,10 @@ ToolKit supports running gears as separate processes. The gRPC-based inter-proce
 - **Rule**: For gRPC clients: always use `toolkit_transport_grpc::client` utilities (`connect_with_stack`, `connect_with_retry`).
 - **Rule**: Use `CancellationToken` for coordinated shutdown across the entire process tree.
 
-## RuntimeKind
+## Standalone worker process
 
-Gears can run in two modes:
-
-```rust
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum RuntimeKind {
-    #[default]
-    Local,  // In-process (default)
-    Oop,    // Out-of-process
-}
-```
+An OoP worker is launched by its deployment environment as a separate binary or pod. The host
+does not spawn workers or inject a per-gear execution configuration.
 
 ## Configuring an OoP process
 
@@ -31,16 +22,14 @@ An OoP gear runs as its own process and connects to the platform host's Director
 
 ```yaml
 oop_http:
-    listen_addr: "127.0.0.1:9091"
-    advertise_uri: "http://127.0.0.1:9091"
-    allow_loopback_advertise: true
+  listen_addr: "127.0.0.1:9091"
+  advertise_uri: "http://127.0.0.1:9091"
+  allow_loopback_advertise: true
 
 gears:
-    my_gear:
-        config: {}
+  my_gear:
+    config: {}
 ```
-
-The `runtime.type: oop` plus `execution.executable_path` example describes host-managed child-process spawning; it is not how the current REST deployment examples configure a worker. Those examples run standalone binaries or pods with worker-local `oop_http` settings; see `deploy/docker/` and `deploy/helm/`.
 
 ## OoP Bootstrap Library
 

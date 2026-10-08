@@ -24,7 +24,7 @@ registry from the declared `deps`, and wires the system from those declarations.
 The runtime (`HostRuntime`) drives all gears through one shared, ordered sequence of phases:
 
 ```text
-pre_init → DB migration → init → post_init → REST wiring → gRPC wiring → start → OoP spawn → wait for cancellation → stop
+pre_init → DB migration → init → post_init → REST wiring → gRPC wiring → start → wait for cancellation → stop
 ```
 
 - **`pre_init`** — setup before migrations run (system gears only).
@@ -35,9 +35,6 @@ pre_init → DB migration → init → post_init → REST wiring → gRPC wiring
   any cross-gear wiring is safe here (system gears only).
 - **REST / gRPC wiring** — routes and gRPC services are registered.
 - **`start`** — background work starts for stateful gears.
-- **`OoP spawn`** — when host-managed worker spawning is configured, workers start after the gRPC
-  hub is listening so they can connect to the directory endpoint. Standalone workers use their
-  own binary entry point and deployment configuration.
 - **Wait for cancellation** — the runtime blocks until a cancellation signal is received
   (Ctrl-C, SIGTERM, or programmatic).
 - **`stop`** — shutdown runs in **reverse dependency order** with a platform deadline.

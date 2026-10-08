@@ -7,8 +7,8 @@ sidebar:
 ---
 
 A Gears application is configured with YAML. Global sections cover the server, database, and
-logging; each gear reads typed configuration under `gears.<name>`. Deployment shape,
-observability, and gear behavior are all configuration decisions rather than code changes.
+logging; each gear reads typed configuration under `gears.<name>`. Deployment shape also depends
+on which binaries are built and launched, plus the transport and discovery wiring they include.
 
 ## Structure
 
@@ -42,17 +42,13 @@ gears:
       bind_addr: "127.0.0.1:8087"
       enable_docs: true
       prefix_path: "/cf"
-  my-gear:
-    runtime:
-      type: local
 ```
 
 ## Common knobs
 
 - **API gateway** — `bind_addr`, `enable_docs`, `prefix_path`, CORS, rate limits, timeouts.
-- **Deployment shape** — `gears.<name>.runtime.type` configures local vs host-managed OoP
-  placement. Standalone OoP deployments additionally need a worker binary, transport support,
-  and discovery, endpoint, and authentication wiring. See [Run a gear out-of-process](../out-of-process/).
+- **Out-of-process workers** — launch the worker binary separately with its own `oop_http`
+  configuration and `TOOLKIT_DIRECTORY_ENDPOINT`. See [Run a gear out-of-process](../out-of-process/).
 - **Telemetry** — an `opentelemetry:` block points traces and metrics at an OTLP
   backend. See [Add observability](../add-observability/).
 - **Database** — `database.servers.<name>` connection templates (`engine`, `params`, `pool`) that gears inherit; SQLite, PostgreSQL, and MariaDB engines are supported.

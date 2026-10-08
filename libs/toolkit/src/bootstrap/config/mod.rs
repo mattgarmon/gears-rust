@@ -49,47 +49,8 @@ pub struct GearConfig {
     pub database: Option<DbConnConfig>,
     #[serde(default)]
     pub config: serde_json::Value,
-    #[serde(default)]
-    pub runtime: Option<GearRuntime>,
     #[serde(default)] // Used by the CLI
     pub metadata: serde_json::Value,
-}
-
-/// Runtime configuration for a gear (local vs out-of-process).
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct GearRuntime {
-    #[serde(default, rename = "type")]
-    pub mod_type: RuntimeKind,
-    /// Execution configuration for `OoP` gears.
-    #[serde(default)]
-    pub execution: Option<ExecutionConfig>,
-}
-
-/// Execution configuration for out-of-process gears.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct ExecutionConfig {
-    /// Path to the executable. Supports absolute paths or `~` expansion.
-    pub executable_path: String,
-    /// Command-line arguments to pass to the executable.
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// Working directory for the process (optional, defaults to current dir).
-    #[serde(default)]
-    pub working_directory: Option<String>,
-    /// Environment variables to set for the process.
-    #[serde(default)]
-    pub environment: HashMap<String, String>,
-}
-
-/// Gear runtime kind.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RuntimeKind {
-    #[default]
-    Local,
-    Oop,
 }
 
 /// Main application configuration with strongly-typed global sections
@@ -1255,8 +1216,8 @@ pub struct RenderedDbConfig {
     /// `OoP` gear can use these servers for reference.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub global: Option<GlobalDatabaseConfig>,
-    /// Gear-specific database configuration (already merged with server reference in master).
-    /// This is the `gears.<name>.database` section after server merge.
+    /// Gear-specific database configuration from the worker or its launcher.
+    /// This is the `gears.<name>.database` section.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gear: Option<DbConnConfig>,
 }
@@ -1269,7 +1230,7 @@ impl RenderedDbConfig {
     }
 }
 
-/// Rendered gear configuration passed to `OoP` gears via environment variable.
+/// Optional environment-provided configuration that a standalone `OoP` worker can merge locally.
 ///
 /// This struct contains everything an `OoP` gear needs to initialize:
 /// - Database configuration (structured, for field-by-field merge in `OoP`)
@@ -1277,7 +1238,8 @@ impl RenderedDbConfig {
 /// - Logging configuration (for key-by-key merge in `OoP`)
 /// - OpenTelemetry configuration (resource, tracing, metrics)
 ///
-/// The runtime section is excluded as it's only relevant for the master host.
+/// When provided via `TOOLKIT_MODULE_CONFIG`, the worker merges these sections with its local
+/// `--config` file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderedGearConfig {
     /// Rendered database configuration (structured, not resolved DSN).
@@ -1287,11 +1249,11 @@ pub struct RenderedGearConfig {
     /// Gear-specific config section (passed as-is)
     #[serde(default)]
     pub config: serde_json::Value,
-    /// Logging configuration from master host.
-    /// `OoP` gear will merge this with local --config (local keys override master keys).
+    /// Optional environment-provided logging configuration.
+    /// The worker merges it with local config (local keys override these keys).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logging: Option<LoggingConfig>,
-    /// OpenTelemetry configuration from master host (resource, tracing, metrics).
+    /// Optional environment-provided OpenTelemetry configuration (resource, tracing, metrics).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opentelemetry: Option<OpenTelemetryConfig>,
 }
@@ -1314,63 +1276,6 @@ impl RenderedGearConfig {
     }
 }
 
-/// Render gear configuration for passing to `OoP` gear via environment variable.
-///
-/// This function prepares a structured configuration that an `OoP` gear can use
-/// to initialize itself. The configuration includes:
-/// - Database configuration (structured, for field-by-field merge in `OoP`)
-/// - Gear config section
-/// - Logging configuration (for key-by-key merge in `OoP`)
-/// - Tracing configuration for OTEL
-///
-/// The runtime section is excluded as it's only relevant for the master host.
-///
-/// `OoP` gears receive this via `TOOLKIT_MODULE_CONFIG` env var and can override
-/// any section with their local --config file.
-///
-/// # Errors
-/// Returns an error if gear configuration parsing fails.
-pub fn render_gear_config_for_oop(
-    app: &AppConfig,
-    gear_name: &str,
-    _home_dir: &std::path::Path,
-) -> Result<RenderedGearConfig> {
-    // Get gear's database config (with server reference, but NOT resolved to DSN).
-    // OoP gear will use DbManager to resolve this with its local overrides.
-    let gear_db_config = parse_gear_config(app, gear_name)
-        .ok()
-        .and_then(|entry| entry.database);
-
-    // Build database config with global servers and gear config (structured, not resolved)
-    let database = if gear_db_config.is_some() || app.database.is_some() {
-        Some(RenderedDbConfig::new(app.database.clone(), gear_db_config))
-    } else {
-        None
-    };
-
-    // Get the gear's config section (excluding database and runtime)
-    let config = parse_gear_config(app, gear_name)
-        .map(|entry| entry.config)
-        .unwrap_or_default();
-
-    // Pass logging config from master host so OoP gears can merge with their local config
-    let logging = app.logging.clone();
-
-    // Pass OpenTelemetry config from master host so OoP gears use the same settings
-    let opentelemetry = if app.opentelemetry.tracing.enabled || app.opentelemetry.metrics.enabled {
-        Some(app.opentelemetry.clone())
-    } else {
-        None
-    };
-
-    Ok(RenderedGearConfig {
-        database,
-        config,
-        logging: Some(logging),
-        opentelemetry,
-    })
-}
-
 /// Parse a gear config from the config bag.
 ///
 /// # Errors
@@ -1384,15 +1289,6 @@ pub fn parse_gear_config(app: &AppConfig, gear_name: &str) -> Result<GearConfig>
 
     let gear_config: GearConfig = serde_json::from_value(gear_raw)?;
     Ok(gear_config)
-}
-
-/// Helper to get runtime config for a gear (if present).
-///
-/// # Errors
-/// Returns an error if gear config parsing fails.
-pub fn get_gear_runtime_config(app: &AppConfig, gear_name: &str) -> Result<Option<GearRuntime>> {
-    let entry = parse_gear_config(app, gear_name)?;
-    Ok(entry.runtime)
 }
 
 /// Merges global + gear DB configs into a final, validated DSN and pool config.

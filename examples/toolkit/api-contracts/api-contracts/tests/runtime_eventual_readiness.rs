@@ -230,7 +230,6 @@ async fn consumer_resolves_provider_through_runtime_phases() {
         Arc::clone(&hub),
         cancel.clone(),
         Uuid::new_v4(),
-        None,
     );
 
     // run_gear_phases blocks on cancellation after start; drive it in the bg.

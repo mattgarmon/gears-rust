@@ -11,17 +11,13 @@
 //! - Shutdown can be driven by OS signals, an external `CancellationToken`,
 //!   or an arbitrary future.
 //! - Pre-registered clients can be injected into the `ClientHub` via `RunOptions::clients`.
-//! - `OoP` gears are spawned after the start phase so that `grpc-hub` is already running
-//!   and the real directory endpoint is known.
+//! - Standalone OoP worker processes are launched by the deployment environment.
 
-use crate::backends::OopBackend;
 use crate::client_hub::ClientHub;
 use crate::config::ConfigProvider;
 use crate::registry::GearRegistry;
 use crate::runtime::shutdown;
 use crate::runtime::{DbOptions, HostRuntime};
-use std::collections::HashMap;
-use std::path::PathBuf;
 use std::{future::Future, pin::Pin, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -70,33 +66,6 @@ pub enum ShutdownOptions {
     Future(Pin<Box<dyn Future<Output = ()> + Send>>),
 }
 
-/// Configuration for a single `OoP` gear to be spawned.
-#[derive(Clone)]
-pub struct OopGearSpawnConfig {
-    /// Name of the gear (e.g., "hello").
-    pub gear_name: String,
-    /// Path to the gear executable.
-    pub binary: PathBuf,
-    /// Command-line arguments passed to the gear binary.
-    ///
-    /// Note: the user controls `--config` via `execution.args` in the master config.
-    pub args: Vec<String>,
-    /// Environment variables to set for the spawned process.
-    pub env: HashMap<String, String>,
-    /// Working directory for the spawned process.
-    pub working_directory: Option<String>,
-    /// Rendered gear configuration JSON, injected as the `TOOLKIT_MODULE_CONFIG` environment variable.
-    pub rendered_config_json: String,
-}
-
-/// Options for spawning `OoP` gears.
-pub struct OopSpawnOptions {
-    /// Gears to spawn after the start phase, once shared infrastructure is ready.
-    pub gears: Vec<OopGearSpawnConfig>,
-    /// Backend used to spawn gear processes (e.g. `LocalProcessBackend`).
-    pub backend: Box<dyn OopBackend>,
-}
-
 /// Options for running the `ToolKit` runner.
 ///
 /// `#[non_exhaustive]`: construct via [`RunOptions::new`] + the `with_*`
@@ -120,14 +89,9 @@ pub struct RunOptions {
     /// Process-level instance ID.
     ///
     /// This is a unique identifier for this process instance, generated once at bootstrap
-    /// (either in `run_oop_with_options` for `OoP` gears or in the main host).
+    /// (either in `run_oop_with_options` for standalone OoP workers or in the main host).
     /// It is propagated to all gears via `GearCtx::instance_id()` and `SystemContext::instance_id()`.
     pub instance_id: Uuid,
-    /// `OoP` gear spawn configuration.
-    ///
-    /// These gears are spawned after the start phase, once `grpc-hub` is running
-    /// and the real directory endpoint is known.
-    pub oop: Option<OopSpawnOptions>,
     /// Maximum time allowed for each gear's graceful shutdown before hard-stop.
     ///
     /// If `None`, uses [`DEFAULT_SHUTDOWN_DEADLINE`](crate::runtime::DEFAULT_SHUTDOWN_DEADLINE) (35 seconds).
@@ -145,7 +109,7 @@ pub struct RunOptions {
 
 impl RunOptions {
     /// Create `RunOptions` with the four always-required fields; all optional
-    /// fields default to "off" (`clients` empty, no `oop`, default shutdown
+    /// fields default to "off" (`clients` empty, default shutdown
     /// deadline, no platform credential). Layer options on with the `with_*`
     /// builders.
     #[must_use]
@@ -161,7 +125,6 @@ impl RunOptions {
             shutdown,
             clients: Vec::new(),
             instance_id,
-            oop: None,
             shutdown_deadline: None,
             internal_token_provider: None,
         }
@@ -171,13 +134,6 @@ impl RunOptions {
     #[must_use]
     pub fn with_clients(mut self, clients: Vec<ClientRegistration>) -> Self {
         self.clients = clients;
-        self
-    }
-
-    /// Set the `OoP` gear spawn configuration.
-    #[must_use]
-    pub fn with_oop(mut self, oop: Option<OopSpawnOptions>) -> Self {
-        self.oop = oop;
         self
     }
 
@@ -262,7 +218,6 @@ fn build_host_runtime(opts: RunOptions) -> anyhow::Result<HostRuntime> {
         hub,
         cancel,
         opts.instance_id,
-        opts.oop,
     );
     if let Some(deadline) = opts.shutdown_deadline {
         host = host.with_shutdown_deadline(deadline);

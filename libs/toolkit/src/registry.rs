@@ -785,14 +785,6 @@ pub enum RegistryError {
     #[error("multiple 'grpc_hub' gears detected; exactly one is allowed")]
     MultipleGrpcHubs,
 
-    // OoP spawn errors
-    #[error("OoP spawn failed for gear '{gear}'")]
-    OopSpawn {
-        gear: String,
-        #[source]
-        source: anyhow::Error,
-    },
-
     // Cancellation error
     #[error("operation cancelled by termination signal")]
     Cancelled,

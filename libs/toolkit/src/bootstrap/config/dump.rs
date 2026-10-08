@@ -3,7 +3,7 @@
 //! This gear provides utilities for inspecting and dumping the effective
 //! runtime configuration of gears, including resolved database DSNs and pool settings.
 
-use super::{AppConfig, RuntimeKind, build_final_db_for_gear, parse_gear_config};
+use super::{AppConfig, build_final_db_for_gear, parse_gear_config};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use url::Url;
@@ -36,7 +36,6 @@ pub fn list_gear_names(app: &AppConfig) -> Vec<String> {
 /// for each gear that is successfully loaded in the `GearRegistry`.
 ///
 /// For each gear, it includes:
-/// - `runtime`: Gear runtime type (local/oop) if configured
 /// - `config`: Gear-specific configuration section (as-is from config file)
 /// - `database`: Final resolved database configuration with redacted DSN (if applicable)
 ///
@@ -79,19 +78,6 @@ pub fn render_effective_gears_config(app: &AppConfig) -> Result<serde_json::Valu
                 continue;
             }
         };
-
-        // Get runtime configuration if present
-        if let Some(runtime_config) = parsed_config.runtime {
-            gear_entry.insert(
-                "runtime".to_owned(),
-                json!({
-                    "type": match runtime_config.mod_type {
-                        RuntimeKind::Local => "local",
-                        RuntimeKind::Oop => "oop",
-                    }
-                }),
-            );
-        }
 
         // Get gear config section (the "config" field)
         if !parsed_config.config.is_null() {

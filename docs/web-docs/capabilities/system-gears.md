@@ -20,7 +20,7 @@ SDK, so it can be replaced.
 | **Types Registry** | [GTS](https://github.com/GlobalTypeSystem/gts-rust) schema storage, lookup, instance validation | ✓ |
 | **Nodes Registry** | Node inventory and capability discovery | ✓ |
 | **Resource Group** | Hierarchical, tenant-scoped resource grouping for access control | ✓ |
-| **gRPC Hub** | Out-of-process gear orchestration: gRPC server wiring, reflection | ✓ |
+| **gRPC Hub** | gRPC server wiring and reflection for the opt-in gRPC transport | ✓ |
 | **Usage Collector** | Measure API/compute/storage usage (push model) | SDK ✓, impl _planned_ |
 | **Account Management** | Tenant/user account lifecycle when Gears runs standalone | _planned_ |
 

@@ -34,7 +34,5 @@ pub use readiness::{
 };
 #[cfg(feature = "bootstrap")]
 pub use runner::run_oop_serving;
-pub use runner::{
-    ClientRegistration, OopGearSpawnConfig, OopSpawnOptions, RunOptions, ShutdownOptions, run,
-};
+pub use runner::{ClientRegistration, RunOptions, ShutdownOptions, run};
 pub use system_context::SystemContext;

@@ -198,7 +198,6 @@ async fn consumer_resolves_provider_local_impl_through_the_hub() {
         Arc::clone(&hub),
         cancel.clone(),
         Uuid::new_v4(),
-        None,
     );
     let run = tokio::spawn(async move { runtime.run_gear_phases().await });
 
@@ -308,7 +307,6 @@ async fn consumer_resolves_provider_via_generated_rest_client() {
         Arc::clone(&hub),
         cancel.clone(),
         Uuid::new_v4(),
-        None,
     );
     let run = tokio::spawn(async move { runtime.run_gear_phases().await });
 

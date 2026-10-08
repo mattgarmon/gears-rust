@@ -1,14 +1,9 @@
-use super::config::{get_gear_runtime_config, render_gear_config_for_oop};
-use super::host::{init_logging_unified, init_panic_tracing, normalize_path};
-use super::{AppConfig, RuntimeKind};
-use crate::backends::LocalProcessBackend;
-use crate::runtime::{
-    DbOptions, OopGearSpawnConfig, OopSpawnOptions, RunOptions, ShutdownOptions, run, shutdown,
-};
+use super::AppConfig;
+use super::host::{init_logging_unified, init_panic_tracing};
+use crate::runtime::{DbOptions, RunOptions, ShutdownOptions, run, shutdown};
 use anyhow::Result;
 use figment::Figment;
 use figment::providers::Serialized;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -70,15 +65,9 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
     // Build config provider and resolve database options
     let db_options = resolve_db_options(&config)?;
 
-    // Create OoP backend with cancellation token - it will auto-shutdown all processes on cancel
-    let oop_backend = LocalProcessBackend::new(cancel.clone());
-
-    // Build OoP spawn configuration
-    let oop_options = build_oop_spawn_options(&config, oop_backend)?;
-
     // Run the ToolKit runtime with the root cancellation token.
     // Shutdown is driven by the signal handler spawned above, not by ShutdownOptions::Signals.
-    // OoP gears are spawned after the start phase (once grpc-hub has bound its port).
+    // Standalone OoP workers are launched by the deployment environment, not this host.
     //
     // No `internal_token_provider` is set here on purpose: this is the
     // in-process (Profile 1) host. Gear-to-gear calls resolve to LOCAL trait
@@ -94,8 +83,7 @@ pub async fn run_server(config: AppConfig) -> Result<()> {
         db_options,
         ShutdownOptions::Token(cancel.clone()),
         instance_id,
-    )
-    .with_oop(oop_options);
+    );
 
     let result = run(run_options).await;
 
@@ -169,7 +157,6 @@ pub async fn run_migrate(config: AppConfig) -> Result<()> {
         Arc::new(crate::client_hub::ClientHub::new()),
         cancel,
         instance_id,
-        None, // No OoP spawning during migration
     );
 
     // Run only the migration phases (pre-init + DB migration)
@@ -198,76 +185,6 @@ fn resolve_db_options(config: &AppConfig) -> Result<DbOptions> {
         config.server.home_dir.clone(),
     )?);
     Ok(DbOptions::Manager(db_manager))
-}
-
-/// Build `OoP` spawn configuration from `AppConfig`.
-///
-/// This collects all gears with `type=oop` and prepares their spawn configuration.
-/// The actual spawning happens in the `HostRuntime` after the start phase.
-fn build_oop_spawn_options(
-    config: &AppConfig,
-    backend: LocalProcessBackend,
-) -> Result<Option<OopSpawnOptions>> {
-    let home_dir = PathBuf::from(&config.server.home_dir);
-    let mut gears = Vec::new();
-
-    for gear_name in config.gears.keys() {
-        if let Some(spawn_config) = try_build_oop_gear_config(config, gear_name, &home_dir)? {
-            gears.push(spawn_config);
-        }
-    }
-
-    if gears.is_empty() {
-        Ok(None)
-    } else {
-        tracing::info!(count = gears.len(), "Prepared OoP gears for spawning");
-        Ok(Some(OopSpawnOptions {
-            gears,
-            backend: Box::new(backend),
-        }))
-    }
-}
-
-/// Try to build `OoP` gear spawn config if gear is of type `OoP`
-fn try_build_oop_gear_config(
-    config: &AppConfig,
-    gear_name: &str,
-    home_dir: &Path,
-) -> Result<Option<OopGearSpawnConfig>> {
-    let Some(runtime_cfg) = get_gear_runtime_config(config, gear_name)? else {
-        return Ok(None);
-    };
-
-    if !matches!(runtime_cfg.mod_type, RuntimeKind::Oop) {
-        return Ok(None);
-    }
-
-    let exec_cfg = runtime_cfg.execution.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("gear '{gear_name}' is type=oop but execution config is missing")
-    })?;
-
-    let binary = normalize_path(&exec_cfg.executable_path)?;
-    let spawn_args = exec_cfg.args.clone();
-    let env = exec_cfg.environment.clone();
-
-    // Render the complete gear config (with resolved DB)
-    let rendered_config = render_gear_config_for_oop(config, gear_name, home_dir)?;
-    let rendered_json = rendered_config.to_json()?;
-
-    tracing::debug!(
-        gear =  %gear_name,
-        "Prepared OoP gear config: db={}",
-        rendered_config.database.is_some()
-    );
-
-    Ok(Some(OopGearSpawnConfig {
-        gear_name: gear_name.to_owned(),
-        binary,
-        args: spawn_args,
-        env,
-        working_directory: exec_cfg.working_directory.clone(),
-        rendered_config_json: rendered_json,
-    }))
 }
 
 /// Initialize process-wide bootstrap state from a provided `&AppConfig`.

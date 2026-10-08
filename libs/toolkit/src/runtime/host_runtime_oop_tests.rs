@@ -180,7 +180,6 @@ async fn e2e_oop_gear_boots_serves_registers_and_shuts_down() {
         hub,
         cancel.clone(),
         Uuid::new_v4(),
-        None,
     );
 
     let options = OopServeOptions {

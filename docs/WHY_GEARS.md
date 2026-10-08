@@ -514,7 +514,7 @@ This gives gears one uniform place for pagination/filtering (**OData** `$filter`
 
 A **Gear** is a self-contained unit that owns its API (an SDK crate), owns its data (behind `SecureConn`), is discovered at link time via `inventory`, and composes through a typed `ClientHub` in-process — or through the same SDK over REST by default, with gRPC available as an opt-in OoP transport.
 
-The logical model can remain the same across physical boundaries. `runtime.type` configures local vs host-managed OoP placement, but standalone workers also require a out-of-process binary, transport support, and deployment wiring for discovery, endpoints, and authentication. The same SDK contract works remotely only when that transport is supported:
+The logical model can remain the same across physical boundaries. Standalone OoP workers run as separate binaries launched by the deployment environment; remote use requires transport support and wiring for discovery, endpoints, and authentication. The same SDK contract works remotely only when that transport is supported:
 
 - **Embedded (single-process)** — all gears in one process → edge, on-prem appliances, dev/test.
 - **Self-hosted (multi-process)** — gears across processes/machines, using REST by default or gRPC when selected.

@@ -135,7 +135,6 @@ pub use http::sse::SseBroadcaster;
 // Telemetry utilities
 pub mod telemetry;
 
-pub mod backends;
 pub mod lifecycle;
 pub mod plugins;
 pub mod runtime;
@@ -172,15 +171,11 @@ pub mod gts;
 // Security context scoping wrapper (re-exported from toolkit-sdk)
 pub use toolkit_sdk::{Secured, WithSecurityContext};
 
-pub use backends::{
-    BackendKind, GearRuntimeBackend, InstanceHandle, LocalProcessBackend, OopBackend,
-    OopGearConfig, OopSpawnConfig,
-};
 pub use lifecycle::{Lifecycle, Runnable, Status, StopReason, WithLifecycle};
 pub use plugins::GtsPluginSelector;
 pub use runtime::{
-    DEFAULT_SHUTDOWN_DEADLINE, DbOptions, Endpoint, GearInstance, GearManager, OopGearSpawnConfig,
-    OopSpawnOptions, RunOptions, ShutdownOptions, run,
+    DEFAULT_SHUTDOWN_DEADLINE, DbOptions, Endpoint, GearInstance, GearManager, RunOptions,
+    ShutdownOptions, run,
 };
 
 #[cfg(feature = "bootstrap")]
