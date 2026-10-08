@@ -36,7 +36,7 @@ Rust gives a safe language. It does not automatically provide a SaaS or XaaS pla
 - **Architecture lints** — custom Dylint rules enforce layer boundaries, versioned REST paths, `OperationBuilder` metadata, [GTS](https://github.com/GlobalTypeSystem/gts-rust) identifier rules, and restrictions on direct SQL.
 - **Runtime capabilities** — gears can own migrations, background tasks, REST APIs, gRPC services, SSE streams, typed configuration, transactional outbox flows, and lifecycle hooks.
 - **Consistent API dialect** — `OperationBuilder` declares method, path, auth posture, schemas, errors, license posture, and OpenAPI metadata in one place.
-- **Composable deployment** — the same gear code can run in-process, out-of-process over gRPC, or as containerized services.
+- **Composable deployment** — the same gear code can run in-process or as an independent service, using REST by default or gRPC when selected.
 - **Extensible domain model** — the [Global Type System (GTS)](https://github.com/GlobalTypeSystem/gts-rust) gives globally identified, versioned, schema-validated contracts for plugins, events, settings, permissions, and other extensible data.
 - **Canonical errors** — Gears uses a 16-category error vocabulary aligned with gRPC status categories and renders HTTP errors as RFC-9457 `Problem` documents.
 - **Operational defaults** — tracing, request IDs, structured logs, health endpoints, timeouts, body limits, rate limiting, and inflight protection are shared platform concerns.

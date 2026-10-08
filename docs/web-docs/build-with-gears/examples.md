@@ -1,6 +1,6 @@
 ---
 title: Examples
-description: Worked, runnable example gears in the framework repository — a full gear, out-of-process gRPC gears, and provider/plugin patterns.
+description: Worked, runnable example gears in the framework repository — a full gear, out-of-process gears, and provider/plugin patterns.
 sidebar:
   label: Examples
   order: 15
@@ -12,14 +12,14 @@ Every pattern in this section maps to runnable code in the framework repository.
 
 - **`examples/toolkit/users-info/`** — the complete gear followed by [Build your first gear](../your-first-gear/) and [Gear anatomy](../gear-anatomy/): an SDK, a domain service with authorization, secure multi-tenant persistence, a REST surface with OData, and runtime wiring.
 
-## Out-of-process gears (gRPC)
+## Out-of-process gears
 
-- **`examples/oop-gears/calculator/`** — a gear that runs in-process or out-of-process behind the same SDK trait, selected by config. See [Run a gear out-of-process](../out-of-process/).
-- **`examples/oop-gears/calculator-gateway/`** — a gateway in front of the out-of-process calculator.
+- **`examples/toolkit/hello/`** — a minimal REST gear that runs as its own process, self-registers with the DirectoryService, and can be reached through the api-gateway edge. See [Run a gear out-of-process](../out-of-process/).
+- **`examples/toolkit/api-contracts/`** — a provider and consumer gear demonstrating contract calls through `ClientHub` and `#[toolkit::consumes]`, locally or across processes when transport and deployment support are configured.
 
 ## Object-oriented / composition patterns
 
-- **`examples/oop-gears/`** — composition patterns showing gears calling gears through `ClientHub`. See [SDK contracts and ClientHub](../../concepts/sdk-and-clienthub/).
+- **`examples/toolkit/api-contracts/`** — composition showing one gear calling another through `ClientHub` / `#[toolkit::consumes]`. See [SDK contracts and ClientHub](../../concepts/sdk-and-clienthub/).
 
 ## Toolkit feature examples
 

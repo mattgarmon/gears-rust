@@ -45,7 +45,7 @@ Gears ships a substantial substrate so you build features, not plumbing:
 - **Multi-tenancy** — a single-root tenant tree with barriers and resource groups.
 - **OData querying** — `$filter` / `$orderby` / `$select` with cursor pagination.
 - **Observability** — OpenTelemetry tracing, request IDs, and health endpoints.
-- **Out-of-process gears** over gRPC, selected by configuration — no code changes.
+- **Out-of-process gears** with SDK transport wiring (REST by default; gRPC supported where configured).
 - **FIPS 140-3-ready** crypto on Linux, macOS, and Windows.
 - **`cargo gears` CLI** — a manifest-driven command-line tool for scaffolding
   workspaces, generating runnable servers, managing runtime config, building,
@@ -55,14 +55,14 @@ See [Why Gears](./why-gears/) for the Rust and framework rationale, [Where Gears
 
 ## One codebase, three deployment shapes
 
-The same gear code compiles into three deployment shapes; you choose with configuration,
-not by rewriting code:
+The same business logic compiles into three deployment profiles when transport-capable builds and
+deployment wiring are present:
 
-- **Single-node** — every gear in one process (edge, on-prem, development). Gears talk
+- **Embedded (single-process)** — every gear in one process (edge, on-prem, development). Gears talk
   in-process through `ClientHub`.
-- **Multi-node** — gears split across processes/machines over gRPC, without container
+- **Self-Hosted (multi-process)** — gears split across processes/machines without container
   orchestration.
-- **Kubernetes** — gears as containerized services with cluster-native discovery.
+- **K8s Native** — gears as containerized services with cluster-native discovery.
 
 ## What Gears is _not_
 

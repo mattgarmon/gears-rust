@@ -44,14 +44,15 @@ gears:
       prefix_path: "/cf"
   my-gear:
     runtime:
-      type: local   # or: oop
+      type: local
 ```
 
 ## Common knobs
 
 - **API gateway** — `bind_addr`, `enable_docs`, `prefix_path`, CORS, rate limits, timeouts.
-- **Deployment shape** — `gears.<name>.runtime.type: local | oop` selects in-process vs
-  out-of-process. See [Run a gear out-of-process](../out-of-process/).
+- **Deployment shape** — `gears.<name>.runtime.type` configures local vs host-managed OoP
+  placement. Standalone OoP deployments additionally need a worker binary, transport support,
+  and discovery, endpoint, and authentication wiring. See [Run a gear out-of-process](../out-of-process/).
 - **Telemetry** — an `opentelemetry:` block points traces and metrics at an OTLP
   backend. See [Add observability](../add-observability/).
 - **Database** — `database.servers.<name>` connection templates (`engine`, `params`, `pool`) that gears inherit; SQLite, PostgreSQL, and MariaDB engines are supported.

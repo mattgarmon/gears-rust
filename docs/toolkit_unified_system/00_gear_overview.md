@@ -21,7 +21,7 @@ ModKit. Each Gear:
 - **Is discovered at link time** via `inventory` and initialized in dependency
   order by the runtime.
 - **Composes with other Gears** through the typed `ClientHub` (in-process) or
-  gRPC SDKs (out-of-process / remote Gears).
+  REST SDK clients by default, with gRPC available as an opt-in out-of-process transport.
 - **Can be extended by plugins** — built-in plugins (compiled in) or external
   plugins (separate crates with their own API handler, business logic, and DB).
 - **Can extend it's API data schema** through GTS schema extensions.

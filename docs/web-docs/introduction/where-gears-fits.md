@@ -36,7 +36,7 @@ Choose integration when you already have platform services and want Gears capabi
 
 ## Deployment shapes it targets
 
-The same gear code runs as a single node (edge/on-prem/dev), across multiple processes over gRPC, or as containers in Kubernetes — selected by configuration. See [Deployment shapes](../../concepts/deployment-shapes/).
+The same business logic can run across Embedded (single-node), Self-Hosted (multi-process), and K8s Native deployments when the required transport-capable builds and runtime wiring are present. See [Deployment shapes](../../concepts/deployment-shapes/).
 
 ## When Gears is not the right choice
 

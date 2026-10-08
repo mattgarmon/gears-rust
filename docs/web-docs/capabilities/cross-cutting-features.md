@@ -32,8 +32,7 @@ These are the features you reach for while building, and the entry point for eac
 - **Lifecycle & background tasks** — declare the `stateful` capability; the runtime drives
   ordered startup, a `post_init` barrier, and cancellation-aware shutdown. See
   [Runtime and lifecycle](../../concepts/runtime-and-lifecycle/).
-- **Out-of-process gears** — same SDK trait, gRPC transport, selected by config
-  (`runtime.type: local | oop`). See
+- **Out-of-process gears** — same SDK trait with REST by default, or gRPC when selected; requires transport-capable binaries and deployment wiring. See
   [Run a gear out-of-process](../../build-with-gears/out-of-process/).
 - **[Global Type System (GTS)](https://github.com/GlobalTypeSystem/gts-rust)** — register
   schemas from Rust types; extend the domain model without changing existing gears. See

@@ -1,6 +1,6 @@
 ---
 title: SDK contracts and ClientHub
-description: The facade-trait SDK pattern and how gears resolve each other through the typed ClientHub, in-process or over gRPC.
+description: The facade-trait SDK pattern and how gears resolve each other through the typed ClientHub, in-process or remotely.
 sidebar:
   label: SDK contracts and ClientHub
   order: 3
@@ -28,9 +28,9 @@ The first parameter of every method is a `SecurityContext` — identity and tena
 Behind the trait the runtime can wire different **backends**:
 
 - an **in-process adapter** that calls the gear's domain service directly, or
-- a generated **gRPC client** that talks to the gear in another process.
+- a generated **remote client** (REST by default; gRPC where configured) that talks to the gear in another process.
 
-Consumers call the trait and never know which backend they got. Which one is registered is a configuration decision — see [Run a gear out-of-process](../../build-with-gears/out-of-process/).
+Consumers call the trait and never know which backend they got. Which backend is registered depends on the built transport support and deployment wiring (discovery, endpoints, auth), not on configuration alone — see [Run a gear out-of-process](../../build-with-gears/out-of-process/).
 
 ## ClientHub: how gears find each other
 
@@ -45,7 +45,7 @@ let users = ctx.client_hub().get::<dyn UsersInfoClientV1>()?;
 let user = users.get_user(ctx, id).await?;
 ```
 
-Whether the registered implementation is a local adapter (single process) or a gRPC client (out-of-process) is decided by configuration — the calling code is identical. This is what lets one codebase run in any [deployment shape](../deployment-shapes/).
+Whether the registered implementation is local (single process) or remote (out-of-process) depends on transport-capable binaries and deployment wiring. The calling code remains identical. This is what lets one codebase run in any [deployment shape](../deployment-shapes/).
 
 ## See also
 

@@ -1,135 +1,134 @@
 ---
 title: Run a gear out-of-process
-description: Run a gear as a separate gRPC service behind the same SDK trait, selected by configuration.
+description: Run a gear as its own process, with DirectoryService discovery and configured REST or gRPC transport support.
 sidebar:
   label: Run a gear out-of-process
   order: 10
 ---
 
 A gear can run **in the host process** (resolved through `ClientHub` as a direct call) or
-**out-of-process** as its own gRPC service. Consumers are unaffected: they call the same SDK
-trait, and configuration decides which backend `ClientHub` hands back. This guide follows the
-`calculator` example (`examples/oop-gears/calculator/`).
+**out-of-process (OoP)** as its own process or pod. In the OoP model, the gear serves its REST
+surface locally and registers its instance with the platform host's **DirectoryService**. The
+api-gateway edge can discover exposed routes and reverse-proxy external traffic. Consumers can use
+the same SDK trait locally or remotely only when the contract has transport support and the
+deployment is configured for remote discovery, endpoints, and authentication.
 
-## The contract is still the SDK trait
+This guide follows the runnable examples `examples/toolkit/hello/` and
+`examples/toolkit/api-contracts/`.
 
-Nothing changes about the public contract — it's an ordinary SDK trait:
+In practice, this means:
 
-```rust title="calculator-sdk/src/api.rs"
-#[async_trait]
-pub trait CalculatorClientV1: Send + Sync {
-    async fn add(&self, ctx: &SecurityContext, a: i64, b: i64) -> Result<i64, CalculatorError>;
-}
+- Build the required host and worker binaries with the selected transport support (REST by default; gRPC where configured).
+- Configure discovery, endpoints, and authentication for your deployment.
+
+Business logic can remain unchanged while deployment shape changes.
+
+## The gear remains an ordinary REST gear
+
+An OoP gear uses the same `RestApiCapability` and `OperationBuilder` patterns as an in-process
+gear. Routes intended for edge access are marked `.exposed()`. The `hello` example demonstrates
+this without making the gear's handlers depend on its process boundary.
+
+## Prepare transport support in the SDK
+
+The remote transport is provided by SDK wiring generated for the contract. The current
+implementation resolves remote endpoints through the directory and registers a remote client in
+`ClientHub`.
+
+Evidence in the repo:
+
+- `ClientHub::get` resolves registered clients by contract type (`libs/toolkit/src/client_hub.rs`).
+- Consumer wiring is declared via `ConsumerRegistration` and resolves REST endpoints through
+    `DirectoryEndpointResolver` (`libs/toolkit/src/discovery.rs`).
+- OoP E2E validates host+worker topology and REST contract calls
+    (`testing/e2e/suites/oop/conftest.py`, `testing/e2e/suites/oop/test_contract_calls.py`).
+
+## Build and run host/worker binaries
+
+Out-of-process mode requires binaries that include the required gear and transport support.
+Configuration alone is not sufficient if the process was not built with the needed features.
+
+## Configure discovery, endpoints, and authentication
+
+Remote calls require deployment configuration for discovery and authn/authz. For a locally run
+OoP process, `oop_http` configures the worker's REST listener and advertised URI, while
+`TOOLKIT_DIRECTORY_ENDPOINT` identifies the platform host's DirectoryService.
+
+```yaml
+oop_http:
+  listen_addr: "127.0.0.1:9091"
+  advertise_uri: "http://127.0.0.1:9091"
+  allow_loopback_advertise: true
+
+gears:
+  hello:
+    config: {}
 ```
 
-## Define the proto and generate code
+See `config/oop-hello.yaml` for the complete worker configuration. For Kubernetes, use the
+per-gear and platform charts under `deploy/helm/`.
 
-The wire protocol is a `.proto`, compiled at build time with `tonic-prost-build`:
+:::note[Transport caveat]
+The same SDK contract can be used locally or remotely only when the selected transport support is
+present in the built binaries and the deployment configuration provides discovery, endpoints, and
+authentication.
+:::
 
-```protobuf title="calculator-sdk/proto/oop/calculator/v1/accum.proto"
+## Optional gRPC transport
+
+gRPC remains available for contracts/deployments that explicitly select it. The shared runtime and
+SDK pattern are documented in `docs/toolkit_unified_system/09_oop_grpc_sdk_pattern.md`.
+The current `api-contracts` example also contains an opt-in gRPC projection; the protobuf example
+below illustrates the general build-time step:
+
+```protobuf title="my-gear-sdk/proto/my_gear/v1/service.proto"
 syntax = "proto3";
-package oop.calculator.v1;
+package my_gear.v1;
 
-service CalculatorService {
-  rpc Add(AddRequest) returns (AddResponse);
+service MyGearService {
+    rpc DoSomething(DoSomethingRequest) returns (DoSomethingResponse);
 }
-message AddRequest  { int64 a = 1; int64 b = 2; }
-message AddResponse { int64 sum = 1; }
+message DoSomethingRequest {}
+message DoSomethingResponse {}
 ```
 
-```rust title="calculator-sdk/build.rs"
+```rust title="my-gear-sdk/build.rs"
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_client(true)
         .build_server(true)
-        .compile_protos(&["proto/oop/calculator/v1/accum.proto"], &["proto"])?;
+        .compile_protos(&["proto/my_gear/v1/service.proto"], &["proto"])?;
     Ok(())
 }
-```
-
-## Implement the gRPC client (a backend for the SDK trait)
-
-The SDK provides a gRPC client that implements `CalculatorClientV1`, attaching the
-`SecurityContext` to request metadata so identity propagates across the wire:
-
-```rust title="calculator-sdk/src/client.rs"
-#[async_trait]
-impl CalculatorClientV1 for CalculatorGrpcClient {
-    async fn add(&self, ctx: &SecurityContext, a: i64, b: i64) -> Result<i64, CalculatorError> {
-        let mut request = tonic::Request::new(AddRequest { a, b });
-        attach_secctx(request.metadata_mut(), ctx)?;       // identity → gRPC metadata
-        let resp = self.inner.clone().add(request).await?;
-        Ok(resp.into_inner().sum)
-    }
-}
-```
-
-A small `wire_client` helper resolves the service endpoint via the directory and registers
-the gRPC client under the SDK trait — the mirror image of an in-process `register`:
-
-```rust title="calculator-sdk/src/wiring.rs"
-pub async fn wire_client(hub: &ClientHub, resolver: &dyn DirectoryClient) -> Result<()> {
-    let endpoint = resolver.resolve_grpc_service(SERVICE_NAME).await?;
-    let client = CalculatorGrpcClient::connect(&endpoint.uri).await?;
-    hub.register::<dyn CalculatorClientV1>(Arc::new(client));
-    Ok(())
-}
-```
-
-## Serve the gRPC side (the gear)
-
-The gear declares the `grpc` capability and registers a tonic service that extracts the
-`SecurityContext` from metadata and calls the domain:
-
-```rust title="calculator/src/gear.rs"
-#[toolkit::gear(name = "calculator", capabilities = [grpc])]
-pub struct CalculatorGear;
-
-#[async_trait]
-impl GrpcServiceCapability for CalculatorGear {
-    async fn get_grpc_services(&self, ctx: &GearCtx) -> Result<Vec<RegisterGrpcServiceFn>> {
-        let service = ctx.client_hub().get::<Service>()?;
-        let svc = CalculatorServiceServer::new(CalculatorServiceImpl::new(service));
-        Ok(vec![RegisterGrpcServiceFn {
-            service_name: SERVICE_NAME,
-            register: Box::new(move |routes| { routes.add_service(svc.clone()); }),
-        }])
-    }
-}
-```
-
-## Run as a separate process
-
-An out-of-process gear has its own binary that boots via `run_oop_with_options` — it
-self-registers with the directory and runs the normal gear lifecycle:
-
-```rust title="calculator/src/main.rs"
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let opts = OopRunOptions { gear_name: "calculator".into(), ..Default::default() };
-    run_oop_with_options(opts).await
-}
-```
-
-## Switch modes with configuration
-
-The deployment shape is a config decision, not a code change. Selecting `runtime.type: oop`
-runs the gear out-of-process; the consumer's `ClientHub` lookup is identical either way.
-
-```yaml
-gears:
-  calculator:
-    runtime:
-      type: oop
 ```
 
 :::note[Directory & discovery]
-Out-of-process gears find each other through a directory service (the gRPC hub). The example
-ships a master config (`config/oop-example-master.yaml`) wiring the gateway, gRPC hub, and
-orchestrator; custom discovery backends are an advanced topic the example doesn't cover.
+Out-of-process gears find each other through a directory service. Current OoP E2E coverage in this
+repo runs a Host + Workers loopback topology and validates remote REST contract calls.
 :::
+
+## Run locally
+
+Start the platform host and worker in separate terminals:
+
+```bash
+# Terminal 1: edge and DirectoryService
+cargo run -p cf-gears-flight-control -- --config config/oop-flight-control.yaml run
+
+# Terminal 2: standalone hello worker
+TOOLKIT_DIRECTORY_ENDPOINT=http://127.0.0.1:50051 \
+    cargo run -p hello --features oop_module --bin hello-oop -- --config config/oop-hello.yaml
+```
+
+The edge proxies the exposed route; the worker also serves it directly:
+
+```bash
+curl http://127.0.0.1:8087/hello/v1/ping
+curl http://127.0.0.1:9091/hello/v1/ping
+```
 
 ## See also
 
 - [Gears & composition](../../concepts/gears-and-composition/) — in-process vs out-of-process.
-- Full code: `examples/oop-gears/calculator/`.
+- Full code: `examples/toolkit/hello/` and `examples/toolkit/api-contracts/`.
+- Container and Kubernetes deployment: `deploy/docker/` and `deploy/helm/`.

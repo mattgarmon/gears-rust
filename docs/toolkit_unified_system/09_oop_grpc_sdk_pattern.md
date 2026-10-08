@@ -1,6 +1,8 @@
-# Out-of-Process Gears and gRPC SDK Pattern
+# Out-of-Process Gears: Shared Runtime and gRPC SDK Pattern
 
-ToolKit supports running gears as separate processes with gRPC-based inter-process communication. This enables process isolation, language flexibility, and independent scaling.
+> **Transport note.** REST is the default transport for out-of-process (OoP) gears; gRPC is opt-in. For the current REST-based model and runnable examples, see [Run a gear out-of-process](../web-docs/build-with-gears/out-of-process.md), `examples/toolkit/hello/`, and `examples/toolkit/api-contracts/`. Gear-to-gear calls use `#[toolkit::consumes]` / `#[toolkit::provides]`, not the manual wiring shown below. This document remains the reference for the shared OoP runtime and the gRPC SDK pattern when gRPC is explicitly chosen.
+
+ToolKit supports running gears as separate processes. The gRPC-based inter-process communication described here is an opt-in transport for process isolation, language flexibility, and independent scaling.
 
 ## Core invariants
 
@@ -23,32 +25,22 @@ pub enum RuntimeKind {
 }
 ```
 
-## OoP Gear Configuration
+## Configuring an OoP process
 
-### YAML configuration
+An OoP gear runs as its own process and connects to the platform host's DirectoryService. The `oop_http` block configures its local HTTP surface; the endpoint is provided through `TOOLKIT_DIRECTORY_ENDPOINT`.
 
 ```yaml
+oop_http:
+    listen_addr: "127.0.0.1:9091"
+    advertise_uri: "http://127.0.0.1:9091"
+    allow_loopback_advertise: true
+
 gears:
-  calculator:
-    runtime:
-      type: oop
-      execution:
-        executable_path: "~/.cf-gears/bin/calculator-oop.exe"
-        args: [ ]
-        working_directory: null
-        environment:
-          RUST_LOG: "info"
-    config:
-      some_setting: "value"
+    my_gear:
+        config: {}
 ```
 
-### Configuration fields
-
-- `type: oop` — marks the gear as out-of-process
-- `executable_path` — path to the gear binary (supports `~` expansion)
-- `args` — command-line arguments passed to the executable
-- `working_directory` — optional working directory for the process
-- `environment` — environment variables to set for the process
+The `runtime.type: oop` plus `execution.executable_path` example describes host-managed child-process spawning; it is not how the current REST deployment examples configure a worker. Those examples run standalone binaries or pods with worker-local `oop_http` settings; see `deploy/docker/` and `deploy/helm/`.
 
 ## OoP Bootstrap Library
 
@@ -82,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
 | `instance_id` | Instance ID (defaults to random UUID) |
 | `directory_endpoint` | DirectoryService gRPC endpoint |
 | `config_path` | Path to configuration file |
-| `verbose` | Log verbosity (0=default, 1=info, 2=debug, 3=trace) |
+| `verbose` | Log verbosity (0=default, 1=debug, 2=trace) |
 | `print_config` | Print effective config and exit |
 | `heartbeat_interval_secs` | Heartbeat interval (default: 5) |
 | `version` | Gear version used for `DirectoryService` registration and the generated `OpenAPI` spec version; `None` means no explicit version |

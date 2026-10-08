@@ -512,15 +512,15 @@ This gives gears one uniform place for pagination/filtering (**OData** `$filter`
 
 ### B.8 Composable gears: one codebase, many deployment shapes
 
-A **Gear** is a self-contained unit that owns its API (an SDK crate), owns its data (behind `SecureConn`), is discovered at link time via `inventory`, and composes through a typed `ClientHub` in-process — or the *same* SDK over gRPC out-of-process.
+A **Gear** is a self-contained unit that owns its API (an SDK crate), owns its data (behind `SecureConn`), is discovered at link time via `inventory`, and composes through a typed `ClientHub` in-process — or through the same SDK over REST by default, with gRPC available as an opt-in OoP transport.
 
-The logical model is identical regardless of the physical boundary. Switching between in-process and out-of-process is a **YAML field** (`runtime.type`), not a code change:
+The logical model can remain the same across physical boundaries. `runtime.type` configures local vs host-managed OoP placement, but standalone workers also require a out-of-process binary, transport support, and deployment wiring for discovery, endpoints, and authentication. The same SDK contract works remotely only when that transport is supported:
 
-- **Single-node** — all gears in one process → edge, on-prem appliances, dev/test.
-- **Multi-node** — gears across processes/machines over gRPC, no orchestrator.
-- **Kubernetes** — containerized, full orchestration, cloud-native ops.
+- **Embedded (single-process)** — all gears in one process → edge, on-prem appliances, dev/test.
+- **Self-hosted (multi-process)** — gears across processes/machines, using REST by default or gRPC when selected.
+- **K8s Native** — containerized services; full cluster-plane support is still in progress.
 
-> Develop locally single-node → deploy bare-metal → scale to K8s — **no rewrites**.
+> Develop and test locally, then deploy across processes or pods when the required binaries and platform wiring are in place.
 
 ### B.9 Extensible domain model via the Global Type System (GTS)
 

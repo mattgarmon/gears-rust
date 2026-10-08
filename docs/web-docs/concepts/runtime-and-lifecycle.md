@@ -13,7 +13,7 @@ A gear declares what it needs and what it exposes as **capabilities** in its
 
 - `db` — needs a database; implements `DatabaseCapability` (and provides migrations).
 - `rest` — exposes a REST API; implements `RestApiCapability`.
-- `grpc` — exposes a gRPC service (used by out-of-process gears).
+- `grpc` — exposes a gRPC service (used when an OoP deployment selects gRPC).
 - `stateful` — runs background work with a managed lifecycle.
 
 The runtime discovers every gear at link time (via `inventory`), builds a dependency-ordered
@@ -35,8 +35,9 @@ pre_init → DB migration → init → post_init → REST wiring → gRPC wiring
   any cross-gear wiring is safe here (system gears only).
 - **REST / gRPC wiring** — routes and gRPC services are registered.
 - **`start`** — background work starts for stateful gears.
-- **`OoP spawn`** — out-of-process gears are spawned after the gRPC hub is listening, so they
-  can connect to the directory endpoint.
+- **`OoP spawn`** — when host-managed worker spawning is configured, workers start after the gRPC
+  hub is listening so they can connect to the directory endpoint. Standalone workers use their
+  own binary entry point and deployment configuration.
 - **Wait for cancellation** — the runtime blocks until a cancellation signal is received
   (Ctrl-C, SIGTERM, or programmatic).
 - **`stop`** — shutdown runs in **reverse dependency order** with a platform deadline.

@@ -268,14 +268,14 @@ correctness, and maintainability matter more than raw implementation speed.</p>
 </section>
 </foreignObject></svg><svg data-marpit-svg="" viewBox="0 0 1280 720"><foreignObject width="1280" height="720"><section id="21" data-paginate="true" data-theme="rose-pine-moon" lang="en-US" data-marpit-pagination="21" style="--paginate:true;--theme:rose-pine-moon;" data-marpit-pagination-total="60">
 <h2 id="deployment-shapes-future">Deployment shapes (FUTURE)</h2>
-<p>Same gear code &amp; API — three physical shapes via <code>runtime.type: local | oop</code>:</p>
+<p>The same gear code and API can support three deployment shapes when the required build outputs, transport support, and runtime wiring are in place:</p>
 <ul>
 <li><strong>Single-node</strong> — all gears in one process → edge, on-prem appliances, dev/test</li>
 <li><strong>Multi-node</strong> — gears across processes/machines over REST/gRPC, no orchestration → bare-metal on-prem</li>
 <li><strong>Kubernetes</strong> — containerized services, full orchestration, cloud-native ops</li>
 </ul>
 <blockquote>
-<p>Develop locally single-node → deploy bare-metal → scale to K8s, no rewrites.</p>
+<p>Develop locally single-node → deploy across processes → scale to K8s when the required discovery, endpoint, and authentication wiring is configured.</p>
 </blockquote>
 </section>
 </foreignObject></svg><svg data-marpit-svg="" viewBox="0 0 1280 720"><foreignObject width="1280" height="720"><section id="22" data-paginate="true" data-theme="rose-pine-moon" lang="en-US" data-marpit-pagination="22" style="--paginate:true;--theme:rose-pine-moon;" data-marpit-pagination-total="60">
@@ -356,16 +356,16 @@ into the platform. Directory is still <code>gears/&lt;name&gt;/</code>.</p>
 <p>The <strong>logical model stays identical</strong> regardless of the physical boundary.</p>
 <ul>
 <li><strong>In-process (default)</strong> — gears share one runtime; communicate via typed <code>ClientHub</code> clients; wired by Tookit</li>
-<li><strong>Out-of-process</strong> — gears as separate processes over <strong>gRPC</strong>
+<li><strong>Out-of-process</strong> — gears run as independent processes or pods; REST is the default transport and gRPC is opt-in
 <ul>
 <li><code>HostRuntime</code> OoP orchestration hooks</li>
 <li><code>toolkit-transport-grpc</code> transport library</li>
-<li><code>examples/oop-gears/</code> demonstrates the pattern</li>
+<li><code>examples/toolkit/hello/</code> and <code>examples/toolkit/api-contracts/</code> demonstrate the pattern</li>
 </ul>
 </li>
 </ul>
 <blockquote>
-<p>Switch modes with a YAML field (<code>runtime.type</code>) — <strong>no code changes</strong>.</p>
+<p>The same gear contract can be used across process boundaries when transport support and deployment discovery are configured.</p>
 </blockquote>
 </section>
 </foreignObject></svg><svg data-marpit-svg="" viewBox="0 0 1280 720"><foreignObject width="1280" height="720"><section id="29" data-paginate="true" data-theme="rose-pine-moon" lang="en-US" data-marpit-pagination="29" style="--paginate:true;--theme:rose-pine-moon;" data-marpit-pagination-total="60">
@@ -378,7 +378,7 @@ into the platform. Directory is still <code>gears/&lt;name&gt;/</code>.</p>
 <li><strong>Feature flags decide what code is present</strong>; runtime config decides which vendor,<br />
 plugin instance, or capability is used</li>
 <li><strong>Built-in plugins</strong> run in-process and register scoped <code>ClientHub</code> clients</li>
-<li><strong>External plugins/gears</strong> keep the same SDK contract but can run out-of-process over gRPC</li>
+<li><strong>External plugins/gears</strong> keep the same SDK contract; OoP transport is REST by default, with gRPC available when selected</li>
 </ul>
 <blockquote>
 <p>Result: small vendor-specific binaries, deterministic SBOMs, and the same extension model locally or remotely.</p>

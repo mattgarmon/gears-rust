@@ -5,25 +5,25 @@
 The **ClientHub** provides type-safe client resolution for inter-gear communication. It supports both in-process and remote clients:
 
 - **In-process clients** — direct function calls within the same process
-- **Remote clients** — gRPC clients for OoP gears (resolved via DirectoryClient)
+- **Remote clients** — REST clients by default, or gRPC clients when selected, for OoP gears (resolved via DirectoryClient)
 - **Scoped clients** — multiple implementations of the same interface keyed by scope (for plugins)
 
 ### Client types
 
 - **`*-sdk` crate** defines the trait & types exposed to other gears.
 - **Gear crate** implements a local adapter that implements the SDK trait for in-process communication.
-- **gRPC clients** implement the same SDK trait for remote communication.
+- **Remote transport clients** implement the same SDK trait (REST by default; gRPC when selected).
 - Consumers resolve the typed client from ClientHub by interface type (+ optional scope).
 
 ## In-Process vs Remote Clients
 
 | Aspect       | In-Process              | Remote (OoP)               |
 |--------------|-------------------------|----------------------------|
-| Transport    | Direct call             | gRPC                       |
+| Transport    | Direct call             | REST by default; gRPC when selected |
 | Latency      | Nanoseconds             | Milliseconds               |
 | Isolation    | Shared process          | Separate process           |
 | Contract     | Trait in `*-sdk/` crate | Trait in `*-sdk/` crate    |
-| Registration | `ClientHub::register()` | DirectoryClient + gRPC client + `ClientHub::register()` |
+| Registration | `ClientHub::register()` | DirectoryClient + remote client + `ClientHub::register()` |
 
 ## Publish in `init` (provider gear)
 

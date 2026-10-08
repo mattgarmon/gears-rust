@@ -124,7 +124,7 @@ Every gear's public API lives in a dedicated SDK package (`<gear>-sdk/`) contain
 
 Constructor Fabric Gears separates service logic from service packaging. Gear logic lives in libraries; final service binaries compose those libraries for a specific deployment shape.
 
-**How.** Gear contracts are transport-agnostic: in-process gears register local adapters in `ClientHub`; out-of-process gears register REST/gRPC clients implementing the same SDK interface. A YAML config field (`runtime.type: local | oop`) switches modes without code changes. The platform provides DB-agnostic persistence through a SeaORM-based `SecureConn` abstraction and infrastructure-agnostic cluster primitives (distributed cache, distributed locks, leader election, service discovery) that resolve against operator-selected backends at startup.
+**How.** Gear contracts are transport-agnostic: in-process gears register local adapters in `ClientHub`; out-of-process gears register REST clients by default, or gRPC clients when that transport is selected, implementing the same SDK interface. Moving a gear out of process requires the corresponding out-of-process binary, transport support, and deployment wiring for discovery, endpoints, and authentication; a YAML field alone does not switch the implementation. The platform provides DB-agnostic persistence through a SeaORM-based `SecureConn` abstraction and infrastructure-agnostic cluster primitives (distributed cache, distributed locks, leader election, service discovery) that resolve against operator-selected backends at startup.
 
 **Why.** This makes Constructor Fabric Gears not just cloud-provider-agnostic, but deployment-topology-agnostic. Teams develop and test locally in single-node mode, deploy bare-metal services for on-prem or edge products, and scale to Kubernetes when needed — all from the same gear code and contracts.
 
@@ -379,12 +379,12 @@ The default mode is in-process composition: gears share one runtime, communicate
 
 ### 9.2. Out-of-process execution
 
-Gears can also run as separate processes communicating via gRPC.
+Gears can also run as separate processes communicating via REST by default, with gRPC available as an opt-in transport.
 
 - [x] `HostRuntime` contains explicit OoP orchestration hooks.
 - [x] `toolkit-transport-grpc` exists as a transport library.
 - [x] `docs/toolkit_unified_system/09_oop_grpc_sdk_pattern.md` documents the pattern.
-- [x] `examples/oop-gears/` demonstrates the model with calculator examples.
+- [x] `examples/toolkit/hello/` and `examples/toolkit/api-contracts/` demonstrate out-of-process gears.
 
 ## 10. Security architecture
 

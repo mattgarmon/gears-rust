@@ -257,13 +257,15 @@ Constructor Gears is a **co-evolving platform**, not a loose collection of packa
 
 ## Deployment shapes (FUTURE)
 
-Same gear code & API — three physical shapes via `runtime.type: local | oop`:
+The same gear code and API can support three deployment shapes when the required build outputs,
+transport support, and runtime wiring are in place:
 
-- **Single-node** — all gears in one process → edge, on-prem appliances, dev/test
-- **Multi-node** — gears across processes/machines over REST/gRPC, no orchestration → bare-metal on-prem
-- **Kubernetes** — containerized services, full orchestration, cloud-native ops
+- **Embedded (single-process)** — all gears in one process → edge, on-prem appliances, dev/test
+- **Self-hosted (multi-process)** — gears across processes/machines over REST/gRPC, no orchestration → bare-metal on-prem
+- **K8s Native** — containerized services, full orchestration, cloud-native ops
 
-> Develop locally single-node → deploy bare-metal → scale to K8s, no rewrites.
+> Develop locally single-process → deploy across processes → scale to K8s when the required
+> discovery, endpoint, and authentication wiring is configured.
 
 ---
 
@@ -335,12 +337,12 @@ A Gear:
 The **logical model stays identical** regardless of the physical boundary.
 
 - **In-process (default)** — gears share one runtime; communicate via typed `ClientHub` clients; wired by Tookit
-- **Out-of-process** — gears as separate processes over **gRPC**
+- **Out-of-process** — gears run as independent processes or pods; REST is the default transport and gRPC is opt-in
   - `HostRuntime` OoP orchestration hooks
   - `toolkit-transport-grpc` transport library
-  - `examples/oop-gears/` demonstrates the pattern
+  - `examples/toolkit/hello/` and `examples/toolkit/api-contracts/` demonstrate the pattern
 
-> Switch modes with a YAML field (`runtime.type`) — **no code changes**.
+> The same gear contract can be used across process boundaries when transport support and deployment discovery are configured.
 
 ---
 
@@ -354,7 +356,7 @@ Constructor Gears favors **explicit, reproducible composition** over opaque runt
 - **Feature flags decide what code is present**; runtime config decides which vendor,
   plugin instance, or capability is used
 - **Built-in plugins** run in-process and register scoped `ClientHub` clients
-- **External plugins/gears** keep the same SDK contract but can run out-of-process over gRPC
+- **External plugins/gears** keep the same SDK contract; OoP transport is REST by default, with gRPC available when selected
 
 > Result: small vendor-specific binaries, deterministic SBOMs, and the same extension model locally or remotely.
 

@@ -46,12 +46,13 @@ platform guarantee, not an application convention.
 
 ## In-process vs out-of-process
 
-The **same gear** can run two ways, chosen by configuration rather than code:
+The **same gear** can be packaged for in-process or out-of-process deployment. Remote execution
+requires the appropriate worker binary, transport support, and discovery/deployment wiring:
 
 - **In-process** — the gear is compiled into the host binary and resolved through
   `ClientHub` as a direct call.
-- **Out-of-process** — the gear runs as its own service; consumers get a gRPC client that
-  implements the very same SDK trait.
+- **Out-of-process** — the gear runs as its own service; consumers get a REST client by default,
+  or a gRPC client when that transport is selected, implementing the same SDK trait.
 
 This is what lets one codebase deploy as a single node, as multiple processes, or as
 Kubernetes services.

@@ -33,7 +33,7 @@ let users = ctx.client_hub().get::<dyn UsersInfoClientV1>()?;
 let user = users.get_user(ctx, id).await?;
 ```
 
-Whether the registered implementation is a local in-process adapter or a gRPC client (out-of-process) is decided by configuration — the calling code is identical. See [SDK contracts and ClientHub](../../concepts/sdk-and-clienthub/).
+Whether the registered implementation is a local in-process adapter or a remote client is a deployment outcome, not configuration alone. The calling code is identical when the selected contract transport support is present and discovery/endpoints/auth are configured. See [SDK contracts and ClientHub](../../concepts/sdk-and-clienthub/).
 
 ## Configure a gear
 

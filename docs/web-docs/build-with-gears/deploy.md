@@ -1,14 +1,16 @@
 ---
 title: Deploy Gears
-description: Run the same gear code as a single node, across processes over gRPC, or as containers on Kubernetes — selected by configuration.
+description: Deploy gears across Embedded, Self-Hosted, and K8s Native profiles using the required build and runtime wiring.
 sidebar:
   label: Deploy Gears
   order: 14
 ---
 
-The same gear code compiles into three deployment shapes. You choose with configuration, not by rewriting code. For the conceptual model, see [Deployment shapes](../../concepts/deployment-shapes/).
+The same business logic can run across three deployment profiles when the required host/worker
+binaries, transport support, and runtime configuration are present. For the conceptual model, see
+[Deployment shapes](../../concepts/deployment-shapes/).
 
-## Single-node
+## Embedded (single-process)
 
 Every gear runs in one process (edge, on-prem, development). Gears talk in-process through `ClientHub`. This is what the quickstart runs — see [Install and run](../).
 
@@ -19,22 +21,28 @@ gears:
       type: local
 ```
 
-## Multi-node (gRPC)
+## Self-Hosted (multi-process)
 
-Gears split across processes or machines over gRPC, without container orchestration. Out-of-process gears self-register with a directory (the gRPC hub) and consumers get a gRPC client behind the same SDK trait.
+Gears run as independent processes or machines without container orchestration. An OoP gear
+self-registers with the DirectoryService, and consumers resolve a remote client behind the same SDK
+trait when transport support and deployment wiring are present.
 
-```yaml
-gears:
-  my-gear:
-    runtime:
-      type: oop
-```
+For a worker configuration, see `config/oop-hello.yaml` and [Run a gear out-of-process](../out-of-process/).
+The worker uses `oop_http` for its REST
+listener and `TOOLKIT_DIRECTORY_ENDPOINT` to reach the platform host's DirectoryService.
 
-The example ships a master config wiring the gateway, gRPC hub, and orchestrator. See [Run a gear out-of-process](../out-of-process/).
+## K8s Native
 
-## Kubernetes
+Gears run as containerized services with cluster-native discovery. Each service is an out-of-process
+gear plus the system gears it depends on. Cluster-plane coordination primitives (leader election,
+distributed locks, distributed cache) are **designed but not yet implemented** — see
+[Status and roadmap](../../capabilities/status-and-roadmap/).
 
-Gears run as containerized services with cluster-native discovery. Each service is an out-of-process gear plus the system gears it depends on. The cluster-plane coordination primitives (leader election, distributed locks, distributed cache) are **designed but not yet implemented** — see [Status and roadmap](../../capabilities/status-and-roadmap/).
+## Implementation status
+
+- **Embedded**: implemented.
+- **Self-Hosted**: implemented for the currently supported OoP gear set/profile combinations in this repo (see OoP E2E topology and contract-call tests).
+- **K8s Native**: supported deployment model, with full gear support still in progress.
 
 ## Build considerations
 

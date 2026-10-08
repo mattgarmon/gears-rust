@@ -1,5 +1,11 @@
 # ADR-0003: Universal Lazy Typed REST Clients for OoP Gears
 
+## Status
+
+**Partially adopted / superseded in part.** This is the original proposal, retained as a historical record. REST became the default OoP transport and gRPC is opt-in. The proposed `clients = [...]` gear-macro attribute, `ClientDescriptor`, `LazyClient`, and `ClientProvider` were not implemented; the current mechanism uses `#[toolkit::consumes]` / `#[toolkit::provides]` and directory-resolving REST clients registered with `ClientHub`.
+
+The calculator and calculator-gateway examples used below have been removed. For current runnable examples, see `examples/toolkit/hello/`, `examples/toolkit/api-contracts/`, and [Run a gear out-of-process](../../web-docs/build-with-gears/out-of-process.md).
+
 ## Executive Summary
 
 This proposal outlines a migration from gRPC to REST as the default transport for out-of-process (OoP) gears and introduces a **universal lazy typed client layer** for OoP gear communication in ToolKit. The implementation is structured in phases:

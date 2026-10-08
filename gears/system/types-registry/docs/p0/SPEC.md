@@ -932,12 +932,11 @@ the repository, so that path would be its first user. That is a fact about the t
 preference about transports, and it is why §10.1's ctx-less trait has a planned breaking
 change tied to OoP rather than only to tenancy.
 
-**Platform REST is not the out-of-process path.** A gear that moves out of process stays a
-gear: it resolves the SDK trait from `ClientHub` and the transport beneath it changes from a
-direct call to gRPC. Platform REST exists for callers that are not gears — humans, jobs, CI,
-external workloads authenticated by `X-ToolKit-Internal-Token` or mTLS SPIFFE. The repository
-shows the split: `examples/oop-gears/calculator` carries `proto/`, `client.rs` and `wiring.rs`
-in its SDK plus `api/grpc/server.rs` in the gear, and has no REST surface at all, while
+**Platform REST is not the gear-to-gear contract path.** A gear moving out of process continues
+to resolve the SDK trait from `ClientHub`; compatible contracts use REST by default, with gRPC
+available when selected. Platform REST exists for callers that are not gears — humans, jobs, CI,
+external workloads authenticated by `X-ToolKit-Internal-Token` or mTLS SPIFFE. The current
+`examples/toolkit/api-contracts/` example demonstrates contract and transport projections, while
 `service-discovery` declares `capabilities = [grpc, system, rest]` and carries both.
 
 Two P0 properties make the later gRPC surface cheap rather than a redesign. The async protocol
