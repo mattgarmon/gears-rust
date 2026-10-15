@@ -188,7 +188,11 @@ jobs:
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$GHCR_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+        run: |
+          # helm login for `helm push`; cosign login (writes ~/.docker/config.json)
+          # so `cosign sign` can push the signature artifact to the same repo.
+          echo "$GHCR_TOKEN" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+          echo "$GHCR_TOKEN" | cosign login ghcr.io --username "${{ github.actor }}" --password-stdin
 
       - name: Resolve chart dependencies
         run: bash tools/scripts/update-helm-deps.sh
