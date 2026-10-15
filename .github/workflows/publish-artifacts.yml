@@ -92,7 +92,7 @@ jobs:
       packages: write
       id-token: write   # keyless cosign signing via GitHub OIDC
     env:
-      IMAGE: ghcr.io/constructorfabric/${{ needs.resolve.outputs.component }}
+      IMAGE: ghcr.io/mattgarmon/${{ needs.resolve.outputs.component }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -207,7 +207,7 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
           CHART_PATH: ${{ needs.resolve.outputs.chart_path }}
           HAS_IMAGE: ${{ needs.resolve.outputs.has_image }}
-          REPO: ghcr.io/constructorfabric/charts/${{ needs.resolve.outputs.component }}
+          REPO: ghcr.io/mattgarmon/charts/${{ needs.resolve.outputs.component }}
         run: |
           mkdir -p artifacts
           # A gear's own chart deploys this release's image, so pin image.tag to the
@@ -222,7 +222,7 @@ jobs:
           # helm push reports the pushed manifest digest; sign that immutable ref.
           # Keep only the last matching line's final token, so an extra line that
           # happens to say "digest" can't turn $digest into two words.
-          digest=$(helm push artifacts/*.tgz oci://ghcr.io/constructorfabric/charts 2>&1 \
+          digest=$(helm push artifacts/*.tgz oci://ghcr.io/mattgarmon/charts 2>&1 \
             | awk '/[Dd]igest:/ { d = $NF } END { print d }')
           if [[ -z "$digest" ]]; then
             echo "::error::helm push did not report a digest" >&2
