@@ -171,9 +171,10 @@ jobs:
           persist-credentials: false
 
       - name: Install Helm
-        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
-        with:
-          tool: helm
+        run: |
+          curl -fsSL https://get.helm.sh/helm-v3.18.4-linux-amd64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin --strip-components=1 linux-amd64/helm
+          helm version
       - name: Install yq
         run: |
           sudo curl -fsSL -o /usr/local/bin/yq \
