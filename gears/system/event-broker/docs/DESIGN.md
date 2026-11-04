@@ -1075,7 +1075,6 @@ HTTP POST /v1/events
     → Response: 202 Accepted, status only (broker sequence
       not yet assigned; see "Sync vs Async Persist Modes" in §3.6). An idempotent
       duplicate is 200 with no body. Prefer: wait=N -> 201 once stored, 202 on timeout.
-      (Not yet served: `Prefer: wait` answers `501`; tracked in #5655.)
 
 Asynchronously, in the outbox processor:
     → backend.append(topic, [KeyedEvent(key, event)], flush)
@@ -1114,7 +1113,7 @@ Each outbox layer has an independent retry / durability boundary:
 
 - **Producer outbox** considers an event delivered when the ingest API returns `201`, `202` or `200` (duplicate) - i.e., the event is durably enqueued in the ingest outbox AND `event_broker_producer_sequence.last_sequence` has advanced atomically. The producer outbox does NOT wait for `backend.append`; that's the ingest outbox's job.
 - **Ingest outbox** considers an event delivered when `backend.append` returns `Ok(Appended)` - the backend has durably stored the event; with `Appended::Heads` positions are known at once, with `Appended::Accepted` they reach delivery through `watch`.
-- **Synchronous mode** (requested with the standard `Prefer: wait=N` header, RFC 7240, N capped by configuration) extends the HTTP response timing: ingest mints a trace internally, subscribes to it and enqueues in one transaction, then holds the request until `backend.append` stores the events or N elapses. `Prefer: respond-async` names the default async behaviour and is a no-op. See [`features/0001-idempotent-producers.md`](features/0001-idempotent-producers.md) §5.1. Not yet served: `Prefer: wait` answers `501`; tracked in #5655.
+- **Synchronous mode** (requested with the standard `Prefer: wait=N` header, RFC 7240, N capped by configuration) extends the HTTP response timing: ingest mints a trace internally, subscribes to it and enqueues in one transaction, then holds the request until `backend.append` stores the events or N elapses. `Prefer: respond-async` names the default async behaviour and is a no-op. See [`features/0001-idempotent-producers.md`](features/0001-idempotent-producers.md) §5.1.
 
 This layering means a slow backend never blocks the producer outbox; a misconfigured ingest never silently drops producer commits.
 
@@ -1332,7 +1331,7 @@ When the producer's local chain state is no longer trustworthy (DB restore, corr
   ```
 - `200 OK` - an idempotent duplicate (a lost-ack retry of the producer chain's current head). The event is already durable; nothing is written and the response carries no body.
 
-Synchronous persistence is requested with the standard `Prefer: wait=N` header (RFC 7240, N capped by configuration). Ingest mints a trace internally (never on the wire) and answers `201 Created` once the events are stored, `202 Accepted` when N elapses first, and `200 OK` when every event is a duplicate. A backend failure is retried, never answered: it shows as `202` on timeout. `Prefer: respond-async` names the default (async) behaviour and is accepted as a no-op. Not yet served: `Prefer: wait` answers `501`; tracked in #5655.
+Synchronous persistence is requested with the standard `Prefer: wait=N` header (RFC 7240, N capped by configuration). Ingest mints a trace internally (never on the wire) and answers `201 Created` once the events are stored, `202 Accepted` when N elapses first, and `200 OK` when every event is a duplicate. A backend failure is retried, never answered: it shows as `202` on timeout. `Prefer: respond-async` names the default (async) behaviour and is accepted as a no-op.
 
 Errors (an error about the stream names the targeted stream in `context.resource_name`, a request-level `400` names the request, and an unknown producer names the producer resource; see §3.3 "Error Response Format"):
 - `400` - Read-only/unknown field on the body, or a chained/monotonic mode invariant violated
@@ -1351,7 +1350,7 @@ Limits and rules:
 - Every event resolves to the same topic; events may carry several producer ids, and stateless events; the batch is validated as runs per `(producer_id, topic)` in request order, each run against that chain's `last_sequence` (run rules: [ADR-0004](ADR/0004-idempotent-producer-protocol.md), [feature 0001](features/0001-idempotent-producers.md))
 - All-or-nothing: the first violation rejects the whole batch with `412 SequenceViolation` or a `400`, and nothing is enqueued; duplicates are skipped and the rest is enqueued
 
-**Response** (same as `POST /v1/events`): `202 Accepted` once all non-duplicate events are durably enqueued in the outbox; `200 OK` when every event is a duplicate (a lost-ack resend; a batch carrying a stateless event is never all duplicates). Every answer is status-only (no per-event body). `Prefer: wait=N` applies to the batch as a whole, with the status codes of a single publish. Not yet served: `Prefer: wait` answers `501`; tracked in #5655.
+**Response** (same as `POST /v1/events`): `202 Accepted` once all non-duplicate events are durably enqueued in the outbox; `200 OK` when every event is a duplicate (a lost-ack resend; a batch carrying a stateless event is never all duplicates). Every answer is status-only (no per-event body). `Prefer: wait=N` applies to the batch as a whole, with the status codes of a single publish.
 
 Errors (the run rules are checked before any chain state is read):
 - `400 empty_batch` - the batch has no events (field `events`)
@@ -1378,7 +1377,6 @@ POST   /v1/events                                # PUBLISH (no dedup)
          data:       { ... }                     # REQUIRED; validated against type's JSON Schema
          # meta block absent — broker skips dedup entirely
        Returns 202: Accepted (async persist). Prefer: wait=N -> 201 stored | 202 timeout
-                                                 # not yet served: Prefer: wait answers 501 (#5655)
 
 # ── Chained / Monotonic (idempotent) ────────────────────────────────
 POST   /v1/producers                             # REGISTER — mint producer id
@@ -1906,7 +1904,7 @@ sequenceDiagram
     SB-->>HC: watch: new head of each partition touched
 ```
 
-**Synchronous mode** (requested with `Prefer: wait=N`, RFC 7240) holds the response on a broker-minted trace until `backend.append` for it returns or N elapses: `201` stored, `202` on timeout. Not yet served: `Prefer: wait` answers `501`; tracked in #5655.
+**Synchronous mode** (requested with `Prefer: wait=N`, RFC 7240) holds the response on a broker-minted trace until `backend.append` for it returns or N elapses: `201` stored, `202` on timeout.
 
 **ID**: `cpt-cf-evbk-seq-poll-flow`
 
@@ -2064,12 +2062,12 @@ The wire surface has **two consumer-visible sequence concepts** and one **intern
 
 - **No `UNIQUE (topic, partition, sequence)` constraint** is needed at the broker DB level — the backend owns assignment, and the outbox guarantees ordered delivery to the backend (so the backend never sees out-of-order writes that would cause sequence collisions).
 - **The broker never computes a `sequence`.** How a backend assigns one is its own, hidden inside its `append`.
-- **Producers never see the `sequence` synchronously.** The `POST /v1/events` response carries no `sequence`, whether `202 Accepted` on enqueue or `201 Created` once stored. Not yet served: `Prefer: wait` answers `501`; tracked in #5655. Producers needing the value learn it via consumer-side query or admin lookup.
+- **Producers never see the `sequence` synchronously.** The `POST /v1/events` response carries no `sequence`, whether `202 Accepted` on enqueue or `201 Created` once stored. Producers needing the value learn it via consumer-side query or admin lookup.
 - **Consumers see only `sequence`.** Consumer seek parameters are broker-logical last-processed cursors. The backend's `query` translates seek positions to its native positions as needed.
 
 ##### Sync vs Async Persist Modes
 
-Publish is asynchronous (HTTP 202) by default. A caller that needs the events stored asks with the standard `Prefer: wait=N` header (RFC 7240), N capped by configuration. Not yet served: `Prefer: wait` answers `501`; tracked in #5655.
+Publish is asynchronous (HTTP 202) by default. A caller that needs the events stored asks with the standard `Prefer: wait=N` header (RFC 7240), N capped by configuration.
 
 | Mode | Trigger | Response | Trade-off |
 |---|---|---|---|

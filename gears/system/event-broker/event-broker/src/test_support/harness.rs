@@ -83,6 +83,7 @@ async fn seeded_spec_manager(
 /// does not leave it harmlessly running: its own doc comment states
 /// `TaskSet::Drop` cancels the pipeline's cancellation token on drop,
 /// stopping every background worker immediately.
+#[allow(clippy::too_many_arguments)]
 async fn start_outbox(
     db: Arc<toolkit_db::DBProvider<toolkit_db::DbError>>,
     backend: Arc<dyn Backend>,
@@ -91,6 +92,7 @@ async fn start_outbox(
     provisioning: Provisioning,
     limits: ProvisioningLimits,
     outbox_partitions: OutboxPartitions,
+    sync_wait: Arc<crate::domain::sync_wait::SyncWaitRegistry>,
 ) -> (Arc<dyn BackendResolver>, toolkit_db::outbox::OutboxHandle) {
     let backend_resolver: Arc<dyn BackendResolver> = Arc::new(SingleBackendResolver::new(backend));
     if provisioning == Provisioning::AtStart {
@@ -112,6 +114,7 @@ async fn start_outbox(
             Arc::clone(&backend_resolver),
             outbox_id,
             IngestMetrics::global(INGEST_QUEUE_NAME),
+            sync_wait,
         ))
         .start()
         .await
@@ -211,6 +214,30 @@ impl IngestService for FaultInjectingIngest {
             return Err(Self::rate_limit_error());
         }
         self.inner.publish_batch(ctx, requests).await
+    }
+
+    async fn publish_event_sync(
+        &self,
+        ctx: &SecurityContext,
+        request: crate::domain::ingest::PublishRequest,
+        wait: std::time::Duration,
+    ) -> Result<crate::domain::ingest::SyncPublishAck, crate::domain::error::DomainError> {
+        if self.faults.rate_limited() {
+            return Err(Self::rate_limit_error());
+        }
+        self.inner.publish_event_sync(ctx, request, wait).await
+    }
+
+    async fn publish_batch_sync(
+        &self,
+        ctx: &SecurityContext,
+        requests: Vec<crate::domain::ingest::PublishRequest>,
+        wait: std::time::Duration,
+    ) -> Result<crate::domain::ingest::SyncPublishAck, crate::domain::error::DomainError> {
+        if self.faults.rate_limited() {
+            return Err(Self::rate_limit_error());
+        }
+        self.inner.publish_batch_sync(ctx, requests, wait).await
     }
 
     async fn register_producer(
@@ -609,6 +636,9 @@ impl EventBrokerHarnessBuilder {
         let backend = self
             .backend
             .unwrap_or_else(|| Arc::new(MemoryBackend::new()));
+        // One registry, shared by the outbox worker (which signals) and the
+        // ingest service (which waits), exactly as `module.rs` shares it.
+        let sync_wait = Arc::new(crate::domain::sync_wait::SyncWaitRegistry::new());
         let (backend_resolver, outbox_handle) = start_outbox(
             Arc::clone(&db),
             Arc::clone(&backend),
@@ -617,6 +647,7 @@ impl EventBrokerHarnessBuilder {
             self.provisioning,
             provisioning_limits,
             outbox_partitions,
+            Arc::clone(&sync_wait),
         )
         .await;
 
@@ -654,8 +685,16 @@ impl EventBrokerHarnessBuilder {
             loader_shutdown.clone(),
         ));
 
+        // The production `Prefer: wait=N` ceiling, so the harness clamps a sync
+        // publish exactly as a running instance does; a test sends a smaller
+        // `wait=N` in the header when it needs a shorter hold.
+        let sync_wait_max = std::time::Duration::from_secs(u64::from(
+            crate::config::PublishConfig::default().max_wait_secs,
+        ));
         let attacher: Arc<dyn crate::domain::streaming::source::ReaderAttacher> = topics.clone();
-        let HandlerState { ingest, delivery } = crate::infra::wiring::build_handler_state(
+        let HandlerState {
+            ingest, delivery, ..
+        } = crate::infra::wiring::build_handler_state(
             Arc::clone(&storage),
             policy_enforcer,
             Arc::clone(&spec_manager),
@@ -665,6 +704,8 @@ impl EventBrokerHarnessBuilder {
             Arc::clone(&leases),
             crate::config::BatchConfig::default(),
             outbox_partitions,
+            Arc::clone(&sync_wait),
+            sync_wait_max,
             // Short cadences so idle behaviour is testable without real waits.
             // Everything else is the production default.
             crate::config::StreamingConfig {
@@ -694,6 +735,7 @@ impl EventBrokerHarnessBuilder {
             HandlerState {
                 ingest: Arc::clone(&ingest),
                 delivery: Arc::clone(&delivery),
+                sync_wait_max,
             },
             ctx.clone(),
         );
@@ -702,8 +744,11 @@ impl EventBrokerHarnessBuilder {
         // `module.rs::register_rest`: the SDK's tests resolve it back out rather
         // than construct a broker directly.
         let client_hub = Arc::new(ClientHub::new());
-        let broker: Arc<dyn EventBrokerApi> =
-            Arc::new(LocalBroker::new(Arc::clone(&ingest), Arc::clone(&delivery)));
+        let broker: Arc<dyn EventBrokerApi> = Arc::new(LocalBroker::new(
+            Arc::clone(&ingest),
+            Arc::clone(&delivery),
+            sync_wait_max,
+        ));
         client_hub.register::<dyn EventBrokerApi>(broker);
 
         EventBrokerHarness {

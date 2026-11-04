@@ -182,6 +182,11 @@ pub struct EventBrokerModule {
     /// implementation D2 risk mitigation). Built in `init()`, read by
     /// `register_rest()`; its ingest outbox is wired in later, by `serve()`.
     storage: OnceLock<Arc<Storage>>,
+    /// The synchronous-publish wait registry (`domain::sync_wait`). Built in
+    /// `init()` because the ingest service (`register_rest()`) registers
+    /// waiters on it and the ingest outbox worker (`serve()`) signals them, so
+    /// both phases need the *same* instance.
+    sync_wait: OnceLock<Arc<crate::domain::sync_wait::SyncWaitRegistry>>,
 }
 
 #[async_trait]
@@ -325,6 +330,12 @@ impl Gear for EventBrokerModule {
             )))
             .map_err(|_| anyhow::anyhow!("{} module already initialized", Self::MODULE_NAME))?;
 
+        // One registry for the whole instance: the ingest service registers a
+        // sync publish's wait on it and the ingest outbox worker signals it.
+        self.sync_wait
+            .set(Arc::new(crate::domain::sync_wait::SyncWaitRegistry::new()))
+            .map_err(|_| anyhow::anyhow!("{} module already initialized", Self::MODULE_NAME))?;
+
         tracing::info!(
             module = Self::MODULE_NAME,
             mode = ?cfg.mode,
@@ -430,6 +441,19 @@ impl RestApiCapability for EventBrokerModule {
             // `Duration` arg exists only so a test harness can run it faster.
             let heartbeat =
                 std::time::Duration::from_secs(u64::from(streaming.heartbeat_interval_secs));
+            let sync_wait = self
+                .sync_wait
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("init must run before register_rest()"))?
+                .clone();
+            // The configured ceiling a `Prefer: wait=N` publish is clamped to.
+            let sync_wait_max = std::time::Duration::from_secs(u64::from(
+                self.config
+                    .get()
+                    .ok_or_else(|| anyhow::anyhow!("init must run before register_rest()"))?
+                    .publish
+                    .max_wait_secs,
+            ));
             let state = crate::infra::wiring::build_handler_state(
                 storage,
                 PolicyEnforcer::new(authz),
@@ -445,6 +469,8 @@ impl RestApiCapability for EventBrokerModule {
                     .get()
                     .copied()
                     .ok_or_else(|| anyhow::anyhow!("init must run before register_rest()"))?,
+                Arc::clone(&sync_wait),
+                sync_wait_max,
                 streaming,
                 heartbeat,
             );
@@ -458,6 +484,7 @@ impl RestApiCapability for EventBrokerModule {
             let broker: Arc<dyn EventBrokerApi> = Arc::new(LocalBroker::new(
                 state.ingest.clone(),
                 state.delivery.clone(),
+                sync_wait_max,
             ));
             ctx.client_hub().register::<dyn EventBrokerApi>(broker);
             router = router.layer(Extension(state));
@@ -870,6 +897,11 @@ impl EventBrokerModule {
             .get()
             .copied()
             .ok_or_else(|| anyhow::anyhow!("init must run before start_outbox_pipeline()"))?;
+        let sync_wait = self
+            .sync_wait
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("init must run before start_outbox_pipeline()"))?
+            .clone();
 
         let outbox_id = storage
             .outbox_identity(crate::domain::outbox::INGEST_QUEUE_NAME)
@@ -896,6 +928,7 @@ impl EventBrokerModule {
                 crate::infra::metrics::IngestMetrics::global(
                     crate::domain::outbox::INGEST_QUEUE_NAME,
                 ),
+                sync_wait,
             ))
             .start()
             .await

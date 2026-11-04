@@ -5,6 +5,7 @@
 //! (`infra/dispatcher/forward.rs`, `eb-dispatcher-routing`).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::domain::delivery::DeliveryService;
 use crate::domain::ingest::IngestService;
@@ -13,4 +14,8 @@ use crate::domain::ingest::IngestService;
 pub struct HandlerState {
     pub ingest: Arc<dyn IngestService>,
     pub delivery: Arc<dyn DeliveryService>,
+    /// The ceiling a `Prefer: wait=N` publish is clamped to
+    /// (`config::PublishConfig::max_wait_secs`): the handler holds the request
+    /// for `min(N, sync_wait_max)`.
+    pub sync_wait_max: Duration,
 }

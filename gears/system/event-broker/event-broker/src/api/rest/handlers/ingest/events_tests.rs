@@ -19,7 +19,9 @@ use uuid::Uuid;
 
 use crate::domain::error::{DomainError, ErrorCode};
 use crate::domain::ingest::{ProducerMode, ProducerRegistrationInput, PublishRequest};
-use crate::test_support::{DenyingAuthZ, EventBrokerHarness, Json, StaticTypesRegistry};
+use crate::test_support::{
+    DenyingAuthZ, EventBrokerHarness, Json, NeverStoringBackend, StaticTypesRegistry,
+};
 
 /// Registers a producer via the real `IngestService::register_producer`
 /// (not a bare `Uuid::new_v4()`) - `Storage`'s `check_and_enqueue` looks up
@@ -76,9 +78,10 @@ async fn publish_event_happy_path_returns_202_accepted() {
     assert_eq!(resp.text(), "", "202 Accepted must carry no body");
 }
 
-// #5655: `Prefer: wait` is answered `501` until synchronous publish lands.
+// Synchronous publish: `Prefer: wait=N` holds the response until the backend
+// stores the event (`201`) or N elapses (`202`).
 #[tokio::test]
-async fn publish_event_prefer_wait_returns_501_not_implemented() {
+async fn publish_event_prefer_wait_returns_201_once_stored() {
     let harness = EventBrokerHarness::builder()
         .with_type_registry(StaticTypesRegistry::of(json!([
             { "id": "gts.cf.core.events.topic.v1~x.eb.t1.topic.v1", "partitions": 1 },
@@ -91,30 +94,76 @@ async fn publish_event_prefer_wait_returns_501_not_implemented() {
         .build()
         .await;
 
-    // Publish is asynchronous by default; the synchronous path (hold the
-    // response until the backend confirms persistence), requested by the
-    // standard `Prefer: wait` (RFC 7240), is not built yet and is answered
-    // `501`.
+    // The harness runs the real ingest outbox over a memory backend, so a
+    // `Prefer: wait=5` publish is stored well within the wait and the broker
+    // answers `201 Created` once the backend holds it.
     let resp = harness
         .api_v1()
         .post_events()
         .with_header(
             axum::http::header::HeaderName::from_static("prefer"),
-            axum::http::HeaderValue::from_static("wait=10"),
+            axum::http::HeaderValue::from_static("wait=5"),
         )
         .with_body(Json(&json!({
             "id": Uuid::new_v4(),
             "type": "gts.cf.core.events.event.v1~x.eb.t1.foo.v1~",
             "tenant_id": Uuid::new_v4(),
-            "source": "test-publish_event_prefer_wait_returns_501",
-            "subject": "s-publish_event_prefer_wait_returns_501",
+            "source": "test-publish_event_prefer_wait_returns_201",
+            "subject": "s-publish_event_prefer_wait_returns_201",
             "subject_type": "gts.x.eb.t1.subject.v1~",
             "occurred_at": Utc::now().to_rfc3339(),
         })))
         .send()
         .await;
 
-    resp.assert_status(501);
+    resp.assert_status(201);
+    assert_eq!(resp.text(), "", "201 Created must carry no body");
+}
+
+#[tokio::test]
+async fn publish_event_prefer_wait_returns_202_when_the_wait_elapses() {
+    // A backend that never completes an append: the event is admitted and
+    // enqueued, but never stored, so the synchronous wait always elapses.
+    let backend = Arc::new(NeverStoringBackend::new(Arc::new(
+        memory_event_broker_plugin::MemoryBackend::new(),
+    )));
+    let harness = EventBrokerHarness::builder()
+        .with_backend(backend)
+        .with_type_registry(StaticTypesRegistry::of(json!([
+            { "id": "gts.cf.core.events.topic.v1~x.eb.t1.topic.v1", "partitions": 1 },
+            {
+                "id": "gts.cf.core.events.event.v1~x.eb.t1.foo.v1~",
+                "topic": "gts.cf.core.events.topic.v1~x.eb.t1.topic.v1",
+                "allowed_subject_types": ["gts.x.eb.t1.subject.v1~"],
+            },
+        ])))
+        .build()
+        .await;
+
+    // `wait=0`: the event is enqueued, but with nothing stored before the (zero)
+    // wait elapses the broker answers `202 Accepted` - it stays enqueued and is
+    // stored later.
+    let resp = harness
+        .api_v1()
+        .post_events()
+        .with_header(
+            axum::http::header::HeaderName::from_static("prefer"),
+            axum::http::HeaderValue::from_static("wait=0"),
+        )
+        .with_body(Json(&json!({
+            "id": Uuid::new_v4(),
+            "type": "gts.cf.core.events.event.v1~x.eb.t1.foo.v1~",
+            "tenant_id": Uuid::new_v4(),
+            "source": "test-publish_event_prefer_wait_returns_202",
+            "subject": "s-publish_event_prefer_wait_returns_202",
+            "subject_type": "gts.x.eb.t1.subject.v1~",
+            "occurred_at": Utc::now().to_rfc3339(),
+        })))
+        .send()
+        .await;
+
+    resp.assert_status(202);
+    assert_eq!(resp.text(), "", "202 Accepted must carry no body");
 }
 
 #[tokio::test]

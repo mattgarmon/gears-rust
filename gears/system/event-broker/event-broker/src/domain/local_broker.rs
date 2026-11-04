@@ -52,7 +52,7 @@ use crate::domain::id_parse::{parse_consumer_group_id, parse_topic_id, parse_typ
 use crate::domain::ingest::{
     BatchAck, IngestService, ProducerCursors as DomainProducerCursors,
     ProducerMode as DomainProducerMode, ProducerRegistrationInput, ProducerTopicCursors,
-    PublishAck, PublishRequest,
+    PublishAck, PublishRequest, SyncPublishAck,
 };
 use crate::domain::model::{
     BarrierMode as DomainBarrierMode, ConsumerGroup as DomainConsumerGroup,
@@ -75,12 +75,24 @@ const DEFAULT_SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct LocalBroker {
     ingest: Arc<dyn IngestService>,
     delivery: Arc<dyn DeliveryService>,
+    /// How long [`publish_sync`](LocalBroker::publish_sync) holds for: the
+    /// configured `Prefer: wait=N` ceiling. An in-process caller sends no
+    /// header, so it gets the broker's maximum.
+    sync_wait_max: Duration,
 }
 
 impl LocalBroker {
     #[must_use]
-    pub fn new(ingest: Arc<dyn IngestService>, delivery: Arc<dyn DeliveryService>) -> Self {
-        Self { ingest, delivery }
+    pub fn new(
+        ingest: Arc<dyn IngestService>,
+        delivery: Arc<dyn DeliveryService>,
+        sync_wait_max: Duration,
+    ) -> Self {
+        Self {
+            ingest,
+            delivery,
+            sync_wait_max,
+        }
     }
 }
 
@@ -518,12 +530,26 @@ impl EventBrokerApi for LocalBroker {
         Ok(ack.into())
     }
 
-    // `publish_sync` is deliberately NOT overridden: ingest enqueues to the
-    // async outbox and exposes no persist-confirmation hook (the REST layer
-    // answers `501` for `Prefer: wait`), so the honest outcome is the default's
-    // `Accepted`/`Duplicate` - reporting `Persisted` would assert a durable
-    // write that has not necessarily completed. It inherits the trait default,
-    // which delegates to `publish`.
+    /// Holds until the backend stores the event or the configured
+    /// `Prefer: wait=N` ceiling elapses, mirroring the REST `Prefer: wait`
+    /// path: `Persisted` once stored, `Accepted` on timeout (the event stays
+    /// enqueued), `Duplicate` for an idempotent resend.
+    async fn publish_sync(
+        &self,
+        ctx: &SecurityContext,
+        event: &Event,
+    ) -> Result<IngestOutcome, EventBrokerError> {
+        let ack = self
+            .ingest
+            .publish_event_sync(ctx, PublishRequest::try_from(event)?, self.sync_wait_max)
+            .await
+            .map_err(to_sdk_err)?;
+        Ok(match ack {
+            SyncPublishAck::Stored => IngestOutcome::Persisted,
+            SyncPublishAck::TimedOut => IngestOutcome::Accepted,
+            SyncPublishAck::Duplicate => IngestOutcome::Duplicate,
+        })
+    }
 
     async fn publish_batch(
         &self,

@@ -2,7 +2,8 @@
 
 Each test exercises one publish path:
 - 1.01: publish → 202, no body (async by default)
-- 1.02: sync publish (Prefer: wait) → 501 (not implemented yet)
+- 1.02: sync publish (Prefer: wait=N): 201 once the backend stores the event,
+  202 when the wait elapses first, 200 when the event is a duplicate
 - 1.03: schema validation failure → 400 (requires EVENT_TYPE_STRICT)
 - 1.04: rate limiting → 429 (xfail: rate limiting not configured in standalone)
 - 1.05: read-only ``partition`` field rejected → 400
@@ -47,13 +48,15 @@ async def test_publish_single_async_returns_202(api):
     assert resp.text == "", "202 Accepted must carry no body"
 
 
-async def test_publish_prefer_wait_returns_501(api):
+@pytest.mark.backend_sensitive
+async def test_publish_prefer_wait_returns_201_once_stored(api):
     """scenario: producer/single/1.02-positive-publish-sync-wait-persisted.md
 
     Publish is asynchronous by default (202). A producer that wants to block
     until the backend confirms persistence requests it with the standard
-    ``Prefer: wait`` header (RFC 7240); that synchronous path is not built yet,
-    so it is answered ``501 Not Implemented``.
+    ``Prefer: wait=N`` header (RFC 7240, N capped by configuration). The broker
+    holds the response until the backend stores the event and answers
+    ``201 Created`` - the backend persists the event well within the wait.
     """
     tenant_id = str(uuid.uuid4())
     async with api() as client:
@@ -62,7 +65,65 @@ async def test_publish_prefer_wait_returns_501(api):
             headers={"Prefer": "wait=10"},
             json=_base_event(tenant_id),
         )
-    assert resp.status_code == 501
+    assert resp.status_code == 201
+    assert resp.text == "", "201 Created must carry no body"
+
+
+@pytest.mark.backend_sensitive
+async def test_publish_prefer_wait_zero_times_out_returns_202(api):
+    """scenario: producer/single/1.02-positive-publish-sync-wait-persisted.md
+
+    ``Prefer: wait=0`` asks the broker to hold for zero seconds: the event is
+    durably enqueued but the backend has not stored it when the (zero) wait
+    elapses, so the broker answers ``202 Accepted`` - the event stays enqueued
+    and is stored out of band. Exercises the timed-out branch deterministically
+    without depending on a slow backend.
+    """
+    tenant_id = str(uuid.uuid4())
+    async with api() as client:
+        resp = await client.post(
+            "/events",
+            headers={"Prefer": "wait=0"},
+            json=_base_event(tenant_id),
+        )
+    assert resp.status_code == 202
+    assert resp.text == "", "202 Accepted must carry no body"
+
+
+@pytest.mark.backend_sensitive
+async def test_publish_prefer_wait_duplicate_returns_200(api):
+    """scenario: producer/single/1.02-positive-publish-sync-wait-persisted.md
+
+    A synchronous publish of an idempotent duplicate (a lost-ack resend at the
+    producer chain's head) is answered ``200 OK`` at once: nothing is written,
+    so there is nothing to wait on.
+    """
+    tenant_id = str(uuid.uuid4())
+    event_id = str(uuid.uuid4())
+    meta = {"version": 1, "producer_id": None, "previous": 0, "sequence": 1}
+    async with api() as client:
+        reg = await client.post(
+            "/producers",
+            json={"mode": "chained", "client_agent": "e2e-test/1.0"},
+        )
+        assert reg.status_code == 201
+        meta["producer_id"] = reg.json()["id"]
+
+        first = await client.post(
+            "/events",
+            headers={"Prefer": "wait=10"},
+            json={**_base_event(tenant_id), "id": event_id, "meta": meta},
+        )
+        assert first.status_code == 201, "the first publish is stored within the wait"
+
+        # Lost-ack resend of the chain head: a duplicate, answered 200 without waiting.
+        resend = await client.post(
+            "/events",
+            headers={"Prefer": "wait=10"},
+            json={**_base_event(tenant_id), "id": event_id, "meta": meta},
+        )
+    assert resend.status_code == 200
+    assert resend.text == "", "200 OK must carry no body"
 
 
 async def test_schema_validation_failure_returns_422(api):

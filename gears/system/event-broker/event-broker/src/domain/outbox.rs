@@ -73,6 +73,12 @@ pub struct IngestPayload {
     pub key: String,
     /// No partition, no sequence: both are the backend's to assign.
     pub event: Event,
+    /// The synchronous-publish trace this row belongs to (`None` for an async
+    /// publish): the outbox worker signals it (`crate::domain::sync_wait`) once
+    /// the event is stored. Skipped when absent, so an async row's payload is
+    /// byte-identical to before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<uuid::Uuid>,
 }
 
 /// The ingest outbox partition an event of `topic` with partition-key value

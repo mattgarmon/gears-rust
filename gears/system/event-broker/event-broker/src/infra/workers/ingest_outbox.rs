@@ -29,6 +29,7 @@ use crate::domain::backend::{BackendResolver, to_sdk_event};
 use crate::domain::model::Topic;
 use crate::domain::outbox::{IngestPayload, OutboxId, fence_key};
 use crate::domain::specification::SpecificationManager;
+use crate::domain::sync_wait::SyncWaitRegistry;
 use crate::infra::metrics::{IngestMetrics, NO_BACKEND, RetryCause};
 
 pub struct IngestOutboxHandler {
@@ -37,6 +38,10 @@ pub struct IngestOutboxHandler {
     /// This outbox's identity: the high half of every fence key it appends under.
     outbox: OutboxId,
     metrics: Arc<IngestMetrics>,
+    /// Signalled on a successful append so a `Prefer: wait=N` publish waiting on
+    /// the row's trace is woken (`crate::domain::sync_wait`); an async row
+    /// carries no trace and signals nothing.
+    sync_wait: Arc<SyncWaitRegistry>,
 }
 
 impl IngestOutboxHandler {
@@ -46,19 +51,23 @@ impl IngestOutboxHandler {
         backend_resolver: Arc<dyn BackendResolver>,
         outbox: OutboxId,
         metrics: Arc<IngestMetrics>,
+        sync_wait: Arc<SyncWaitRegistry>,
     ) -> Self {
         Self {
             spec_manager,
             backend_resolver,
             outbox,
             metrics,
+            sync_wait,
         }
     }
 
-    /// Appends the message's event; on failure, the backend label and the
+    /// Appends the message's event and returns the row's synchronous-publish
+    /// trace (`None` for an async row); on failure, the backend label and the
     /// cause of the retry.
-    async fn append(&self, msg: &OutboxMessage) -> Result<(), (String, RetryCause)> {
+    async fn append(&self, msg: &OutboxMessage) -> Result<Option<uuid::Uuid>, (String, RetryCause)> {
         let payload = decode(msg)?;
+        let trace = payload.trace;
         let topic = self.topic(&payload.topic).await?;
 
         let backend = self.backend_resolver.resolve(&topic);
@@ -73,14 +82,16 @@ impl IngestOutboxHandler {
             },
             topic: &topic.id,
             events: &events,
-            // `Prefer: wait` is answered `501`, so nothing waits on positions
-            // being assigned.
+            // A synchronous publish waits on the append outcome, not on
+            // positions being assigned (the response carries no sequence,
+            // DESIGN.md:2067), so the async flush is kept: `Ok(Appended)` is the
+            // durability the waiter needs.
             flush: Flush::Async,
         };
         match backend.append(&request).await {
             // `Heads` and `Accepted`: stored; `Duplicate`: stored by an earlier
             // attempt of this message.
-            Ok(Appended::Heads(_) | Appended::Accepted | Appended::Duplicate) => Ok(()),
+            Ok(Appended::Heads(_) | Appended::Accepted | Appended::Duplicate) => Ok(trace),
             Err(e) => {
                 warn!(
                     topic = %topic.id,
@@ -133,8 +144,13 @@ impl LeasedMessageHandler for IngestOutboxHandler {
     async fn handle(&self, msg: &OutboxMessage) -> MessageResult {
         self.metrics.handling(msg.partition_id, msg.created_at);
         match self.append(msg).await {
-            Ok(()) => {
+            Ok(trace) => {
                 self.metrics.handled(msg.partition_id);
+                // Wake a synchronous publish waiting on this event (a no-op for
+                // an async row, which carries no trace).
+                if let Some(trace) = trace {
+                    self.sync_wait.signal(trace);
+                }
                 MessageResult::Ok
             }
             Err((backend, cause)) => {
@@ -339,7 +355,13 @@ mod tests {
         let resolver = Arc::new(SingleBackendResolver::new(Arc::new(backend.clone())));
         let (recorder, metrics) = Recorder::new();
         (
-            IngestOutboxHandler::new(spec_manager, resolver, OUTBOX, metrics),
+            IngestOutboxHandler::new(
+                spec_manager,
+                resolver,
+                OUTBOX,
+                metrics,
+                Arc::new(SyncWaitRegistry::new()),
+            ),
             backend,
             recorder,
             dsn,
@@ -382,6 +404,7 @@ mod tests {
                 topic: event.topic.clone(),
                 key: "key".to_owned(),
                 event: event.clone(),
+                trace: None,
             })
             .expect("serialize payload"),
             payload_type: INGEST_PAYLOAD_TYPE.to_owned(),

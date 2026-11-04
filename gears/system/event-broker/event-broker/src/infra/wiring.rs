@@ -57,6 +57,8 @@ pub fn build_handler_state(
     leases: Arc<InProcessStreamLeases>,
     batch: BatchConfig,
     outbox_partitions: OutboxPartitions,
+    sync_wait: Arc<crate::domain::sync_wait::SyncWaitRegistry>,
+    sync_wait_max: std::time::Duration,
     streaming: StreamingConfig,
     heartbeat_interval: std::time::Duration,
 ) -> HandlerState {
@@ -67,6 +69,7 @@ pub fn build_handler_state(
         Arc::clone(&backend_resolver),
         batch,
         outbox_partitions,
+        sync_wait,
     ));
     let delivery_impl = DeliveryServiceImpl::new(
         storage,
@@ -80,7 +83,11 @@ pub fn build_handler_state(
         heartbeat_interval,
     );
     let delivery: Arc<dyn DeliveryService> = Arc::new(delivery_impl);
-    HandlerState { ingest, delivery }
+    HandlerState {
+        ingest,
+        delivery,
+        sync_wait_max,
+    }
 }
 
 /// The partition caches this instance serves from, built from configuration.
