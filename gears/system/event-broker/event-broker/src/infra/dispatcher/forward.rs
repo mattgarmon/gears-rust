@@ -24,7 +24,7 @@ use crate::config::MAX_REQUEST_BODY_BYTES;
 /// first byte: the consumer SDK's ~50s stream self-heal window
 /// (`DESIGN.md:1825`) - the binding constraint - and - sending nothing until it
 /// resolves - a synchronous `Prefer: wait=N` publish, capped at
-/// `config::checks::MAX_PUBLISH_WAIT_SECS` (20s) on an ingest upstream. 90s
+/// `config::checks::MAX_PUBLISH_WAIT_SECS` (50s) on an ingest upstream. 90s
 /// clears the self-heal window with margin, and the publish cap sits well under
 /// it.
 const IDLE_READ_TIMEOUT: Duration = Duration::from_secs(90);

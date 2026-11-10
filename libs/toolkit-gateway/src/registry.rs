@@ -11,6 +11,20 @@ use parking_lot::RwLock;
 
 use crate::types::{Endpoint, GearInstance, GearName};
 
+/// Per-route request deadline declared by the upstream gear, parsed from the
+/// `x-toolkit-request-timeout` `OpenAPI` vendor extension. Mirrors
+/// `toolkit::api::RouteTimeout`; toolkit-gateway does not depend on toolkit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RouteTimeout {
+    /// Inherit the edge's default request timeout.
+    #[default]
+    Inherit,
+    /// No deadline: long-lived streaming routes (SSE, multipart streams).
+    Disabled,
+    /// A route-specific deadline replacing the edge default.
+    Custom(std::time::Duration),
+}
+
 /// A single registered route: an HTTP method plus an `OpenAPI` path template
 /// (e.g. `GET /calculator/v1/items/{id}`), and whether it requires
 /// authentication at the edge.
@@ -24,6 +38,9 @@ pub struct RouteTemplate {
     /// from the operation's `OpenAPI` `security` requirement). An exposed route
     /// may still be anonymous (`authenticated == false`).
     pub authenticated: bool,
+    /// Request deadline the upstream declared for this route. `Inherit` when
+    /// the spec carries no `x-toolkit-request-timeout` extension.
+    pub request_timeout: RouteTimeout,
 }
 
 impl RouteTemplate {
@@ -34,7 +51,15 @@ impl RouteTemplate {
             method,
             path: path.into(),
             authenticated,
+            request_timeout: RouteTimeout::Inherit,
         }
+    }
+
+    /// Overrides the inherited edge request timeout for this route.
+    #[must_use]
+    pub fn with_request_timeout(mut self, timeout: RouteTimeout) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 }
 
@@ -71,6 +96,8 @@ pub struct InstanceRoutes {
 struct PathAggregate {
     /// Per-method auth requirement for this path.
     authenticated: HashMap<http::Method, bool>,
+    /// Per-method request deadline for this path.
+    request_timeouts: HashMap<http::Method, RouteTimeout>,
     /// The endpoint selected for this path: the first instance of the owning
     /// gear seen in deterministic order (see [`State::rebuild`]).
     endpoint: Endpoint,
@@ -96,6 +123,9 @@ struct RegisteredPath {
     /// Per-method auth requirement for this path. A method absent from the map
     /// defaults to authenticated (the safe choice).
     authenticated: HashMap<http::Method, bool>,
+    /// Per-method request deadline declared by the upstream; absent methods
+    /// inherit the edge default.
+    request_timeouts: HashMap<http::Method, RouteTimeout>,
 }
 
 /// Mutable state guarded by the registry's lock.
@@ -138,15 +168,16 @@ impl State {
 
         for (instance, entry) in instances {
             // Collapse this instance's templates by path.
-            let mut by_path: HashMap<&str, HashMap<http::Method, bool>> = HashMap::new();
+            let mut by_path: HashMap<&str, HashMap<http::Method, (bool, RouteTimeout)>> =
+                HashMap::new();
             for template in &entry.templates {
-                by_path
-                    .entry(template.path.as_str())
-                    .or_default()
-                    .insert(template.method.clone(), template.authenticated);
+                by_path.entry(template.path.as_str()).or_default().insert(
+                    template.method.clone(),
+                    (template.authenticated, template.request_timeout),
+                );
             }
 
-            for (path, authenticated) in by_path {
+            for (path, per_method) in by_path {
                 let key = (instance.gear().clone(), path.to_owned());
                 // Aggregate a gear's routes across its instances with two
                 // Profile-3 simplifications, both resolved in favour of the
@@ -170,10 +201,17 @@ impl State {
                 // per instance (the snapshot carries one document per gear).
                 let aggregate = path_map.entry(key).or_insert_with(|| PathAggregate {
                     authenticated: HashMap::new(),
+                    request_timeouts: HashMap::new(),
                     endpoint: entry.endpoint.clone(),
                 });
-                for (method, is_auth) in authenticated {
-                    aggregate.authenticated.entry(method).or_insert(is_auth);
+                for (method, (is_auth, timeout)) in per_method {
+                    aggregate
+                        .authenticated
+                        .entry(method.clone())
+                        .or_insert(is_auth);
+                    if timeout != RouteTimeout::Inherit {
+                        aggregate.request_timeouts.entry(method).or_insert(timeout);
+                    }
                 }
             }
         }
@@ -214,6 +252,7 @@ impl State {
                 gear,
                 endpoint: aggregate.endpoint,
                 authenticated: aggregate.authenticated,
+                request_timeouts: aggregate.request_timeouts,
             };
             if let Err(err) = router.insert(path.clone(), value) {
                 tracing::warn!(
@@ -348,6 +387,25 @@ impl ProxyRegistry {
                 .get(method)
                 .copied()
                 .unwrap_or(true),
+        )
+    }
+
+    /// Returns the request deadline the upstream declared for a proxied
+    /// `(method, path)`, or `None` if `path` is not a proxied route.
+    ///
+    /// A matched path whose specific `method` declared no timeout returns
+    /// [`RouteTimeout::Inherit`].
+    #[must_use]
+    pub fn request_timeout(&self, method: &http::Method, path: &str) -> Option<RouteTimeout> {
+        let state = self.inner.read();
+        let matched = state.router.at(path).ok()?;
+        Some(
+            matched
+                .value
+                .request_timeouts
+                .get(method)
+                .copied()
+                .unwrap_or(RouteTimeout::Inherit),
         )
     }
 

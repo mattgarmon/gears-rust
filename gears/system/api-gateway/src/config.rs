@@ -447,7 +447,8 @@ pub struct RoutePolicyRule {
     /// Required scopes for this route. Request passes if token has ANY of these scopes.
     /// Must not be empty.
     pub required_scopes: Vec<String>,
-    // Future fields: rate_limit, timeout, operation_id, etc.
+    // Future fields: rate_limit, operation_id, etc. (per-route timeouts are
+    // declared on the operation via `OperationSpec::request_timeout`, not here).
 }
 
 // =================================================================================================

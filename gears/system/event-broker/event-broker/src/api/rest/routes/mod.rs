@@ -26,7 +26,10 @@
 
 use axum::Router;
 use axum::http::StatusCode;
+use std::time::Duration;
 use toolkit::api::{OpenApiRegistry, OperationBuilder, ResponseSpec};
+
+use crate::config::checks::{DISPATCHER_PUBLISH_ROUTE_TIMEOUT_SECS, PUBLISH_ROUTE_TIMEOUT_SECS};
 
 use crate::api::rest::handlers::delivery::consumer_groups as consumer_groups_h;
 use crate::api::rest::handlers::delivery::dto as delivery_dto;
@@ -116,6 +119,10 @@ pub fn register_ingest_routes(mut router: Router, openapi: &dyn OpenApiRegistry)
         .tag(INGEST_API_TAG)
         .authenticated()
         .no_license_required()
+        // A sync publish legitimately holds the response head for up to
+        // `publish.max_wait_secs` (cap `MAX_PUBLISH_WAIT_SECS` = 50s); the
+        // declared deadline leaves the pre-wait work inside 60s (#4752).
+        .request_timeout(Duration::from_secs(PUBLISH_ROUTE_TIMEOUT_SECS))
         .param(prefer_wait_param())
         .json_request::<ingest_dto::PublishEventRequest>(openapi, "Event to publish")
         .handler(ingest_h::publish_event)
@@ -164,6 +171,8 @@ pub fn register_ingest_routes(mut router: Router, openapi: &dyn OpenApiRegistry)
         .tag(INGEST_API_TAG)
         .authenticated()
         .no_license_required()
+        // Same sync-publish hold as `POST /v1/events`; see the constant docs.
+        .request_timeout(Duration::from_secs(PUBLISH_ROUTE_TIMEOUT_SECS))
         .param(prefer_wait_param())
         .json_request::<ingest_dto::PublishBatchRequest>(openapi, "Batch of events to publish")
         .handler(ingest_h::publish_batch)
@@ -345,6 +354,10 @@ pub fn register_ingest_routes(mut router: Router, openapi: &dyn OpenApiRegistry)
 /// naming violation.
 #[allow(unknown_lints)]
 #[allow(de0801_api_endpoint_version)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one declarative builder chain per delivery route; the length is the route table"
+)]
 pub fn register_delivery_routes(mut router: Router, openapi: &dyn OpenApiRegistry) -> Router {
     router = OperationBuilder::get("/event-broker/v1/events:stream")
         .operation_id("event_broker.stream_events")
@@ -357,6 +370,7 @@ pub fn register_delivery_routes(mut router: Router, openapi: &dyn OpenApiRegistr
         .query_param("subscription_id", true, "Subscription id")
         .authenticated()
         .no_license_required()
+        .no_request_timeout()
         .handler(delivery_h::stream_events)
         .text_response(
             StatusCode::OK,
@@ -383,6 +397,7 @@ pub fn register_delivery_routes(mut router: Router, openapi: &dyn OpenApiRegistr
         .query_param("subscription_id", true, "Subscription id")
         .authenticated()
         .no_license_required()
+        .no_request_timeout()
         .handler(delivery_h::sse_events)
         .sse_json::<delivery_dto::FrameDto>(openapi, "Long-lived text/event-stream of frames")
         .problem_response(openapi, StatusCode::GONE, "SubscriptionTerminated")
@@ -605,6 +620,9 @@ fn register_ingest_forwarding_routes(mut router: Router, openapi: &dyn OpenApiRe
         .tag(INGEST_TAG)
         .authenticated()
         .no_license_required()
+        // The outer of two deadlines: the dispatch hop plus the ingest host's
+        // own `PUBLISH_ROUTE_TIMEOUT_SECS` must fit inside it (#4752).
+        .request_timeout(Duration::from_secs(DISPATCHER_PUBLISH_ROUTE_TIMEOUT_SECS))
         .handler(proxy::handle)
         .response(proxied_response(axum::http::StatusCode::OK))
         .standard_errors(openapi)
@@ -618,6 +636,7 @@ fn register_ingest_forwarding_routes(mut router: Router, openapi: &dyn OpenApiRe
         .tag(INGEST_TAG)
         .authenticated()
         .no_license_required()
+        .request_timeout(Duration::from_secs(DISPATCHER_PUBLISH_ROUTE_TIMEOUT_SECS))
         .handler(proxy::handle)
         .response(proxied_response(axum::http::StatusCode::OK))
         .standard_errors(openapi)
@@ -690,6 +709,7 @@ fn register_delivery_forwarding_routes(
         .tag(DELIVERY_TAG)
         .authenticated()
         .no_license_required()
+        .no_request_timeout()
         .handler(router::handle)
         .response(proxied_response(axum::http::StatusCode::OK))
         .standard_errors(openapi)
@@ -703,6 +723,7 @@ fn register_delivery_forwarding_routes(
         .tag(DELIVERY_TAG)
         .authenticated()
         .no_license_required()
+        .no_request_timeout()
         .handler(router::handle)
         .response(proxied_response(axum::http::StatusCode::OK))
         .standard_errors(openapi)

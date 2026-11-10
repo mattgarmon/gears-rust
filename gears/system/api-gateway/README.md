@@ -37,6 +37,19 @@ The deadline ends once the response headers are returned, so streamed bodies
 (SSE, chunked downloads, proxied streams) and upgraded WebSocket connections
 are not cut off by it.
 
+### Per-route timeouts
+
+An operation overrides the global deadline with `OperationBuilder`:
+
+- `.request_timeout(duration)` — a route-specific deadline (e.g. a
+  synchronous-publish route that legitimately holds the response longer).
+- `.no_request_timeout()` — no server-side deadline, for long-lived
+  streaming routes (SSE, multipart streams) a unary timeout would truncate.
+
+The declared value is emitted as the `x-toolkit-request-timeout` `OpenAPI`
+extension (`"60s"`, or `"none"`), so an edge gateway reverse-proxying the
+route honours the same deadline via its `ProxyRegistry` route table.
+
 ## License
 
 Licensed under Apache-2.0.
