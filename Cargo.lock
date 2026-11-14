@@ -4324,6 +4324,7 @@ dependencies = [
  "cf-gears-toolkit-security",
  "cf-gears-toolkit-transport-grpc",
  "http",
+ "humantime-serde",
  "inventory",
  "secrecy",
  "serde",

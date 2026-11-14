@@ -56,6 +56,7 @@ use toolkit_canonical_errors::CanonicalError;
 use toolkit_http_middleware::{RouteAuthPolicy, TenantPlane, layer_route_auth_with};
 use toolkit_security::{DynBearerAuthenticator, DynInternalAuthenticator};
 
+use super::presence_manager::{PresenceManager, ReportedStateSource};
 use super::readiness::ReadinessState;
 use crate::api::canonical_error_middleware;
 use crate::api::operation_builder::OperationSpec;
@@ -719,10 +720,20 @@ pub(super) struct OopHttpServer {
     /// replacing its registration info.
     presence_openapi: Option<Arc<str>>,
     presence_updates: Option<tokio::sync::watch::Sender<RegisterInstanceInfo>>,
-    /// Presence of co-hosted provider gears other than `options.gear_name`
-    /// (the system group's, published before the application group), each
-    /// deregistered on [`join`](Self::join) like the root's.
-    provider_presence: Vec<(String, tokio::task::JoinHandle<()>)>,
+    /// Writer tasks for co-hosted provider gears other than
+    /// `options.gear_name`; each registers its record through the presence
+    /// manager, which renews and (on [`join`](Self::join)) deregisters it.
+    provider_writers: Vec<(String, tokio::task::JoinHandle<()>)>,
+    /// Per-process presence manager (ADR-0011): owns lease renewal, the
+    /// `Draining` drain signal and deregistration for every record the writer
+    /// tasks register. Created on the first [`start_presence`](Self::start_presence).
+    presence: Option<Arc<PresenceManager>>,
+    /// Drives the manager's renewal loop. **Independent of the root `cancel`**
+    /// so the manager keeps renewing — and reporting `Draining` — for the whole
+    /// drain window, and is only stopped by [`join`](Self::join)/`Drop` after
+    /// deregistration (drain step 4).
+    presence_cancel: CancellationToken,
+    presence_run: Option<tokio::task::JoinHandle<()>>,
     /// Taken by [`join`](Self::join); aborted by `Drop` otherwise.
     serve: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
@@ -735,7 +746,12 @@ impl Drop for OopHttpServer {
         if let Some(task) = self.registration_task.take() {
             task.abort();
         }
-        for (_, task) in self.provider_presence.drain(..) {
+        for (_, task) in self.provider_writers.drain(..) {
+            task.abort();
+        }
+        // Stop the manager's renewal loop (its own token, not the root's).
+        self.presence_cancel.cancel();
+        if let Some(task) = self.presence_run.take() {
             task.abort();
         }
         if let Some(serve) = self.serve.take() {
@@ -820,7 +836,10 @@ impl OopHttpServer {
             registration_task: None,
             presence_openapi: None,
             presence_updates: None,
-            provider_presence: Vec::new(),
+            provider_writers: Vec::new(),
+            presence: None,
+            presence_cancel: CancellationToken::new(),
+            presence_run: None,
             serve: Some(serve),
         })
     }
@@ -951,10 +970,48 @@ impl OopHttpServer {
         Ok(())
     }
 
-    /// Start directory registration, heartbeats and self-heal with the current
-    /// `OpenAPI` document. Later calls register a changed document without
-    /// interrupting heartbeats, so gateway discovery sees the newly served routes.
-    /// An unchanged document is a no-op.
+    /// The per-process presence manager (ADR-0011), created on first use.
+    ///
+    /// Its renewal loop runs on [`presence_cancel`](Self::presence_cancel) — a
+    /// token independent of the root `cancel` — so it keeps renewing and
+    /// reporting `Draining` for the whole drain window and is stopped only by
+    /// [`join`](Self::join)/`Drop` after deregistration. A side task pushes an
+    /// immediate `Draining` heartbeat the moment the root token fires, rather
+    /// than waiting for the next renewal tick.
+    fn ensure_presence_manager(&mut self) -> Arc<PresenceManager> {
+        if let Some(pm) = &self.presence {
+            return Arc::clone(pm);
+        }
+        // The reported state comes from the gear's *full* readiness (startup,
+        // deps, healthchecks, drain — ADR-0005), so a gear failing its readiness
+        // check advertises `Starting`, not `Serving`.
+        let pm = PresenceManager::new(
+            Arc::clone(&self.options.directory),
+            ReportedStateSource::Readiness(Arc::clone(&self.readiness)),
+            self.options.heartbeat_interval,
+        );
+        self.presence_run = Some(tokio::spawn(Arc::clone(&pm).run(self.presence_cancel.clone())));
+        // Push an immediate `Draining` heartbeat the moment shutdown begins.
+        // Also exits on `presence_cancel` so it never outlives the manager when
+        // the server is dropped before the root token fires.
+        let drain_pm = Arc::clone(&pm);
+        let root = self.cancel.clone();
+        let stop = self.presence_cancel.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = root.cancelled() => drain_pm.begin_drain(),
+                () = stop.cancelled() => {}
+            }
+        });
+        self.presence = Some(Arc::clone(&pm));
+        pm
+    }
+
+    /// Register directory presence with the current `OpenAPI` document; the
+    /// presence manager then owns the record's lease renewal, the `Draining`
+    /// drain signal and deregistration. Later calls register a changed document
+    /// without interrupting renewal, so gateway discovery sees the newly served
+    /// routes. An unchanged document is a no-op.
     pub(super) fn start_presence(&mut self) {
         let openapi = self.late.openapi();
         if let Some(updates) = &self.presence_updates {
@@ -966,19 +1023,12 @@ impl OopHttpServer {
         }
         let registration_info = self.registration_info(openapi.as_ref());
         self.presence_openapi = openapi;
-        let (updates, presence) = tokio::sync::watch::channel(registration_info);
+        let (updates, presence_rx) = tokio::sync::watch::channel(registration_info);
         self.presence_updates = Some(updates);
-        let directory = Arc::clone(&self.options.directory);
-        let heartbeat_interval = self.options.heartbeat_interval;
+        let manager = self.ensure_presence_manager();
         let cancel = self.cancel.clone();
         self.registration_task = Some(tokio::spawn(async move {
-            super::oop_registration::presence_loop_with_updates(
-                directory,
-                presence,
-                heartbeat_interval,
-                cancel,
-            )
-            .await;
+            super::oop_registration::presence_loop_with_updates(manager, presence_rx, cancel).await;
         }));
     }
 
@@ -1000,10 +1050,11 @@ impl OopHttpServer {
     }
 
     /// Advertise a co-hosted provider at this listener's URL and instance id,
-    /// even while the root starts. Uses normal directory retries and heartbeats.
+    /// even while the root starts. The record registers (with backoff) and is
+    /// then renewed and deregistered by the shared presence manager.
     pub(super) fn start_provider_presence(&mut self, gear: String) {
         if gear == self.options.gear_name
-            || self.provider_presence.iter().any(|(name, _)| *name == gear)
+            || self.provider_writers.iter().any(|(name, _)| *name == gear)
         {
             return;
         }
@@ -1013,14 +1064,12 @@ impl OopHttpServer {
         if let Some(version) = self.options.version.clone() {
             info = info.with_version(version);
         }
-        let directory = Arc::clone(&self.options.directory);
-        let heartbeat_interval = self.options.heartbeat_interval;
+        let manager = self.ensure_presence_manager();
         let cancel = self.cancel.clone();
         let task = tokio::spawn(async move {
-            super::oop_registration::presence_loop(directory, info, heartbeat_interval, cancel)
-                .await;
+            super::oop_registration::presence_loop(manager, info, cancel).await;
         });
-        self.provider_presence.push((gear, task));
+        self.provider_writers.push((gear, task));
     }
 
     /// Wait for the server to drain on shutdown, then deregister from
@@ -1040,33 +1089,25 @@ impl OopHttpServer {
         };
         self.serve = None;
 
+        // The writer tasks stop; through the drain window above the presence
+        // manager kept renewing and reporting `Draining`. Now deregister every
+        // record it owns (drain step 4 — after in-flight requests finish so
+        // consumers don't see stale "ready" state), then stop its renewal loop.
         if let Some(task) = self.registration_task.take() {
             task.abort();
         }
-        for (gear, task) in std::mem::take(&mut self.provider_presence) {
+        for (_, task) in std::mem::take(&mut self.provider_writers) {
             task.abort();
-            if let Err(e) = self
-                .options
-                .directory
-                .deregister_instance(&gear, &self.options.instance_id)
-                .await
-            {
-                tracing::warn!(gear, error = %e, "deregistration from DirectoryService failed on shutdown");
-            }
         }
-        if let Err(e) = self
-            .options
-            .directory
-            .deregister_instance(&self.options.gear_name, &self.options.instance_id)
-            .await
-        {
-            tracing::warn!(
-                gear = %self.options.gear_name,
-                error = %e,
-                "deregistration from DirectoryService failed on shutdown"
-            );
-        } else {
+        if let Some(pm) = self.presence.take() {
+            pm.deregister_all().await;
             tracing::info!(gear = %self.options.gear_name, "deregistered from DirectoryService");
+        }
+        self.presence_cancel.cancel();
+        if let Some(task) = self.presence_run.take()
+            && let Err(e) = task.await
+        {
+            tracing::warn!(error = %e, "presence manager renewal task join error");
         }
 
         serve_result

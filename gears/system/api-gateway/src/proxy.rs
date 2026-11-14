@@ -151,6 +151,25 @@ struct SyncState {
     last_applied: Option<u64>,
 }
 
+/// Prefer serving instances per gear for edge routing (ADR-0011).
+///
+/// If a gear has any serving (`Ready`/`Healthy`) instance, keep only its
+/// serving instances; otherwise keep every instance of that gear, so a gear
+/// whose instances are all not-yet-serving is not dropped from the edge (the
+/// same fallback as directory name round-robin). Instances past their lease
+/// grace window are already absent from the directory snapshot.
+fn prefer_serving_per_gear(instances: Vec<ServiceInstanceInfo>) -> Vec<ServiceInstanceInfo> {
+    let gears_with_serving: HashSet<String> = instances
+        .iter()
+        .filter(|i| i.state.is_serving())
+        .map(|i| i.gear.clone())
+        .collect();
+    instances
+        .into_iter()
+        .filter(|i| i.state.is_serving() || !gears_with_serving.contains(&i.gear))
+        .collect()
+}
+
 /// Order-independent fingerprint over the proxyable instances (those with a
 /// REST endpoint and a spec hash): gear, instance id, authority, and spec hash
 /// — every input the route table depends on.
@@ -183,6 +202,11 @@ async fn reconcile_snapshot(
     instances: Vec<ServiceInstanceInfo>,
     state: &mut SyncState,
 ) {
+    // Route to serving instances only, per gear (ADR-0011): the edge no longer
+    // proxies to a non-serving instance when a serving one exists. Instances
+    // whose lease expired past grace are already absent from the snapshot.
+    let instances = prefer_serving_per_gear(instances);
+
     // Fast path: if the proxyable snapshot is byte-for-byte the same as the one
     // we last applied in full, there is nothing to fetch or rebuild.
     let fingerprint = snapshot_fingerprint(&instances);
@@ -359,8 +383,10 @@ async fn fetch_spec(directory: &dyn DirectoryClient, gear: &str) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::{
-        SyncState, snapshot_fingerprint, spawn_directory_sync, sync_once, sync_once_stateful,
+        SyncState, prefer_serving_per_gear, snapshot_fingerprint, spawn_directory_sync, sync_once,
+        sync_once_stateful,
     };
+    use cf_system_sdks::directory::InstanceState;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -375,6 +401,49 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use toolkit::directory::LocalDirectoryClient;
     use toolkit::runtime::GearManager;
+
+    fn instance(gear: &str, id: &str, state: InstanceState) -> ServiceInstanceInfo {
+        ServiceInstanceInfo::new(gear, id).with_state(state)
+    }
+
+    #[test]
+    fn prefer_serving_keeps_only_serving_when_any_serves() {
+        let picked = prefer_serving_per_gear(vec![
+            instance("billing", "a", InstanceState::Healthy),
+            instance("billing", "b", InstanceState::Draining),
+            instance("billing", "c", InstanceState::Quarantined),
+        ]);
+        let ids: Vec<_> = picked.iter().map(|i| i.instance_id.as_str()).collect();
+        assert_eq!(ids, ["a"], "only the serving instance is routed to");
+    }
+
+    #[test]
+    fn prefer_serving_falls_back_to_all_when_none_serve() {
+        let mut picked = prefer_serving_per_gear(vec![
+            instance("billing", "a", InstanceState::Registered),
+            instance("billing", "b", InstanceState::Quarantined),
+        ]);
+        picked.sort_by(|x, y| x.instance_id.cmp(&y.instance_id));
+        let ids: Vec<_> = picked.iter().map(|i| i.instance_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["a", "b"],
+            "with no serving instance, every visible instance is kept"
+        );
+    }
+
+    #[test]
+    fn prefer_serving_is_per_gear() {
+        // One gear serving, another with none serving: each decided on its own.
+        let picked = prefer_serving_per_gear(vec![
+            instance("billing", "a", InstanceState::Healthy),
+            instance("billing", "b", InstanceState::Registered),
+            instance("catalog", "c", InstanceState::Registered),
+        ]);
+        let mut kept: Vec<_> = picked.iter().map(|i| i.instance_id.as_str()).collect();
+        kept.sort_unstable();
+        assert_eq!(kept, ["a", "c"], "serving-only for billing, fallback for catalog");
+    }
 
     /// Wraps a [`ToolKitGatewayProvider`] and counts how many times
     /// [`GatewayProvider::apply_snapshot`] actually runs, so tests can assert
