@@ -34,11 +34,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use cf_system_sdks::directory::{
-    DeregisterInstanceRequest, DirectoryService, DirectoryServiceServer, GetOpenApiSpecRequest,
-    GetOpenApiSpecResponse, HeartbeatRequest, ListAllInstancesRequest, ListAllInstancesResponse,
-    ListInstancesRequest, ListInstancesResponse, RegisterInstanceRequest,
-    ResolveGrpcServiceRequest, ResolveGrpcServiceResponse, ResolveRestServiceRequest,
-    ResolveRestServiceResponse,
+    DeregisterInstanceRequest, DirectoryService, DirectoryServiceServer, HeartbeatRequest,
+    ListAllInstancesRequest, ListAllInstancesResponse, ListInstancesRequest, ListInstancesResponse,
+    RegisterInstanceRequest, RegisterInstanceResponse, ResolveGrpcServiceRequest,
+    ResolveGrpcServiceResponse, ResolveRestServiceRequest, ResolveRestServiceResponse,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tonic::{Request, Response, Status};
@@ -72,13 +71,6 @@ impl DirectoryService for StubDirectory {
         Err(Status::not_found("stub directory resolves nothing"))
     }
 
-    async fn get_open_api_spec(
-        &self,
-        _request: Request<GetOpenApiSpecRequest>,
-    ) -> Result<Response<GetOpenApiSpecResponse>, Status> {
-        Err(Status::not_found("stub directory resolves nothing"))
-    }
-
     async fn list_instances(
         &self,
         _request: Request<ListInstancesRequest>,
@@ -98,8 +90,8 @@ impl DirectoryService for StubDirectory {
     async fn register_instance(
         &self,
         _request: Request<RegisterInstanceRequest>,
-    ) -> Result<Response<()>, Status> {
-        Ok(Response::new(()))
+    ) -> Result<Response<RegisterInstanceResponse>, Status> {
+        Ok(Response::new(RegisterInstanceResponse::default()))
     }
 
     async fn deregister_instance(

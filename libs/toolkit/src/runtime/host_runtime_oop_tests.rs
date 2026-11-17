@@ -85,9 +85,6 @@ impl DirectoryClient for RecordingDirectory {
     async fn resolve_rest_service(&self, gear: &str) -> anyhow::Result<ServiceEndpoint> {
         Ok(ServiceEndpoint::new(format!("http://{gear}:8080")))
     }
-    async fn get_openapi_spec(&self, _gear: &str) -> anyhow::Result<String> {
-        Ok(String::new())
-    }
     async fn list_instances(&self, _gear: &str) -> anyhow::Result<Vec<ServiceInstanceInfo>> {
         Ok(vec![])
     }

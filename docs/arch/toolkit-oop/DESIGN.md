@@ -1009,10 +1009,11 @@ Key design decisions:
 
 | Method               | Request                           | Response                            | Description                                  |
 |----------------------|-----------------------------------|-------------------------------------|----------------------------------------------|
-| `RegisterInstance`   | `RegisterInstanceInfo` (extended) | `RegisterResult`                    | Register gear with REST endpoint + OpenAPI |
+| `RegisterInstance`   | `RegisterInstanceInfo` (extended) | `RegisterResult`                    | Register gear with REST endpoint + `openapi_spec_hash` |
 | `ResolveRestService` | `ResolveRequest { gear_name }`  | `ServiceEndpoint` (with `rest_url`) | Resolve a gear's REST base URL             |
-| `GetOpenApiSpec`     | `SpecRequest { gear_name }`     | `SpecResponse { openapi_json }`     | **Deprecated** (ADR-0011): the directory no longer stores documents. The edge fetches each gear's document from the instance and verifies it against `openapi_spec_hash`. Kept one release: still answers from the in-memory store, `NOT_FOUND` with a shared backend |
 | `ListAllInstances`   | `ListAllInstancesRequest {}`      | `ListAllInstancesResponse { instances[] }` | Enumerate every registered instance (stable `instance_id` + gear + REST endpoint + `openapi_spec_hash`) for edge discovery — a spec-less snapshot; the OpenAPI document is fetched from the instance's `/.well-known/openapi.json` |
+
+`GetOpenApiSpec` and `RegisterInstanceRequest.openapi_spec` were removed (ADR-0011): the directory never stores OpenAPI documents, only the `openapi_spec_hash`.
 
 #### GatewayProvider Trait
 

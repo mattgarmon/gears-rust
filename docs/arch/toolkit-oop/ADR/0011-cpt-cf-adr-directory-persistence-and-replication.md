@@ -277,10 +277,9 @@ already serves the document unauthenticated at `/.well-known/openapi.json`
   SHA-256 against the advertised hash, and caches it by hash. In Profile 3 the endpoint is a Service VIP, so during a
   rolling upgrade the fetch may land on a pod with a different document; on mismatch the edge keeps the gear's
   previous routes and retries on the next pass.
-* `RegisterInstanceRequest.openapi_spec` and `GetOpenApiSpec` are deprecated. For one release the directory still
-  accepts `openapi_spec` from old workers, hashes it and drops it. `GetOpenApiSpec` keeps working with `memory` and
-  returns `NOT_FOUND` with a shared backend. The edge and the directory ship in the same Flight Control binary, so they
-  upgrade together.
+* `RegisterInstanceRequest.openapi_spec` and the `GetOpenApiSpec` RPC are removed: the directory never stores a
+  document, only the hash. No one-release transition was needed because there are no existing OoP deployments to keep
+  compatible. (Field 6 of `RegisterInstanceRequest` is reserved against reuse.)
 * Registration-time OpenAPI validation (`cpt-cf-binding-fr-openapi-validation`, deferred) belongs to the edge's fetch
   step when it is implemented.
 
